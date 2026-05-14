@@ -81,9 +81,9 @@ feishu/card + feishu/sender    把 AgentEvent → 结果卡片
 4. **事件订阅** → 选择 **长连接模式（WebSocket）**（本项目正是 WS 模式，无需配置回调 URL）
 5. 在事件列表中订阅 **接收消息 `im.message.receive_v1`**
 6. **应用能力 → 机器人** 启用
-7. **版本管理与发布** → 创建版本并发布，等待管理员审批；审批通过后，去飞书客户端与 bot 私聊即可
+7. **版本管理与发布** → 创建版本并发布，等待管理员审批；审批通过后，去飞书客户端与 bot 私聊或拉进群即可
 
-> 说明：本项目只处理 P2P 私聊文本消息，群聊消息会被 event-router 过滤掉。
+> 说明：私聊任何文本都会被处理；群聊里**必须 @bot** 才会响应，普通群聊消息会被忽略。
 
 ---
 
@@ -297,7 +297,7 @@ journalctl -u agent-pipe -f
 1. 检查日志有无 `unauthorized sender` —— `ALLOWED_OPEN_IDS` 没配你的 `open_id`
 2. 确认飞书应用已发布审核通过，且事件订阅选择了 **长连接（WebSocket）** 模式
 3. 确认订阅了 `im.message.receive_v1` 事件
-4. 仅支持 P2P（私聊），群里 @bot 不会响应
+4. 群聊里发消息忘了 @bot —— 群聊必须 @ 才响应，纯私聊则任何文本都接
 
 **`claude exited` 或子进程秒退**
 
