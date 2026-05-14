@@ -14,15 +14,20 @@
 - **多任务并发**：每个任务独立 cwd、独立子进程；Claude 任务进入热进程池（默认 4 个，LRU 淘汰），Codex 任务每轮短命进程不占槽
 - **会话续传**：Claude 用 `--resume`、Codex 用 `exec resume <thread_id>`；任务被淘汰后仍可恢复上下文
 - **线程路由**：回复任务主帖或任务历史消息会自动路由回该任务；无上下文时回退到"当前任务 → 最近活跃任务"
+- **图片/文件附件**：飞书内直接发图片或文件，bot 自动下载到任务 cwd 下的 `inbox/` 目录；30 分钟 TTL 内下条文字消息会带着这些路径一起喂给 agent（`[已附加文件，请读取以下路径后继续处理]\n- /path/...`），适合贴截图、PRD、日志包给 AI 处理
 - **两种任务模式**
   - `sandbox`（默认）：在 `$DATA_DIR/sessions/<name>` 下创建独立沙箱目录
-  - `project`：`/new --cwd` 指向已有项目目录（必须命中白名单）
+  - `project`：`/new --cwd` 指向已有项目目录（必须命中白名单）；`--cwd` 支持模糊匹配关键词（如 `--cwd agent-pipe` 自动定位到 `ALLOWED_CWD_PREFIXES` 下的同名目录）
 - **模型/agent 切换**：
   - `/model <task> <model>` 切模型（当前 Claude / Codex 都会清上下文 respawn；Codex 的保守语义会在 `exec resume --model` 真实行为验证后再放宽）
   - `/agent <task> <claude|codex>` 切 agent（必然清上下文，但保留 cwd 和任务名 — 沙箱里的文件不动，可用于 "Claude 写代码、Codex 来 review" 的接力流程）
-- **安全默认值**：仅白名单 `open_id` 可用，项目模式 cwd 必须落在 `ALLOWED_CWD_PREFIXES` 前缀内
+- **两层权限模型**：
+  - **管理员**（`.env` 里的 `ALLOWED_OPEN_IDS`）：可用 bot + 可改白名单（`/wl add|rm`）
+  - **白名单用户**（SQLite 里的 `whitelist` 表，首次启动从 `.env` 种子）：可用 bot，不可改白名单
+  - 运行时拉测试/产品同学进来：`/wl add @某人`，无需改 `.env` 重启
+- **安全默认值**：项目模式 cwd 必须落在 `ALLOWED_CWD_PREFIXES` 前缀内；非白名单消息静默丢弃
 - **单实例保护**：PID 锁自动 kill 旧进程，避免双跑抢消息
-- **持久化**：SQLite 存任务、事件日志、消息映射；重启后任务列表恢复
+- **持久化**：SQLite 存任务、事件日志、消息映射、白名单；重启后任务列表与白名单都恢复
 
 ---
 
@@ -64,7 +69,7 @@ feishu/card + feishu/sender    把 AgentEvent → 结果卡片
   - [Codex CLI](https://developers.openai.com/codex/cli)（默认从 `PATH` 查找 `codex`，需 ≥ 0.125 以支持 `--skip-git-repo-check`）
 - 用到的 CLI 都需要事先在本地登录一次（首次跑交互登录）
 - 一个飞书自建应用（见下文"飞书应用配置"）
-- 自己的 `open_id`（在飞书开发者后台 → 通讯录 API 里查，或通过 Bot 日志查看）
+- 至少一个管理员的 `open_id`（在飞书开发者后台 → 通讯录 API 里查，或先随便启动 bot 看 `unauthorized sender` 日志拿到 `userId`）
 
 ---
 
@@ -76,6 +81,7 @@ feishu/card + feishu/sender    把 AgentEvent → 结果卡片
    - `im:message`
    - `im:message:send_as_bot`
    - `im:message.receive_v1`（事件订阅用）
+   - `im:resource`（下载用户发来的图片/文件，**附件功能必须**）
    - `im:chat`（可选，用于读取群聊信息）
    - `bot:info`（读取 bot 自身信息，用于启动时自检）
 4. **事件订阅** → 选择 **长连接模式（WebSocket）**（本项目正是 WS 模式，无需配置回调 URL）
@@ -111,8 +117,8 @@ npm run start
 |---|---|---|---|
 | `FEISHU_APP_ID` | 是 | — | 飞书应用 App ID（`cli_` 开头） |
 | `FEISHU_APP_SECRET` | 是 | — | 飞书应用 App Secret |
-| `ALLOWED_OPEN_IDS` | 是 | — | 允许使用 bot 的 `open_id`，逗号分隔；非白名单消息静默丢弃 |
-| `ALLOWED_CWD_PREFIXES` | 否 | 空 | 项目模式 cwd 白名单，冒号分隔；未配置则 `/new --cwd` 全部拒绝 |
+| `ALLOWED_OPEN_IDS` | 是 | — | **管理员** `open_id` 列表，逗号分隔。首次启动会被种子进 SQLite 白名单；运行时拉新人改用 `/wl add`，无需改这里。仅这里列出的人可以执行 `/wl add\|rm` |
+| `ALLOWED_CWD_PREFIXES` | 否 | 空 | 项目模式 cwd 白名单，冒号分隔；未配置则 `/new --cwd` 全部拒绝。支持 `~` 展开 |
 | `DEFAULT_AGENT` | 否 | `claude` | `/new` 不带 `--agent` 时用哪个：`claude` / `codex` |
 | `CLAUDE_PATH` | 否 | `claude` | Claude Code CLI 可执行文件路径 |
 | `CLAUDE_MODEL` | 否 | `claude-opus-4-7[1m]` | Claude 默认模型 |
@@ -129,10 +135,13 @@ npm run start
 ```
 $DATA_DIR/
 ├── bot.pid                  单实例 PID 锁
-├── db.sqlite                任务 / 事件 / 消息映射
+├── db.sqlite                任务 / 事件 / 消息映射 / 白名单
 └── sessions/
     └── <task-name>/         sandbox 模式任务的独立工作目录
+        └── inbox/           飞书发来的图片/文件落盘位置
 ```
+
+> `project` 模式任务的 `inbox/` 会创建在你指定的项目根目录下；如果不希望污染项目，可加进 `.gitignore`。
 
 ---
 
@@ -151,6 +160,9 @@ $DATA_DIR/
 | `/status` | Bot 进程状态（PID、uptime、任务数、hot 槽位） |
 | `/stop <name>` | 向任务发送 SIGINT，中止当前轮 |
 | `/rm <name>` | 删除任务；sandbox 模式连同工作目录一起删 |
+| `/wl` | 列出当前白名单 |
+| `/wl add @某人 [@某人...]` / `/wl add <open_id>` | 加入白名单（仅管理员） |
+| `/wl rm @某人` / `/wl rm <open_id>` | 移出白名单（仅管理员） |
 | `/help` | 命令帮助 |
 
 ### 消息路由规则
@@ -162,6 +174,17 @@ $DATA_DIR/
 3. 当前任务（`/use` 设置）
 4. 最近活跃任务
 5. 都找不到 → 回复提示 `/new` 新建
+
+### 附件流程
+
+发图片或文件给 bot（私聊直发，群聊里 @bot + 附件即可）：
+
+1. bot 找到目标任务后，把附件下载到 `<task.cwd>/inbox/<message_id>-<index>-<filename>`
+2. 回复一条 ack 卡片，列出落盘路径
+3. **30 分钟内**任务收到下条文字消息时，自动在 prompt 头部追加 `[已附加文件，请读取以下路径后继续处理]\n- /path/...\n\n<原文>` 给 agent
+4. 若纯发附件不带文字，则只下载落盘，等下条文字消息触发；超 30 分钟未触发的路径会被丢弃
+
+> 实际效果：贴一张飞书截图 → 回复"看下这个 bug" → Claude/Codex 自动读图分析。
 
 ---
 
@@ -312,6 +335,17 @@ journalctl -u agent-pipe -f
 **想同时跑两个 bot 实例**
 
 别。项目自带 PID 锁，启动时会主动 SIGTERM 旧实例；同时消费同一个 App 的消息会乱序重复。若确有此需求，用不同 `DATA_DIR` 且配不同飞书应用。
+
+**发图片/文件 bot 没反应或下载失败**
+
+1. 飞书应用权限里没勾 `im:resource` —— bot 收到附件事件但调下载 API 会 403
+2. 群聊忘了 @bot —— 群聊里光发图不 @ 会被路由器忽略
+3. 没有任何任务 —— 附件需要落到某个任务的 `inbox/`，先 `/new` 一个
+4. 30 分钟没发后续文字 —— 路径会过期丢弃，再发一次即可
+
+**怎么把测试/产品同学加进来用**
+
+让对方先 @bot 发一句话，从日志拿到 `unauthorized sender` 里的 `userId`（即 `open_id`），然后管理员发 `/wl add ou_xxx`。或者更简单：拉一个有 bot 的群，让对方 @bot 发任意消息，管理员在群里 `/wl add @对方` 即可。
 
 ---
 
