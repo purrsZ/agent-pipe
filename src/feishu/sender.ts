@@ -1,5 +1,32 @@
+import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
+import * as path from 'node:path';
 import type * as lark from '@larksuiteoapi/node-sdk';
 import type { Logger } from '../logger.js';
+
+const MAX_FILE_BYTES = 30 * 1024 * 1024;
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.ico']);
+
+function classifyFileType(filePath: string): 'pdf' | 'doc' | 'xls' | 'ppt' | 'mp4' | 'opus' | 'stream' {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case '.pdf': return 'pdf';
+    case '.doc':
+    case '.docx': return 'doc';
+    case '.xls':
+    case '.xlsx': return 'xls';
+    case '.ppt':
+    case '.pptx': return 'ppt';
+    case '.mp4': return 'mp4';
+    case '.opus': return 'opus';
+    default: return 'stream';
+  }
+}
+
+export function isImagePath(filePath: string): boolean {
+  return IMAGE_EXTS.has(path.extname(filePath).toLowerCase());
+}
 
 export class Sender {
   constructor(private client: lark.Client, private logger: Logger) {}
@@ -83,6 +110,92 @@ export class Sender {
     } catch (err) {
       this.logger.error({ err, messageId, fileKey, type }, 'downloadAttachment failed');
       return false;
+    }
+  }
+
+  private async loadForUpload(
+    filePath: string,
+    maxBytes: number,
+    label: string,
+  ): Promise<{ ok: true; buf: Buffer } | { ok: false; error: string }> {
+    let stat: fs.Stats;
+    try {
+      stat = await fsp.stat(filePath);
+    } catch {
+      return { ok: false, error: `文件不存在: ${filePath}` };
+    }
+    if (!stat.isFile()) return { ok: false, error: `不是普通文件: ${filePath}` };
+    if (stat.size === 0) return { ok: false, error: `空${label}不支持上传: ${filePath}` };
+    if (stat.size > maxBytes) {
+      const mb = Math.floor(maxBytes / (1024 * 1024));
+      return { ok: false, error: `${label}超过 ${mb}MB 上限 (${stat.size} bytes): ${filePath}` };
+    }
+    try {
+      const buf = await fsp.readFile(filePath);
+      return { ok: true, buf };
+    } catch (err) {
+      return { ok: false, error: `读取失败: ${(err as Error).message}` };
+    }
+  }
+
+  async replyFileFromPath(
+    messageId: string,
+    filePath: string,
+  ): Promise<{ ok: boolean; messageId?: string; error?: string }> {
+    const loaded = await this.loadForUpload(filePath, MAX_FILE_BYTES, '文件');
+    if (!loaded.ok) return loaded;
+    try {
+      const upResp: any = await this.client.im.file.create({
+        data: {
+          file_type: classifyFileType(filePath),
+          file_name: path.basename(filePath),
+          file: loaded.buf,
+        },
+      });
+      const fileKey = upResp?.data?.file_key ?? upResp?.file_key;
+      if (!fileKey) return { ok: false, error: 'upload returned no file_key' };
+      const reply: any = await this.client.im.message.reply({
+        path: { message_id: messageId },
+        data: {
+          msg_type: 'file',
+          content: JSON.stringify({ file_key: fileKey }),
+        } as any,
+      });
+      const replyId = reply?.data?.message_id ?? null;
+      return { ok: true, messageId: replyId ?? undefined };
+    } catch (err) {
+      this.logger.error({ err, filePath, messageId }, 'replyFileFromPath failed');
+      return { ok: false, error: (err as Error).message };
+    }
+  }
+
+  async replyImageFromPath(
+    messageId: string,
+    filePath: string,
+  ): Promise<{ ok: boolean; messageId?: string; error?: string }> {
+    const loaded = await this.loadForUpload(filePath, MAX_IMAGE_BYTES, '图片');
+    if (!loaded.ok) return loaded;
+    try {
+      const upResp: any = await this.client.im.image.create({
+        data: {
+          image_type: 'message',
+          image: loaded.buf,
+        },
+      });
+      const imageKey = upResp?.data?.image_key ?? upResp?.image_key;
+      if (!imageKey) return { ok: false, error: 'upload returned no image_key' };
+      const reply: any = await this.client.im.message.reply({
+        path: { message_id: messageId },
+        data: {
+          msg_type: 'image',
+          content: JSON.stringify({ image_key: imageKey }),
+        } as any,
+      });
+      const replyId = reply?.data?.message_id ?? null;
+      return { ok: true, messageId: replyId ?? undefined };
+    } catch (err) {
+      this.logger.error({ err, filePath, messageId }, 'replyImageFromPath failed');
+      return { ok: false, error: (err as Error).message };
     }
   }
 

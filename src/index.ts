@@ -6,7 +6,7 @@ import { Store } from './store.js';
 import { createFeishuClients } from './feishu/client.js';
 import { createDispatcher } from './feishu/event-router.js';
 import { Sender } from './feishu/sender.js';
-import { CommandHandler, CURRENT_TASK_KEY } from './bridge/commands.js';
+import { CommandHandler, currentTaskKey } from './bridge/commands.js';
 import { AgentPool } from './agents/pool.js';
 import { createClaudeFactory } from './agents/claude/runner.js';
 import { createCodexFactory } from './agents/codex/runner.js';
@@ -125,22 +125,22 @@ async function main() {
       }
     }
     if (!task) {
-      const currentId = store.getState(CURRENT_TASK_KEY);
+      const currentId = store.getState(currentTaskKey(msg.chatId));
       if (currentId) {
         task = store.getTask(currentId);
         if (task) {
-          logger.info({ fallbackTo: task.id }, 'routed to current task');
+          logger.info({ fallbackTo: task.id, chatId: msg.chatId }, 'routed to current task in chat');
         }
       }
     }
     if (!task) {
-      task = store.mostRecentTask();
+      task = store.mostRecentTaskInChat(msg.chatId);
       if (task) {
-        logger.info({ fallbackTo: task.id }, 'fallback to most recent task');
+        logger.info({ fallbackTo: task.id, chatId: msg.chatId }, 'fallback to most recent task in chat');
       }
     }
     if (!task) {
-      await sender.reply(msg.messageId, '没有任何任务，用 /new <name> 新建一个。');
+      await sender.reply(msg.messageId, '本会话没有任务，用 /new <name> 新建一个。');
       return;
     }
 

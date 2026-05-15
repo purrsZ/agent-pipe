@@ -85,6 +85,7 @@ export class Store {
       );
     `);
     this.migrateTasksLegacy();
+    this.db.prepare("DELETE FROM state WHERE key = 'current_task_id'").run();
   }
 
   // Backward-compat: older DBs have `cc_session_id` column and no `agent_kind`.
@@ -186,6 +187,18 @@ export class Store {
 
   mostRecentTask(): Task | undefined {
     return this.db.prepare('SELECT * FROM tasks ORDER BY last_active_at DESC LIMIT 1').get() as Task | undefined;
+  }
+
+  mostRecentTaskInChat(chatId: string): Task | undefined {
+    return this.db
+      .prepare('SELECT * FROM tasks WHERE root_chat_id = ? ORDER BY last_active_at DESC LIMIT 1')
+      .get(chatId) as Task | undefined;
+  }
+
+  clearCurrentForTask(taskId: string): void {
+    this.db
+      .prepare("DELETE FROM state WHERE key LIKE 'current_task:%' AND value = ?")
+      .run(taskId);
   }
 
   setRootMsg(id: string, rootMsgId: string, rootChatId: string) {

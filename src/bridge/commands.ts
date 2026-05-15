@@ -7,15 +7,16 @@ import type { Logger } from '../logger.js';
 import type { IncomingMessage } from '../feishu/types.js';
 import type { AgentPool } from '../agents/pool.js';
 import { buildTaskRootCard } from '../feishu/card.js';
+import { isImagePath } from '../feishu/sender.js';
 
 const SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$/;
 
 const HELP_TEXT = [
   '命令:',
   '  /new <name> [--agent claude|codex] [--cwd <path>] [--model <m>]  新建任务（自动切为当前任务）',
-  '  /list                                     任务列表（★ 标出当前）',
-  '  /use <name>                               切换当前任务',
-  '  /use                                      查看当前任务',
+  '  /list                                     任务列表（★ 标出本会话当前）',
+  '  /use <name>                               切换本会话当前任务',
+  '  /use                                      查看本会话当前任务',
   '  /agent <name> <claude|codex>              切换任务 agent（清空上下文，保留 cwd）',
   '  /agent <name>                             查看任务当前 agent',
   '  /model <name> <m>                         切换任务 model',
@@ -23,6 +24,7 @@ const HELP_TEXT = [
   '  /status                                   bot 状态',
   '  /stop <name>                              中止任务当前轮',
   '  /clear <name>                             清空任务会话上下文（下条消息开新会话）',
+  '  /get <path>                               从本会话当前任务的 cwd 取文件/图片回发',
   '  /rm <name>                                删除任务',
   '  /wl                                       列出白名单',
   '  /wl add @某人 [@某人...]                   把 @ 的人加入白名单',
@@ -30,11 +32,11 @@ const HELP_TEXT = [
   '  /wl rm @某人 / <open_id>                   移除',
   '  /help                                     本帮助',
   '',
-  '普通消息（不带 /）：优先发给当前任务；若无当前则发给最近活跃。',
+  '普通消息（不带 /）：优先发给本会话当前任务；若无则发给本会话最近活跃。',
   '回复任务主帖/或任务历史消息：发给该任务。',
 ].join('\n');
 
-export const CURRENT_TASK_KEY = 'current_task_id';
+export const currentTaskKey = (chatId: string): string => `current_task:${chatId}`;
 
 export class CommandHandler {
   constructor(
@@ -69,6 +71,9 @@ export class CommandHandler {
           return;
         case '/clear':
           await this.handleClear(msg, rest);
+          return;
+        case '/get':
+          await this.handleGet(msg, rest);
           return;
         case '/use':
           await this.handleUse(msg, rest);
@@ -163,7 +168,7 @@ export class CommandHandler {
     }
     this.store.setRootMsg(task.id, rootMsgId, msg.chatId);
     this.store.recordTaskMessage(task.id, rootMsgId);
-    this.store.setState(CURRENT_TASK_KEY, task.id);
+    this.store.setState(currentTaskKey(msg.chatId), task.id);
   }
 
   private async handleList(msg: IncomingMessage): Promise<void> {
@@ -172,13 +177,13 @@ export class CommandHandler {
       await this.sender.reply(msg.messageId, '还没有任务。用 /new <name> 新建。');
       return;
     }
-    const current = this.store.getState(CURRENT_TASK_KEY);
+    const current = this.store.getState(currentTaskKey(msg.chatId));
     const lines = tasks.map((t) => {
       const age = humanDuration(Date.now() - t.last_active_at);
       const mark = t.id === current ? '★' : '•';
       return `${mark} ${t.display_name}  [${t.agent_kind}/${t.status}] (${t.mode})  ${age}前活跃\n    ${t.cwd}`;
     });
-    await this.sender.reply(msg.messageId, `任务 ${tasks.length} 个 (★=当前):\n${lines.join('\n')}`);
+    await this.sender.reply(msg.messageId, `任务 ${tasks.length} 个 (★=本会话当前):\n${lines.join('\n')}`);
   }
 
   private async handleStatus(msg: IncomingMessage): Promise<void> {
@@ -196,13 +201,14 @@ export class CommandHandler {
   }
 
   private async handleUse(msg: IncomingMessage, rest: string[]): Promise<void> {
+    const key = currentTaskKey(msg.chatId);
     const name = rest[0];
     if (!name) {
-      const cur = this.store.getState(CURRENT_TASK_KEY);
+      const cur = this.store.getState(key);
       if (!cur) {
-        await this.sender.reply(msg.messageId, '当前未选中任务。用 /use <name> 切换。');
+        await this.sender.reply(msg.messageId, '本会话未选中任务。用 /use <name> 切换。');
       } else {
-        await this.sender.reply(msg.messageId, `当前任务: ${cur}`);
+        await this.sender.reply(msg.messageId, `本会话当前任务: ${cur}`);
       }
       return;
     }
@@ -211,8 +217,8 @@ export class CommandHandler {
       await this.sender.reply(msg.messageId, `任务不存在: ${name}`);
       return;
     }
-    this.store.setState(CURRENT_TASK_KEY, name);
-    await this.sender.reply(msg.messageId, `已切换当前任务 → ${name}`);
+    this.store.setState(key, name);
+    await this.sender.reply(msg.messageId, `本会话已切换当前任务 → ${name}`);
   }
 
   private async handleAgent(msg: IncomingMessage, rest: string[]): Promise<void> {
@@ -427,6 +433,63 @@ export class CommandHandler {
     );
   }
 
+  private resolveTaskForChat(chatId: string) {
+    const currentId = this.store.getState(currentTaskKey(chatId));
+    if (currentId) {
+      const t = this.store.getTask(currentId);
+      if (t) return t;
+    }
+    return this.store.mostRecentTaskInChat(chatId);
+  }
+
+  private async handleGet(msg: IncomingMessage, rest: string[]): Promise<void> {
+    const raw = stripWrappingQuotes(rest.join(' ').trim());
+    if (!raw) {
+      await this.sender.reply(msg.messageId, '用法: /get <path>  (相对路径基于本会话当前任务的 cwd)');
+      return;
+    }
+    const task = this.resolveTaskForChat(msg.chatId);
+    if (!task) {
+      await this.sender.reply(msg.messageId, '本会话没有任务，用 /new <name> 新建一个。');
+      return;
+    }
+    const home = process.env.HOME ?? '';
+    const expanded = raw.startsWith('~') ? path.join(home, raw.slice(1)) : raw;
+    const candidate = path.resolve(path.isAbsolute(expanded) ? expanded : path.join(task.cwd, expanded));
+
+    let realPath: string;
+    let realCwd: string;
+    try {
+      realPath = fs.realpathSync(candidate);
+      realCwd = fs.realpathSync(task.cwd);
+    } catch (err) {
+      await this.sender.reply(
+        msg.messageId,
+        `[${task.display_name}] 路径无法解析: ${(err as Error).message}`,
+      );
+      return;
+    }
+    const inside = realPath === realCwd || realPath.startsWith(realCwd + path.sep);
+    if (!inside) {
+      await this.sender.reply(
+        msg.messageId,
+        `[${task.display_name}] 路径不在任务 cwd 内（解析后）: ${realPath}\n  cwd: ${realCwd}`,
+      );
+      return;
+    }
+    const result = isImagePath(realPath)
+      ? await this.sender.replyImageFromPath(msg.messageId, realPath)
+      : await this.sender.replyFileFromPath(msg.messageId, realPath);
+    if (!result.ok) {
+      await this.sender.reply(msg.messageId, `[${task.display_name}] /get 失败: ${result.error}`);
+      return;
+    }
+    if (result.messageId) {
+      this.store.recordTaskMessage(task.id, result.messageId);
+    }
+    this.store.logEvent(task.id, 'sent_file', undefined, { path: realPath });
+  }
+
   // Intentionally not isAdmin-gated: the whitelist itself is the trust boundary
   // for this bot, so any whitelisted user can rm/clear/agent-switch any task.
   // If you need finer-grained isolation, gate these on isAdmin or add per-task ownership.
@@ -443,9 +506,7 @@ export class CommandHandler {
     }
     this.pool.respawn(name);
     this.store.deleteTask(name);
-    if (this.store.getState(CURRENT_TASK_KEY) === name) {
-      this.store.deleteState(CURRENT_TASK_KEY);
-    }
+    this.store.clearCurrentForTask(name);
     if (task.mode === 'sandbox') {
       try {
         fs.rmSync(task.cwd, { recursive: true, force: true });
@@ -478,6 +539,17 @@ function parseArgs(tokens: string[]): { positional: string[]; flags: Record<stri
     }
   }
   return { positional, flags };
+}
+
+function stripWrappingQuotes(s: string): string {
+  if (s.length >= 2) {
+    const first = s[0];
+    const last = s[s.length - 1];
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return s.slice(1, -1);
+    }
+  }
+  return s;
 }
 
 function humanDuration(ms: number): string {

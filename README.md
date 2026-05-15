@@ -13,8 +13,9 @@
 - **多 agent 支持**：同一个 bot 同时跑 Claude Code（长连接进程 + `--resume` 续传）和 Codex（`codex exec --json` 每轮 spawn + `exec resume` 续传），可在任务间随意切换
 - **多任务并发**：每个任务独立 cwd、独立子进程；Claude 任务进入热进程池（默认 4 个，LRU 淘汰），Codex 任务每轮短命进程不占槽
 - **会话续传**：Claude 用 `--resume`、Codex 用 `exec resume <thread_id>`；任务被淘汰后仍可恢复上下文
-- **线程路由**：回复任务主帖或任务历史消息会自动路由回该任务；无上下文时回退到"当前任务 → 最近活跃任务"
+- **线程路由**：回复任务主帖或任务历史消息会自动路由回该任务；无上下文时回退到"本会话当前任务 → 本会话最近活跃任务"（私聊和每个群独立维护，不会互相覆盖）
 - **图片/文件附件**：飞书内直接发图片或文件，bot 自动下载到任务 cwd 下的 `inbox/` 目录；30 分钟 TTL 内下条文字消息会带着这些路径一起喂给 agent（`[已附加文件，请读取以下路径后继续处理]\n- /path/...`），适合贴截图、PRD、日志包给 AI 处理
+- **bot 回发文件/图片**：`/get <path>` 从当前任务 cwd 取文件回发；按扩展名自动分流，图片走 image 消息（支持 PNG/JPG/GIF/WEBP/BMP/TIFF/ICO，≤10MB），其他走 file 消息（≤30MB）；路径经 realpath 后必须仍在 cwd 内（防 symlink 穿越）
 - **两种任务模式**
   - `sandbox`（默认）：在 `$DATA_DIR/sessions/<name>` 下创建独立沙箱目录
   - `project`：`/new --cwd` 指向已有项目目录（必须命中白名单）；`--cwd` 支持模糊匹配关键词（如 `--cwd agent-pipe` 自动定位到 `ALLOWED_CWD_PREFIXES` 下的同名目录）
@@ -150,13 +151,14 @@ $DATA_DIR/
 | 命令 | 说明 |
 |---|---|
 | `/new <name> [--agent claude\|codex] [--cwd <path>] [--model <m>]` | 新建任务，自动设为当前任务；`name` 需满足 `^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$` |
-| `/list` | 列出全部任务，★ 标出当前；每行带 `[agent/status]` 标签 |
-| `/use <name>` | 切换当前任务；不带参数时查看当前任务 |
+| `/list` | 列出全部任务，★ 标出**本会话**当前；每行带 `[agent/status]` 标签 |
+| `/use <name>` | 切换**本会话**当前任务（每个 chat 独立维护）；不带参数时查看本会话当前 |
 | `/agent <name> <claude\|codex>` | 切换任务 agent；**必然清空上下文**，但保留 cwd 与任务名（沙箱里的文件不变） |
 | `/agent <name>` | 查看任务当前 agent |
 | `/model <name> <m>` | 切换任务模型（当前 Claude / Codex 都会清空上下文 — Codex 是保守实现，因为尚未确认 `exec resume --model` 真能换模型，等真机验证后可放宽） |
 | `/model <name>` | 查看任务当前模型 |
 | `/clear <name>` | 清空任务会话上下文，下条消息开全新会话；文件保留 |
+| `/get <path>` | 从本会话当前任务的 cwd 取文件或图片回发；相对路径基于 task.cwd，绝对路径必须仍在 cwd 内（realpath 后再检查，防 symlink 穿越） |
 | `/status` | Bot 进程状态（PID、uptime、任务数、hot 槽位） |
 | `/stop <name>` | 向任务发送 SIGINT，中止当前轮 |
 | `/rm <name>` | 删除任务；sandbox 模式连同工作目录一起删 |
@@ -171,9 +173,11 @@ $DATA_DIR/
 
 1. 消息的 `root_id`（线程根）对应的任务
 2. 消息的 `parent_id`（父消息）对应的任务
-3. 当前任务（`/use` 设置）
-4. 最近活跃任务
+3. **本会话**当前任务（`/use` 在本 chat 设置的）
+4. **本会话**最近活跃任务（按 `root_chat_id = msg.chat_id` 过滤）
 5. 都找不到 → 回复提示 `/new` 新建
+
+> "本会话"按 `chat_id` 隔离：私聊和每个群各自维护当前任务，不会跨 chat 相互覆盖。跨 chat 切到已有任务用 `/use <name>` 显式切换。
 
 ### 附件流程
 
