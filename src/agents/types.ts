@@ -5,14 +5,15 @@ import type { Store } from '../store.js';
 export type AgentKind = 'claude' | 'codex';
 
 /**
- * Reserved for incremental card updates (live tool-use indicators while a turn is
- * running). Runners already invoke these on every tool start/end; nothing in the
- * dispatch path subscribes yet — index.ts currently passes no callbacks and only
- * renders the final result card. Wire when adding "Claude is editing X.ts…" UI.
+ * Live progress hooks invoked by runners during a turn. index.ts subscribes these
+ * to drive an incrementally-updated "处理中" card (tool activity + streamed text).
+ * onText carries the full assistant text so far — Claude streams it incrementally,
+ * Codex delivers it once when the agent_message completes.
  */
 export interface ProgressCallbacks {
   onToolUse?: (taskId: string, tool: { name: string; input?: string }) => void;
   onToolResult?: (taskId: string, r: { isError?: boolean }) => void;
+  onText?: (taskId: string, fullText: string) => void;
 }
 
 export interface TurnResult {

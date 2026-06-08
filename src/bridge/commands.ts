@@ -24,6 +24,7 @@ const HELP_TEXT = [
   '  /status                                   bot 状态',
   '  /stop <name>                              中止任务当前轮',
   '  /clear <name>                             清空任务会话上下文（下条消息开新会话）',
+  '  /compact <name>                           压缩上下文为摘要后重置会话（保留要点）',
   '  /get <path>                               从本会话当前任务的 cwd 取文件/图片回发',
   '  /rm <name>                                删除任务',
   '  /wl                                       列出白名单',
@@ -45,6 +46,7 @@ export class CommandHandler {
     private config: Config,
     private logger: Logger,
     private pool: AgentPool,
+    private onCompact: (taskId: string, replyMsgId: string) => void,
   ) {}
 
   private isAdmin(openId: string): boolean {
@@ -71,6 +73,9 @@ export class CommandHandler {
           return;
         case '/clear':
           await this.handleClear(msg, rest);
+          return;
+        case '/compact':
+          await this.handleCompact(msg, rest);
           return;
         case '/get':
           await this.handleGet(msg, rest);
@@ -431,6 +436,22 @@ export class CommandHandler {
       msg.messageId,
       `[${name}] 已清空会话上下文，下条消息开全新会话。`,
     );
+  }
+
+  private async handleCompact(msg: IncomingMessage, rest: string[]): Promise<void> {
+    const name = rest[0];
+    if (!name) {
+      await this.sender.reply(msg.messageId, '用法: /compact <name>');
+      return;
+    }
+    const task = this.store.getTask(name);
+    if (!task) {
+      await this.sender.reply(msg.messageId, `任务不存在: ${name}`);
+      return;
+    }
+    // Busy handling + the summarize→reset turn run in index.ts (shares the task's
+    // serial slot so /compact can't race an in-flight turn).
+    this.onCompact(name, msg.messageId);
   }
 
   private resolveTaskForChat(chatId: string) {

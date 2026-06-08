@@ -11,6 +11,19 @@ import { AgentPool } from './agents/pool.js';
 import { createClaudeFactory } from './agents/claude/runner.js';
 import { createCodexFactory } from './agents/codex/runner.js';
 import { buildResultCard, buildProcessingCard } from './feishu/card.js';
+import type { ProgressCallbacks } from './agents/types.js';
+import { StreamingCard } from './feishu/stream-card.js';
+
+const COMPACT_PROMPT = [
+  '请把我们到目前为止的完整对话压缩成一份结构化摘要，供新会话继续使用。',
+  '务必覆盖：',
+  '1. 用户的目标与需求；',
+  '2. 关键决策与结论（含放弃的方案及原因）；',
+  '3. 已完成的工作：改动过的文件、运行过的命令及其结果；',
+  '4. 进行中的任务与下一步计划；',
+  '5. 重要的上下文、约束与未决事项。',
+  '只输出摘要正文，不要任何寒暄或额外说明。',
+].join('\n');
 
 async function fetchBotOpenId(client: any, logger: Logger): Promise<string> {
   for (let i = 0; i < 3; i++) {
@@ -82,7 +95,6 @@ async function main() {
     store,
     logger,
   );
-  const commands = new CommandHandler(store, sender, config, logger, pool);
   const runningTasks = new Set<string>();
   const botStartTime = Date.now();
 
@@ -97,6 +109,159 @@ async function main() {
   };
   const sanitizeName = (name: string): string =>
     name.replace(/[/\\\x00-\x1f]/g, '_').replace(/^\.+/, '_').slice(0, 120) || 'file';
+
+  // ---- per-task serial execution: queue while busy, drain after each turn ----
+  type TurnInput = { chatId: string; messageId: string; text: string };
+  const MAX_QUEUE = 10;
+  const queues = new Map<string, TurnInput[]>();
+  const enqueue = (taskId: string, input: TurnInput): boolean => {
+    const list = queues.get(taskId) ?? [];
+    if (list.length >= MAX_QUEUE) return false;
+    list.push(input);
+    queues.set(taskId, list);
+    return true;
+  };
+  const dequeue = (taskId: string): TurnInput | undefined => {
+    const list = queues.get(taskId);
+    if (!list || list.length === 0) return undefined;
+    const next = list.shift();
+    if (list.length === 0) queues.delete(taskId);
+    return next;
+  };
+
+  const compactKey = (taskId: string): string => `compact_summary:${taskId}`;
+
+  // Run one turn for a task: processing card → throttled streaming progress → result
+  // card. Injects any pending compact summary + attachment paths into the prompt.
+  // Never throws — failures are reported as a reply so the drain loop keeps going.
+  async function runOneTurn(taskId: string, input: TurnInput): Promise<void> {
+    const task = store.getTask(taskId);
+    if (!task) return;
+    let ackCardId: string | null = null;
+    try {
+      ackCardId = await sender.replyCard(
+        input.messageId,
+        buildProcessingCard(task.display_name, task.agent_kind),
+      );
+      if (ackCardId) store.recordTaskMessage(task.id, ackCardId);
+
+      let prompt = input.text;
+      const pendingPaths = drainPending(input.chatId);
+      if (pendingPaths.length > 0) {
+        prompt = `[已附加文件，请读取以下路径后继续处理]\n${pendingPaths
+          .map((p) => `- ${p}`)
+          .join('\n')}\n\n${prompt}`;
+      }
+      const summary = store.getState(compactKey(task.id));
+      if (summary) {
+        store.deleteState(compactKey(task.id));
+        prompt = `[以下是之前对话的压缩摘要，请基于它继续]\n${summary}\n\n${prompt}`;
+      }
+
+      const streaming = ackCardId
+        ? new StreamingCard(sender, ackCardId, task.display_name, task.agent_kind)
+        : null;
+      const callbacks: ProgressCallbacks | undefined = streaming
+        ? {
+            onToolUse: (_id, t) => streaming.onToolUse(t.name),
+            onText: (_id, full) => streaming.onText(full),
+          }
+        : undefined;
+
+      let result;
+      try {
+        result = await pool.send(task, prompt, callbacks);
+      } finally {
+        await streaming?.stop();
+      }
+
+      const card = buildResultCard(task.display_name, result);
+      if (ackCardId) {
+        const ok = await sender.updateCard(ackCardId, card);
+        if (!ok) {
+          const replyId = await sender.replyCard(input.messageId, card);
+          if (replyId) store.recordTaskMessage(task.id, replyId);
+        }
+      } else {
+        const replyId = await sender.replyCard(input.messageId, card);
+        if (replyId) store.recordTaskMessage(task.id, replyId);
+      }
+    } catch (err) {
+      logger.error({ err, taskId: task.id }, 'task execution failed');
+      const failId = await sender.reply(
+        input.messageId,
+        `[${task.display_name}] 执行失败: ${(err as Error).message}`,
+      );
+      if (failId) store.recordTaskMessage(task.id, failId);
+    }
+  }
+
+  // Hold the task's serial slot, run the turn, then drain queued messages FIFO.
+  async function runWithDrain(taskId: string, input: TurnInput): Promise<void> {
+    runningTasks.add(taskId);
+    try {
+      let cur: TurnInput | undefined = input;
+      while (cur) {
+        await runOneTurn(taskId, cur);
+        cur = dequeue(taskId);
+      }
+    } finally {
+      runningTasks.delete(taskId);
+    }
+  }
+
+  // /compact: drive the agent to emit a structured summary, persist it, reset the
+  // session, and let the next message resume from the summary. Shares runningTasks so
+  // it can't race a normal turn; drains anything queued during the compact turn.
+  async function runCompact(taskId: string, replyMsgId: string): Promise<void> {
+    const task = store.getTask(taskId);
+    if (!task) {
+      await sender.reply(replyMsgId, `任务不存在: ${taskId}`);
+      return;
+    }
+    if (runningTasks.has(taskId)) {
+      await sender.reply(replyMsgId, `[${task.display_name}] 正忙，等当前消息处理完再 /compact`);
+      return;
+    }
+    runningTasks.add(taskId);
+    try {
+      await sender.reply(replyMsgId, `[${task.display_name}] 正在压缩上下文…`);
+      const r = await pool.send(task, COMPACT_PROMPT);
+      if (r.error) {
+        await sender.reply(replyMsgId, `[${task.display_name}] 压缩失败: ${r.error}`);
+        return;
+      }
+      const summary = (r.fullText ?? '').trim();
+      if (!summary) {
+        await sender.reply(replyMsgId, `[${task.display_name}] 压缩失败: 摘要为空，会话未重置`);
+        return;
+      }
+      store.setState(compactKey(taskId), summary);
+      store.clearAgentSessionId(taskId);
+      pool.respawn(taskId);
+      await sender.reply(
+        replyMsgId,
+        `[${task.display_name}] 已压缩上下文，原会话重置，下条消息会带着摘要继续。`,
+      );
+    } catch (err) {
+      await sender.reply(replyMsgId, `[${task.display_name}] 压缩失败: ${(err as Error).message}`);
+    } finally {
+      runningTasks.delete(taskId);
+      const next = dequeue(taskId);
+      if (next) void runWithDrain(taskId, next);
+    }
+  }
+
+  const commands = new CommandHandler(
+    store,
+    sender,
+    config,
+    logger,
+    pool,
+    (taskId, replyMsgId) => {
+      void runCompact(taskId, replyMsgId);
+    },
+  );
 
   const dispatcher = createDispatcher(botOpenId, logger, botStartTime, async (msg) => {
     if (msg.chatType === 'group' && !msg.isMentioned) {
@@ -182,44 +347,19 @@ async function main() {
       if (!msg.text) return;
     }
 
+    const input: TurnInput = { chatId: msg.chatId, messageId: msg.messageId, text: msg.text };
     if (runningTasks.has(task.id)) {
-      await sender.reply(msg.messageId, `[${task.display_name}] 正忙，请等当前消息处理完`);
+      const ok = enqueue(task.id, input);
+      const depth = queues.get(task.id)?.length ?? 0;
+      await sender.reply(
+        msg.messageId,
+        ok
+          ? `[${task.display_name}] 正忙，已排队（队列第 ${depth} 位），处理完会自动接着跑。`
+          : `[${task.display_name}] 队列已满（上限 ${MAX_QUEUE}），请稍后再发。`,
+      );
       return;
     }
-    runningTasks.add(task.id);
-    try {
-      const ackCardId = await sender.replyCard(
-        msg.messageId,
-        buildProcessingCard(task.display_name, task.agent_kind),
-      );
-      if (ackCardId) store.recordTaskMessage(task.id, ackCardId);
-      const pendingPaths = drainPending(msg.chatId);
-      const prompt =
-        pendingPaths.length > 0
-          ? `[已附加文件，请读取以下路径后继续处理]\n${pendingPaths.map((p) => `- ${p}`).join('\n')}\n\n${msg.text}`
-          : msg.text;
-      const result = await pool.send(task, prompt);
-      const card = buildResultCard(task.display_name, result);
-      if (ackCardId) {
-        const ok = await sender.updateCard(ackCardId, card);
-        if (!ok) {
-          const replyId = await sender.replyCard(msg.messageId, card);
-          if (replyId) store.recordTaskMessage(task.id, replyId);
-        }
-      } else {
-        const replyId = await sender.replyCard(msg.messageId, card);
-        if (replyId) store.recordTaskMessage(task.id, replyId);
-      }
-    } catch (err) {
-      logger.error({ err, taskId: task.id }, 'task execution failed');
-      const failId = await sender.reply(
-        msg.messageId,
-        `[${task.display_name}] 执行失败: ${(err as Error).message}`,
-      );
-      if (failId) store.recordTaskMessage(task.id, failId);
-    } finally {
-      runningTasks.delete(task.id);
-    }
+    void runWithDrain(task.id, input);
   });
 
   await wsClient.start({ eventDispatcher: dispatcher });

@@ -246,6 +246,11 @@ class ClaudeRunner implements Runner {
           this.deps.logger.info({ taskId: this.taskId, sessionId: this.sessionId }, 'claude ready');
         }
         break;
+      case 'text':
+        // parser already appended this delta to fullText; relay the running total
+        // so the streaming card can show assistant text as it arrives.
+        inflight?.callbacks?.onText?.(this.taskId, this.parser.fullText);
+        break;
       case 'tool_use':
         if (inflight) inflight.toolCount++;
         this.deps.store.logEvent(this.taskId, 'tool_start', e.name, { input: e.input });

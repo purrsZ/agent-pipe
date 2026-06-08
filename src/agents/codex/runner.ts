@@ -285,7 +285,10 @@ class CodexRunner implements Runner {
       case 'ready':
         break;
       case 'text':
-        // CodexParser fully replaces fullText on agent_message; nothing to relay.
+        // CodexParser replaces fullText wholesale on agent_message (one-shot, not
+        // incremental). Relay it so the streaming card shows the answer a beat before
+        // the final result card lands.
+        inflight.callbacks?.onText?.(this.taskId, inflight.parser.fullText);
         break;
       case 'tool_use':
         inflight.toolCount++;

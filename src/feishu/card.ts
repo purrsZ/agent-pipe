@@ -101,7 +101,7 @@ export function buildResultCard(taskName: string, r: TurnResult): object {
   if (ctxPct !== null && ctxPct > 55) {
     elements.push({
       tag: 'markdown',
-      content: `<font color="orange">⚠ 上下文已用 ${ctxPct.toFixed(1)}%，建议尽快用 \`/clear ${taskName}\` 清空会话以避免触发压缩。</font>`,
+      content: `<font color="orange">⚠ 上下文已用 ${ctxPct.toFixed(1)}%，建议用 \`/compact ${taskName}\`（压缩保留要点）或 \`/clear ${taskName}\`（彻底清空）。</font>`,
     });
   }
 
@@ -113,6 +113,54 @@ export function buildResultCard(taskName: string, r: TurnResult): object {
         tag: 'plain_text',
         content: `[${taskName}] ${error ? '失败' : '完成'}`,
       },
+    },
+    body: { direction: 'vertical', padding: '12px', elements },
+  };
+}
+
+const STREAM_PREVIEW_MAX = 2000;
+
+/**
+ * In-progress card refreshed during a turn (tool activity + streamed text preview).
+ * Distinct from buildResultCard: blue header, truncated preview, no token meta —
+ * the final result card overwrites this once the turn completes.
+ */
+export function buildStreamingCard(
+  taskName: string,
+  agentKind: string,
+  s: { elapsedMs: number; toolCount: number; currentTool: string | null; text: string },
+): object {
+  const who = agentKind === 'codex' ? 'Codex' : 'Claude';
+  const activity = s.currentTool
+    ? `正在调用 \`${s.currentTool}\`…`
+    : `${who} 正在思考…`;
+  const elements: object[] = [
+    { tag: 'markdown', content: `<font color="grey">${activity}</font>` },
+  ];
+
+  const preview = (s.text ?? '').trim();
+  if (preview) {
+    const shown =
+      preview.length > STREAM_PREVIEW_MAX
+        ? preview.slice(0, STREAM_PREVIEW_MAX) + ' …'
+        : preview;
+    elements.push({ tag: 'hr' });
+    elements.push({ tag: 'markdown', content: shown });
+  }
+
+  const metaParts = [`${Math.round(s.elapsedMs / 1000)}s`];
+  if (s.toolCount > 0) metaParts.push(`${s.toolCount} tools`);
+  elements.push({ tag: 'hr' });
+  elements.push({
+    tag: 'markdown',
+    content: `<font color="grey">${metaParts.join(' · ')} · 处理中…</font>`,
+  });
+
+  return {
+    schema: '2.0',
+    header: {
+      template: 'blue',
+      title: { tag: 'plain_text', content: `[${taskName}] 处理中…` },
     },
     body: { direction: 'vertical', padding: '12px', elements },
   };
