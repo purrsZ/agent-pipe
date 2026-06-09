@@ -214,4 +214,55 @@ export class Sender {
       return null;
     }
   }
+
+  /** Fetch a message by id (for replied-message injection). Best-effort: null on failure. */
+  async getMessage(messageId: string): Promise<{
+    msgType: string;
+    text: string;
+    senderId: string;
+    senderType: string;
+    createTime: string;
+    imageKey?: string;
+    fileKey?: string;
+    fileName?: string;
+  } | null> {
+    try {
+      const resp: any = await this.client.im.message.get({
+        path: { message_id: messageId },
+      });
+      const item = resp?.data?.items?.[0];
+      if (!item) return null;
+      const msgType: string = item.msg_type ?? '';
+      let text = '';
+      let imageKey: string | undefined;
+      let fileKey: string | undefined;
+      let fileName: string | undefined;
+      try {
+        const body = JSON.parse(item.body?.content ?? '{}');
+        if (msgType === 'text') {
+          text = String(body.text ?? '').replace(/@_user_\w+/g, '').trim();
+        } else if (msgType === 'image') {
+          imageKey = body.image_key;
+        } else if (msgType === 'file') {
+          fileKey = body.file_key;
+          fileName = body.file_name;
+        }
+      } catch {
+        /* non-JSON / unsupported body — leave text empty, type noted by caller */
+      }
+      return {
+        msgType,
+        text,
+        senderId: item.sender?.id ?? '',
+        senderType: item.sender?.sender_type ?? '',
+        createTime: String(item.create_time ?? ''),
+        imageKey,
+        fileKey,
+        fileName,
+      };
+    } catch (err) {
+      this.logger.error({ err, messageId }, 'getMessage failed');
+      return null;
+    }
+  }
 }

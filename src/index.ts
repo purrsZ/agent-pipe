@@ -10,8 +10,9 @@ import { CommandHandler, currentTaskKey } from './bridge/commands.js';
 import { AgentPool } from './agents/pool.js';
 import { createClaudeFactory } from './agents/claude/runner.js';
 import { createCodexFactory } from './agents/codex/runner.js';
-import { buildResultCard, buildProcessingCard } from './feishu/card.js';
+import { buildResultCard, buildProcessingCard, buildStatusCard } from './feishu/card.js';
 import type { ProgressCallbacks } from './agents/types.js';
+import type { Task } from './store.js';
 import { StreamingCard } from './feishu/stream-card.js';
 
 const COMPACT_PROMPT = [
@@ -111,9 +112,10 @@ async function main() {
     name.replace(/[/\\\x00-\x1f]/g, '_').replace(/^\.+/, '_').slice(0, 120) || 'file';
 
   // ---- per-task serial execution: queue while busy, drain after each turn ----
-  type TurnInput = { chatId: string; messageId: string; text: string };
+  type TurnInput = { chatId: string; messageId: string; text: string; parentId?: string };
   const MAX_QUEUE = 10;
   const queues = new Map<string, TurnInput[]>();
+  const cancelledTasks = new Set<string>();
   const enqueue = (taskId: string, input: TurnInput): boolean => {
     const list = queues.get(taskId) ?? [];
     if (list.length >= MAX_QUEUE) return false;
@@ -128,12 +130,62 @@ async function main() {
     if (list.length === 0) queues.delete(taskId);
     return next;
   };
+  const clearQueue = (taskId: string): number => {
+    const n = queues.get(taskId)?.length ?? 0;
+    queues.delete(taskId);
+    return n;
+  };
+  // /stop: 清空排队 + 中断当前轮，并标记取消，让 runOneTurn 收尾成"已中断"卡。
+  const requestStop = (taskId: string): { aborted: boolean; dropped: number } => {
+    const dropped = clearQueue(taskId);
+    const aborted = pool.abort(taskId);
+    if (aborted) cancelledTasks.add(taskId);
+    return { aborted, dropped };
+  };
 
   const compactKey = (taskId: string): string => `compact_summary:${taskId}`;
 
+  const escapeAttr = (v: string): string =>
+    v
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+
+  // 拉取被引用消息渲染成 <replied_message> 块；图片/文件下载进任务 inbox 并带上本地路径。
+  // best-effort：拉取失败返回 null（跳过注入，不阻塞本轮）。
+  async function buildRepliedBlock(parentId: string, task: Task): Promise<string | null> {
+    const m = await sender.getMessage(parentId);
+    if (!m) return null;
+    const lines: string[] = [];
+    if (m.text) lines.push(m.text);
+    if (m.imageKey || m.fileKey) {
+      const inboxDir = path.join(task.cwd, 'inbox');
+      try {
+        fs.mkdirSync(inboxDir, { recursive: true });
+      } catch (err) {
+        logger.warn({ err, inboxDir }, 'mkdir inbox for replied attachment failed');
+      }
+      if (m.imageKey) {
+        const dest = path.join(inboxDir, `replied-${parentId}.png`);
+        const ok = await sender.downloadAttachment(parentId, m.imageKey, 'image', dest);
+        lines.push(ok ? `📎 引用图片: ${dest}` : '📎 引用图片: (下载失败)');
+      }
+      if (m.fileKey) {
+        const dest = path.join(inboxDir, `replied-${parentId}-${sanitizeName(m.fileName ?? 'file')}`);
+        const ok = await sender.downloadAttachment(parentId, m.fileKey, 'file', dest);
+        lines.push(ok ? `📎 引用文件: ${dest}` : `📎 引用文件: (下载失败) ${m.fileName ?? ''}`);
+      }
+    }
+    if (lines.length === 0) lines.push(`(${m.msgType || '未知类型'} 消息，无文本)`);
+    const attrs = [`sender_type="${escapeAttr(m.senderType || 'unknown')}"`];
+    if (m.createTime) attrs.push(`sent_at="${escapeAttr(m.createTime)}"`);
+    return `<replied_message ${attrs.join(' ')}>\n${lines.join('\n')}\n</replied_message>`;
+  }
+
   // Run one turn for a task: processing card → throttled streaming progress → result
-  // card. Injects any pending compact summary + attachment paths into the prompt.
-  // Never throws — failures are reported as a reply so the drain loop keeps going.
+  // card. Injects replied-message + pending compact summary + attachment paths into
+  // the prompt. Never throws — failures are reported as a reply/card so drain keeps going.
   async function runOneTurn(taskId: string, input: TurnInput): Promise<void> {
     const task = store.getTask(taskId);
     if (!task) return;
@@ -151,6 +203,15 @@ async function main() {
         prompt = `[已附加文件，请读取以下路径后继续处理]\n${pendingPaths
           .map((p) => `- ${p}`)
           .join('\n')}\n\n${prompt}`;
+      }
+      // 引用消息注入：仅当用户回复的是「非本任务线程内」的消息（外部内容）时注入；
+      // 回复本任务自己的卡/历史（已在 agent 上下文里）则跳过，避免冗余 token。
+      if (input.parentId) {
+        const owner = store.getTaskByMessageId(input.parentId);
+        if (!owner || owner.id !== task.id) {
+          const block = await buildRepliedBlock(input.parentId, task);
+          if (block) prompt = `${block}\n\n${prompt}`;
+        }
       }
       const summary = store.getState(compactKey(task.id));
       if (summary) {
@@ -186,13 +247,23 @@ async function main() {
         const replyId = await sender.replyCard(input.messageId, card);
         if (replyId) store.recordTaskMessage(task.id, replyId);
       }
+      cancelledTasks.delete(task.id); // consume any stale /stop flag on success
     } catch (err) {
-      logger.error({ err, taskId: task.id }, 'task execution failed');
-      const failId = await sender.reply(
-        input.messageId,
-        `[${task.display_name}] 执行失败: ${(err as Error).message}`,
-      );
-      if (failId) store.recordTaskMessage(task.id, failId);
+      const cancelled = cancelledTasks.delete(task.id);
+      if (cancelled) {
+        logger.info({ taskId: task.id }, 'task turn cancelled via /stop');
+      } else {
+        logger.error({ err, taskId: task.id }, 'task execution failed');
+      }
+      const statusCard = cancelled
+        ? buildStatusCard(task.display_name, 'cancelled', '已手动中断当前轮。')
+        : buildStatusCard(task.display_name, 'error', (err as Error).message);
+      let patched = false;
+      if (ackCardId) patched = await sender.updateCard(ackCardId, statusCard);
+      if (!patched) {
+        const replyId = await sender.replyCard(input.messageId, statusCard);
+        if (replyId) store.recordTaskMessage(task.id, replyId);
+      }
     }
   }
 
@@ -246,6 +317,7 @@ async function main() {
     } catch (err) {
       await sender.reply(replyMsgId, `[${task.display_name}] 压缩失败: ${(err as Error).message}`);
     } finally {
+      cancelledTasks.delete(taskId); // /stop during compact must not leak the flag
       runningTasks.delete(taskId);
       const next = dequeue(taskId);
       if (next) void runWithDrain(taskId, next);
@@ -261,6 +333,7 @@ async function main() {
     (taskId, replyMsgId) => {
       void runCompact(taskId, replyMsgId);
     },
+    (taskId) => requestStop(taskId),
   );
 
   const dispatcher = createDispatcher(botOpenId, logger, botStartTime, async (msg) => {
@@ -347,7 +420,12 @@ async function main() {
       if (!msg.text) return;
     }
 
-    const input: TurnInput = { chatId: msg.chatId, messageId: msg.messageId, text: msg.text };
+    const input: TurnInput = {
+      chatId: msg.chatId,
+      messageId: msg.messageId,
+      text: msg.text,
+      parentId: msg.parentId,
+    };
     if (runningTasks.has(task.id)) {
       const ok = enqueue(task.id, input);
       const depth = queues.get(task.id)?.length ?? 0;

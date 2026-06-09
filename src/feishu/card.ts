@@ -165,3 +165,31 @@ export function buildStreamingCard(
     body: { direction: 'vertical', padding: '12px', elements },
   };
 }
+
+/**
+ * Terminal card for a turn that ended by failure or manual /stop. Patches the stuck
+ * "处理中" card into a clear end state instead of leaving it spinning forever.
+ */
+export function buildStatusCard(
+  taskName: string,
+  kind: 'error' | 'cancelled',
+  message: string,
+): object {
+  const isCancel = kind === 'cancelled';
+  const content = isCancel ? message : `**执行出错**\n\n\`\`\`\n${message}\n\`\`\``;
+  return {
+    schema: '2.0',
+    header: {
+      template: isCancel ? 'grey' : 'red',
+      title: {
+        tag: 'plain_text',
+        content: `[${taskName}] ${isCancel ? '已中断' : '失败'}`,
+      },
+    },
+    body: {
+      direction: 'vertical',
+      padding: '12px',
+      elements: [{ tag: 'markdown', content }],
+    },
+  };
+}

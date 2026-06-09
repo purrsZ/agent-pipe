@@ -47,6 +47,7 @@ export class CommandHandler {
     private logger: Logger,
     private pool: AgentPool,
     private onCompact: (taskId: string, replyMsgId: string) => void,
+    private onStop: (taskId: string) => { aborted: boolean; dropped: number },
   ) {}
 
   private isAdmin(openId: string): boolean {
@@ -408,10 +409,13 @@ export class CommandHandler {
       await this.sender.reply(msg.messageId, `任务不存在: ${name}`);
       return;
     }
-    const ok = this.pool.abort(name);
+    const { aborted, dropped } = this.onStop(name);
+    const parts: string[] = [];
+    if (aborted) parts.push('已中断当前轮');
+    if (dropped > 0) parts.push(`清空排队 ${dropped} 条`);
     await this.sender.reply(
       msg.messageId,
-      ok ? `已向任务 ${name} 发送 SIGINT，当前轮中断` : `任务 ${name} 没有运行中的进程`,
+      `[${name}] ${parts.length > 0 ? parts.join('，') : '没有运行中的进程，也没有排队消息'}`,
     );
   }
 
