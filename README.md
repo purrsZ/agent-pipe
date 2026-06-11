@@ -194,7 +194,19 @@ $DATA_DIR/
 
 ## 部署教程
 
-项目是纯 Node.js 长连接进程，部署无需公网端口。推荐三种方式：
+项目是纯 Node.js 长连接进程，部署无需公网端口。推荐四种方式：
+
+### 方式 0：自带守护脚本（零依赖，最快上手）
+
+```bash
+./scripts/run-forever.sh
+# 或自定义日志位置：
+AGENT_PIPE_LOG=~/agent-pipe.log ./scripts/run-forever.sh
+```
+
+崩溃（非零退出）自动重启：3s 起退避倍增至 60s，稳定运行 60s 后重置；
+`Ctrl-C` / SIGTERM 会透传给 bot 优雅退出，且不再拉起。不处理开机自启——
+需要开机自启用下面的 pm2 / launchd / systemd。
 
 ### 方式 A：`pm2`（跨平台，推荐）
 
@@ -393,10 +405,30 @@ agent-pipe/
 | `npm run dev` | tsx watch 热重载（开发用） |
 | `npm run start` | tsx 直接运行（不编译，生产也能跑但略慢） |
 | `npm run build` | `tsc` 编译到 `dist/` |
-| `npm run typecheck` | 仅类型检查 |
+| `npm run typecheck` | 类型检查（src + tests） |
+| `npm test` | 跑全部测试（vitest） |
+| `npm run lint` | Biome lint + 格式检查 |
+| `npm run lint:fix` | Biome 自动修复 |
+| `npm run check` | typecheck + lint + test 一把梭（CI 同款） |
+
+CI：`.github/workflows/ci.yml`，push / PR 自动跑 typecheck → lint → test → build。
+
+---
+
+## 运维与可靠性
+
+- **崩溃自愈**：未捕获异常 / 未处理 Promise rejection 会记 `fatal` 日志后以退出码 1
+  退出，交给守护层（run-forever.sh / pm2 / launchd / systemd）拉起新实例；
+  SIGINT/SIGTERM 优雅关闭则退出码 0，守护层不再重启。
+- **心跳**：每 5 分钟打一条 `heartbeat` 日志（uptime / 内存 / 在跑轮次 / 排队数 /
+  hot runner 数）。日志静默超过 5 分钟即可判断进程异常。
+- **数据库备份**：启动时（12 小时内已有新备份则跳过）+ 每 24 小时，在线备份
+  `$DATA_DIR/db.sqlite` 到 `$DATA_DIR/backups/db-YYYYMMDD-HHmmss.sqlite`，
+  保留最近 7 份。恢复：停掉 bot，把某份备份复制为 `$DATA_DIR/db.sqlite`，重启。
 
 ---
 
 ## 状态
 
-v0.1.0。核心功能可用；暂无自动化测试，生产使用前建议补 integration test 与监控告警。
+v0.1.0。核心功能可用；已有 vitest 单测（store / backup / config / 流式卡片节流 /
+进程生命周期）、Biome 门禁与 GitHub Actions CI。集成测试与外部监控告警待补。

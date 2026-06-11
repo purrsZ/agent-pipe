@@ -1,11 +1,6 @@
 import type { Logger } from '../logger.js';
-import type { Store, Task, AgentKind } from '../store.js';
-import type {
-  AgentFactory,
-  ProgressCallbacks,
-  Runner,
-  TurnResult,
-} from './types.js';
+import type { AgentKind, Store, Task } from '../store.js';
+import type { AgentFactory, ProgressCallbacks, Runner, TurnResult } from './types.js';
 
 export interface AgentPoolConfig {
   maxHot: number;
@@ -41,11 +36,7 @@ export class AgentPool {
     return this.runners.size;
   }
 
-  async send(
-    task: Task,
-    text: string,
-    callbacks?: ProgressCallbacks,
-  ): Promise<TurnResult> {
+  async send(task: Task, text: string, callbacks?: ProgressCallbacks): Promise<TurnResult> {
     let runner = this.runners.get(task.id);
 
     // If the cached runner is for a different kind (after /agent switch), drop it.
@@ -64,7 +55,10 @@ export class AgentPool {
       // task row shouldn't punish a healthy hot Claude runner by booting it.
       const factory = this.factoryFor(task.agent_kind);
       if (this.hotCount() >= this.cfg.maxHot) this.evictLRU();
-      runner = factory.createRunner(task, { store: this.store, logger: this.logger });
+      runner = factory.createRunner(task, {
+        store: this.store,
+        logger: this.logger,
+      });
       this.runners.set(task.id, runner);
     } else {
       // refresh snapshot — model/agent_kind/cwd may have changed between turns
