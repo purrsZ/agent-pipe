@@ -13,7 +13,12 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "build": "tsc",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit -p tsconfig.tests.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "check": "npm run typecheck && npm run lint && npm test"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.58.0",
@@ -23,10 +28,12 @@
     "pino-pretty": "^11.0.0"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.16",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.0.0",
     "tsx": "^4.0.0",
-    "typescript": "^5.0.0"
+    "typescript": "^5.0.0",
+    "vitest": "^3.2.6"
   },
   "engines": {
     "node": ">=18.0.0"
