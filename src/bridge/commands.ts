@@ -26,6 +26,7 @@ const HELP_TEXT = [
   '  /clear <name>                             清空任务会话上下文（下条消息开新会话）',
   '  /compact <name>                           压缩上下文为摘要后重置会话（保留要点）',
   '  /get <path>                               从本会话当前任务的 cwd 取文件/图片回发',
+  '  /export [name]                            导出 resume 命令（在本地 CLI 接着聊；省略 name 用本会话当前任务）',
   '  /rm <name>                                删除任务',
   '  /wl                                       列出白名单',
   '  /wl add @某人 [@某人...]                   把 @ 的人加入白名单',
@@ -80,6 +81,9 @@ export class CommandHandler {
           return;
         case '/get':
           await this.handleGet(msg, rest);
+          return;
+        case '/export':
+          await this.handleExport(msg, rest);
           return;
         case '/use':
           await this.handleUse(msg, rest);
@@ -515,6 +519,38 @@ export class CommandHandler {
     this.store.logEvent(task.id, 'sent_file', undefined, { path: realPath });
   }
 
+  private async handleExport(msg: IncomingMessage, rest: string[]): Promise<void> {
+    const name = rest[0];
+    const task = name ? this.store.getTask(name) : this.resolveTaskForChat(msg.chatId);
+    if (!task) {
+      await this.sender.reply(
+        msg.messageId,
+        name ? `任务不存在: ${name}` : '本会话没有任务。先用 /new <name> 新建并跑过消息后再 /export。',
+      );
+      return;
+    }
+    if (!task.agent_session_id) {
+      await this.sender.reply(
+        msg.messageId,
+        `[${task.display_name}] 还没有会话可导出（任务尚未跑过或刚被 /clear）。先发一条消息产生会话再 /export。`,
+      );
+      return;
+    }
+    const cwd = shellQuote(task.cwd);
+    const sid = task.agent_session_id;
+    // 任务设过自定义 model 就带上，本地接续不掉回默认模型；--model 与 runner 传参一致。
+    const modelFlag = task.model ? ` --model ${shellQuote(task.model)}` : '';
+    // claude: `--resume <id>`；codex: `resume <id>`（交互式接续同一 rollout）。
+    const resume =
+      task.agent_kind === 'codex'
+        ? `cd ${cwd} && codex resume ${sid}${modelFlag}`
+        : `cd ${cwd} && claude --resume ${sid}${modelFlag}`;
+    await this.sender.reply(
+      msg.messageId,
+      `[${task.display_name}] resume 到本地 CLI（复制整行执行）:\n${resume}\n\n⚠️ 本地接续期间别再在飞书给该任务发消息，避免两端同时写同一会话。`,
+    );
+  }
+
   // Intentionally not isAdmin-gated: the whitelist itself is the trust boundary
   // for this bot, so any whitelisted user can rm/clear/agent-switch any task.
   // If you need finer-grained isolation, gate these on isAdmin or add per-task ownership.
@@ -564,6 +600,12 @@ function parseArgs(tokens: string[]): { positional: string[]; flags: Record<stri
     }
   }
   return { positional, flags };
+}
+
+// POSIX single-quote wrapping so cwds with spaces (or other shell metachars)
+// paste safely. Embedded single quotes become the classic '\'' sequence.
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
 function stripWrappingQuotes(s: string): string {
