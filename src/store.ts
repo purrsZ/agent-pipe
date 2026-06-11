@@ -245,6 +245,11 @@ export class Store {
       .all(taskId, n) as EventRow[];
   }
 
+  /** Online backup via SQLite's backup API — safe while the DB is in use (WAL). */
+  async backup(destPath: string): Promise<void> {
+    await this.db.backup(destPath);
+  }
+
   close() {
     this.db.close();
   }

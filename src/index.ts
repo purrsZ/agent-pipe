@@ -14,6 +14,8 @@ import { buildResultCard, buildProcessingCard, buildStatusCard } from './feishu/
 import type { ProgressCallbacks } from './agents/types.js';
 import type { Task } from './store.js';
 import { StreamingCard } from './feishu/stream-card.js';
+import { installCrashGuard, startHeartbeat } from './lifecycle.js';
+import { scheduleDailyBackup } from './backup.js';
 
 const COMPACT_PROMPT = [
   '请把我们到目前为止的完整对话压缩成一份结构化摘要，供新会话继续使用。',
@@ -98,6 +100,28 @@ async function main() {
   );
   const runningTasks = new Set<string>();
   const botStartTime = Date.now();
+
+  // Shared by graceful shutdown (exit 0) and the crash guard (exit 1) — the
+  // supervisor restarts us only on non-zero exit.
+  const releaseResources = () => {
+    try {
+      pool.killAll();
+    } catch {
+      /* ignore */
+    }
+    try {
+      store.close();
+    } catch {
+      /* ignore */
+    }
+    try {
+      fs.unlinkSync(pidPath);
+    } catch {
+      /* ignore */
+    }
+  };
+  installCrashGuard(logger, releaseResources);
+  scheduleDailyBackup(store, path.join(config.dataDir, 'backups'), logger);
 
   const ATTACHMENT_TTL_MS = 30 * 60 * 1000;
   const pendingAttachments = new Map<string, Array<{ path: string; expiresAt: number }>>();
@@ -443,23 +467,17 @@ async function main() {
   await wsClient.start({ eventDispatcher: dispatcher });
   logger.info({ botOpenId, appId: config.feishu.appId, dataDir: config.dataDir }, 'agent-pipe ready');
 
+  startHeartbeat(logger, () => ({
+    uptimeSec: Math.floor(process.uptime()),
+    rssMb: Math.round(process.memoryUsage().rss / 1048576),
+    runningTurns: runningTasks.size,
+    queuedMessages: [...queues.values()].reduce((n, q) => n + q.length, 0),
+    hotRunners: pool.hotCount(),
+  }));
+
   const shutdown = () => {
     logger.info('shutting down');
-    try {
-      pool.killAll();
-    } catch {
-      /* ignore */
-    }
-    try {
-      store.close();
-    } catch {
-      /* ignore */
-    }
-    try {
-      fs.unlinkSync(pidPath);
-    } catch {
-      /* ignore */
-    }
+    releaseResources();
     process.exit(0);
   };
   process.on('SIGINT', shutdown);
