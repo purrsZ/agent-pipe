@@ -83,6 +83,34 @@ describe('StreamingCard throttle', () => {
     expect(updateCard).toHaveBeenCalledTimes(1);
   });
 
+  it('silent period: clock ticker keeps the card fresh without any agent events', async () => {
+    const { sender, updateCard, calls } = makeSender();
+    const card = new StreamingCard(sender, 'om_1', 'task', 'claude');
+    card.onText('working on something long');
+    await vi.advanceTimersByTimeAsync(0); // leading flush at 0:00
+    expect(updateCard).toHaveBeenCalledTimes(1);
+
+    // agent goes silent (long Bash / long thinking) — elapsed must keep moving
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(updateCard).toHaveBeenCalledTimes(2);
+    expect(previewOf(calls[1]!)).toContain('0:05');
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(updateCard.mock.calls.length).toBeGreaterThanOrEqual(4);
+    expect(previewOf(calls[calls.length - 1]!)).toContain('0:15');
+    await card.stop();
+  });
+
+  it('stop() also kills the clock ticker', async () => {
+    const { sender, updateCard } = makeSender();
+    const card = new StreamingCard(sender, 'om_1', 'task', 'claude');
+    card.onText('v1');
+    await vi.advanceTimersByTimeAsync(0);
+    await card.stop();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(updateCard).toHaveBeenCalledTimes(1); // no zombie ticks after stop
+  });
+
   it('updateCard rejection is swallowed — a flaky PATCH must not crash the turn', async () => {
     const { sender, updateCard } = makeSender(new Error('feishu 5xx'));
     const card = new StreamingCard(sender, 'om_1', 'task', 'claude');

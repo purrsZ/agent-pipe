@@ -3,6 +3,11 @@ import type { Sender } from './sender.js';
 
 const MIN_INTERVAL_MS = 900;
 
+// 时钟心跳：渲染本是纯事件驱动(onText/onToolUse 才刷新)，agent 跑长 Bash /
+// 长思考期间没有任何事件 → 卡片冻住，下个事件到来才"跳秒"。心跳让静默期
+// elapsed 也持续走表。5s 一拍 = 每任务每分钟最多 12 次 PATCH，远低于飞书限频。
+const CLOCK_TICK_MS = 5_000;
+
 /**
  * Throttled in-progress card updater. Runners fire onToolUse / onText many times a
  * second; this collapses them into at most one `updateCard` per MIN_INTERVAL_MS.
@@ -27,13 +32,17 @@ export class StreamingCard {
   private active: Promise<void> | null = null;
   private trailing: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
+  private readonly ticker: ReturnType<typeof setInterval>;
 
   constructor(
     private sender: Sender,
     private messageId: string,
     private taskName: string,
     private agentKind: string,
-  ) {}
+  ) {
+    this.ticker = setInterval(() => this.schedule(), CLOCK_TICK_MS);
+    this.ticker.unref?.();
+  }
 
   onToolUse(name: string): void {
     this.toolCount++;
@@ -49,6 +58,7 @@ export class StreamingCard {
   /** Stop emitting and wait out any in-flight PATCH; caller writes the final card next. */
   async stop(): Promise<void> {
     this.stopped = true;
+    clearInterval(this.ticker);
     if (this.trailing) {
       clearTimeout(this.trailing);
       this.trailing = null;

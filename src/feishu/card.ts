@@ -9,6 +9,16 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
+/** 956s 这种裸秒数不直观——格式化成时钟样式：15:56 / 1:02:05。 */
+export function formatClock(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const p = (n: number) => String(n).padStart(2, '0');
+  return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
+}
+
 export function buildTaskRootCard(task: Task): object {
   const lines = [
     `**agent**: ${task.agent_kind}`,
@@ -76,7 +86,7 @@ export function buildResultCard(taskName: string, r: TurnResult): object {
   }
 
   const metaParts: string[] = [];
-  if (r.durationMs !== undefined) metaParts.push(`${Math.round(r.durationMs / 1000)}s`);
+  if (r.durationMs !== undefined) metaParts.push(formatClock(r.durationMs));
   if (r.toolCount > 0) metaParts.push(`${r.toolCount} tools`);
 
   const ctxUsed =
@@ -149,7 +159,7 @@ export function buildStreamingCard(
     elements.push({ tag: 'markdown', content: shown });
   }
 
-  const metaParts = [`${Math.round(s.elapsedMs / 1000)}s`];
+  const metaParts = [formatClock(s.elapsedMs)];
   if (s.toolCount > 0) metaParts.push(`${s.toolCount} tools`);
   elements.push({ tag: 'hr' });
   elements.push({
