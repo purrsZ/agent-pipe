@@ -1,8 +1,29 @@
+import * as fs from 'node:fs';
 import type { Logger } from './logger.js';
 
 // Exit codes contract with scripts/run-forever.sh: 0 = intentional stop (don't
 // restart), non-zero = crash (supervisor restarts us).
 export const EXIT_CRASH = 1;
+
+/**
+ * Remove the single-instance pid lock ONLY if it still records our own pid.
+ *
+ * WHY the guard: during a takeover restart, the NEW instance kills the old one
+ * and immediately writes its own pid into the lock. The OLD instance's shutdown
+ * then runs — an unconditional unlink would delete the NEW instance's lock,
+ * orphaning it: later restarts find no lock, kill nothing, and two bots end up
+ * sharing the Feishu WS connection (messages get split between old/new code —
+ * observed live on 2026-06-11 as "/export 未知命令 but new card format").
+ */
+export function removeOwnPidFile(pidPath: string, pid: number = process.pid): boolean {
+  try {
+    if (fs.readFileSync(pidPath, 'utf-8').trim() !== String(pid)) return false;
+    fs.unlinkSync(pidPath);
+    return true;
+  } catch {
+    return false; // missing file / unreadable — nothing that belongs to us
+  }
+}
 
 // Grace period before process.exit so pino's worker-thread transport can flush
 // the fatal line; exiting synchronously loses the very log we crashed to write.

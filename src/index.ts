@@ -12,7 +12,7 @@ import { createFeishuClients } from './feishu/client.js';
 import { createDispatcher } from './feishu/event-router.js';
 import { Sender } from './feishu/sender.js';
 import { StreamingCard } from './feishu/stream-card.js';
-import { installCrashGuard, startHeartbeat } from './lifecycle.js';
+import { installCrashGuard, removeOwnPidFile, startHeartbeat } from './lifecycle.js';
 import { createLogger, type Logger } from './logger.js';
 import type { Task } from './store.js';
 import { Store } from './store.js';
@@ -117,11 +117,7 @@ async function main() {
     } catch {
       /* ignore */
     }
-    try {
-      fs.unlinkSync(pidPath);
-    } catch {
-      /* ignore */
-    }
+    removeOwnPidFile(pidPath);
   };
   installCrashGuard(logger, releaseResources);
   scheduleDailyBackup(store, path.join(config.dataDir, 'backups'), logger);

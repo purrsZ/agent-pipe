@@ -1,5 +1,13 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { HEARTBEAT_INTERVAL_MS, installCrashGuard, startHeartbeat } from '../src/lifecycle.js';
+import {
+  HEARTBEAT_INTERVAL_MS,
+  installCrashGuard,
+  removeOwnPidFile,
+  startHeartbeat,
+} from '../src/lifecycle.js';
 import type { Logger } from '../src/logger.js';
 
 function makeLogger() {
@@ -114,5 +122,35 @@ describe('installCrashGuard', () => {
       guard.uninstall();
       vi.clearAllTimers();
     }
+  });
+});
+
+describe('removeOwnPidFile', () => {
+  let tmpDir: string;
+  let pidPath: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-pid-test-'));
+    pidPath = path.join(tmpDir, 'bot.pid');
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('deletes the lock when it still records our own pid', () => {
+    fs.writeFileSync(pidPath, '4242');
+    expect(removeOwnPidFile(pidPath, 4242)).toBe(true);
+    expect(fs.existsSync(pidPath)).toBe(false);
+  });
+
+  it('keeps the lock when a takeover instance already wrote its pid (the 双实例 race)', () => {
+    fs.writeFileSync(pidPath, '9999'); // new instance owns the lock now
+    expect(removeOwnPidFile(pidPath, 4242)).toBe(false);
+    expect(fs.readFileSync(pidPath, 'utf-8')).toBe('9999');
+  });
+
+  it('tolerates a missing lock file', () => {
+    expect(removeOwnPidFile(pidPath, 4242)).toBe(false);
   });
 });
