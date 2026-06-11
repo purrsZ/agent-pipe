@@ -1,15 +1,15 @@
-import Database from 'better-sqlite3';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   backupFileName,
   parseBackupTimestamp,
   runBackup,
+  STARTUP_BACKUP_MIN_AGE_MS,
   selectBackupsToPrune,
   shouldBackupNow,
-  STARTUP_BACKUP_MIN_AGE_MS,
 } from '../src/backup.js';
 import { Store } from '../src/store.js';
 

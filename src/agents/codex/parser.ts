@@ -21,13 +21,11 @@ import type { AgentEvent } from '../types.js';
  */
 export class CodexParser {
   private _fullText = '';
-  private _latestUsage:
-    | {
-        inputTokens?: number;
-        outputTokens?: number;
-        cacheReadInputTokens?: number;
-      }
-    | null = null;
+  private _latestUsage: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadInputTokens?: number;
+  } | null = null;
 
   get fullText(): string {
     return this._fullText;
@@ -44,7 +42,7 @@ export class CodexParser {
 
   parseLine(line: string): AgentEvent[] {
     const s = line.trim();
-    if (!s || s[0] !== '{') return [];
+    if (s?.[0] !== '{') return [];
     let obj: unknown;
     try {
       obj = JSON.parse(s);
@@ -103,7 +101,12 @@ export class CodexParser {
           outputTokens,
           cacheReadInputTokens: cachedInput,
         },
-        { type: 'done', inputTokens, outputTokens, cacheReadInputTokens: cachedInput },
+        {
+          type: 'done',
+          inputTokens,
+          outputTokens,
+          cacheReadInputTokens: cachedInput,
+        },
       ];
     }
 
@@ -194,7 +197,8 @@ export class CodexParser {
 
     if (itype === 'mcp_tool_call') {
       if (isStart) {
-        const name = (item.tool_name as string | undefined) ?? (item.name as string | undefined) ?? 'mcp_tool';
+        const name =
+          (item.tool_name as string | undefined) ?? (item.name as string | undefined) ?? 'mcp_tool';
         return [{ type: 'tool_use', id, name }];
       }
       if (isDone) {
@@ -221,7 +225,10 @@ export class CodexParser {
     if (itype === 'error') {
       if (isDone) {
         const msg = (item.message as string | undefined) ?? 'codex item error';
-        return [{ type: 'tool_result', id, isError: true }, { type: 'done', error: msg }];
+        return [
+          { type: 'tool_result', id, isError: true },
+          { type: 'done', error: msg },
+        ];
       }
       return [];
     }

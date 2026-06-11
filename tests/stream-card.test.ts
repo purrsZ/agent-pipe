@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { StreamingCard } from '../src/feishu/stream-card.js';
 import type { Sender } from '../src/feishu/sender.js';
+import { StreamingCard } from '../src/feishu/stream-card.js';
 
 // MIN_INTERVAL_MS in stream-card.ts
 const INTERVAL = 900;

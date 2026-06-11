@@ -1,6 +1,5 @@
-import type { Task } from '../store.js';
 import type { Logger } from '../logger.js';
-import type { Store } from '../store.js';
+import type { Store, Task } from '../store.js';
 
 export type AgentKind = 'claude' | 'codex';
 

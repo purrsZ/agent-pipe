@@ -1,4 +1,4 @@
-import * as fs from 'node:fs';
+import type * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import type * as lark from '@larksuiteoapi/node-sdk';
@@ -6,21 +6,40 @@ import type { Logger } from '../logger.js';
 
 const MAX_FILE_BYTES = 30 * 1024 * 1024;
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-const IMAGE_EXTS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.ico']);
+const IMAGE_EXTS = new Set([
+  '.png',
+  '.jpg',
+  '.jpeg',
+  '.gif',
+  '.webp',
+  '.bmp',
+  '.tiff',
+  '.tif',
+  '.ico',
+]);
 
-function classifyFileType(filePath: string): 'pdf' | 'doc' | 'xls' | 'ppt' | 'mp4' | 'opus' | 'stream' {
+function classifyFileType(
+  filePath: string,
+): 'pdf' | 'doc' | 'xls' | 'ppt' | 'mp4' | 'opus' | 'stream' {
   const ext = path.extname(filePath).toLowerCase();
   switch (ext) {
-    case '.pdf': return 'pdf';
+    case '.pdf':
+      return 'pdf';
     case '.doc':
-    case '.docx': return 'doc';
+    case '.docx':
+      return 'doc';
     case '.xls':
-    case '.xlsx': return 'xls';
+    case '.xlsx':
+      return 'xls';
     case '.ppt':
-    case '.pptx': return 'ppt';
-    case '.mp4': return 'mp4';
-    case '.opus': return 'opus';
-    default: return 'stream';
+    case '.pptx':
+      return 'ppt';
+    case '.mp4':
+      return 'mp4';
+    case '.opus':
+      return 'opus';
+    default:
+      return 'stream';
   }
 }
 
@@ -29,7 +48,10 @@ export function isImagePath(filePath: string): boolean {
 }
 
 export class Sender {
-  constructor(private client: lark.Client, private logger: Logger) {}
+  constructor(
+    private client: lark.Client,
+    private logger: Logger,
+  ) {}
 
   async sendText(chatId: string, text: string): Promise<string | null> {
     try {
@@ -128,7 +150,10 @@ export class Sender {
     if (stat.size === 0) return { ok: false, error: `空${label}不支持上传: ${filePath}` };
     if (stat.size > maxBytes) {
       const mb = Math.floor(maxBytes / (1024 * 1024));
-      return { ok: false, error: `${label}超过 ${mb}MB 上限 (${stat.size} bytes): ${filePath}` };
+      return {
+        ok: false,
+        error: `${label}超过 ${mb}MB 上限 (${stat.size} bytes): ${filePath}`,
+      };
     }
     try {
       const buf = await fsp.readFile(filePath);
@@ -240,7 +265,9 @@ export class Sender {
       try {
         const body = JSON.parse(item.body?.content ?? '{}');
         if (msgType === 'text') {
-          text = String(body.text ?? '').replace(/@_user_\w+/g, '').trim();
+          text = String(body.text ?? '')
+            .replace(/@_user_\w+/g, '')
+            .trim();
         } else if (msgType === 'image') {
           imageKey = body.image_key;
         } else if (msgType === 'file') {

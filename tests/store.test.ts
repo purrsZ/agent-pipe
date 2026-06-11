@@ -1,14 +1,17 @@
-import Database from 'better-sqlite3';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Store, type Task } from '../src/store.js';
 
 let tmpDir: string;
 let dbPath: string;
 
-const taskFixture = (id: string, overrides: Partial<Task> = {}): Omit<Task, 'created_at' | 'last_active_at'> => ({
+const taskFixture = (
+  id: string,
+  overrides: Partial<Task> = {},
+): Omit<Task, 'created_at' | 'last_active_at'> => ({
   id,
   display_name: id,
   agent_kind: 'claude',
@@ -34,7 +37,13 @@ afterEach(() => {
 describe('Store: tasks', () => {
   it('createTask → getTask roundtrip preserves all fields', () => {
     const store = new Store(dbPath);
-    store.createTask(taskFixture('t1', { agent_kind: 'codex', mode: 'project', model: 'gpt-5.1-codex' }));
+    store.createTask(
+      taskFixture('t1', {
+        agent_kind: 'codex',
+        mode: 'project',
+        model: 'gpt-5.1-codex',
+      }),
+    );
     const got = store.getTask('t1');
     expect(got).toBeDefined();
     expect(got!.display_name).toBe('t1');

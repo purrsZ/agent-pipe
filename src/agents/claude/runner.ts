@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import * as readline from 'node:readline';
 import type { Task } from '../../store.js';
 import type {
@@ -91,7 +91,12 @@ class ClaudeRunner implements Runner {
     }
     this.state = 'busy';
     this.parser.reset();
-    this.inflight = { resolve: () => {}, reject: () => {}, callbacks, toolCount: 0 };
+    this.inflight = {
+      resolve: () => {},
+      reject: () => {},
+      callbacks,
+      toolCount: 0,
+    };
     this._lastActivity = Date.now();
     this.deps.store.setStatus(this.taskId, 'hot');
 
@@ -104,7 +109,7 @@ class ClaudeRunner implements Runner {
     return new Promise<TurnResult>((resolve, reject) => {
       this.inflight!.resolve = resolve;
       this.inflight!.reject = reject;
-      const ok = this.proc!.stdin?.write(payload + '\n');
+      const ok = this.proc!.stdin?.write(`${payload}\n`);
       if (ok === undefined) {
         this.state = 'idle';
         this.inflight = null;
@@ -144,11 +149,15 @@ class ClaudeRunner implements Runner {
     const model = this.task.model ?? this.cfg.defaultModel;
     const args: string[] = [
       '-p',
-      '--input-format', 'stream-json',
-      '--output-format', 'stream-json',
+      '--input-format',
+      'stream-json',
+      '--output-format',
+      'stream-json',
       '--verbose',
-      '--model', model,
-      '--effort', this.cfg.effort,
+      '--model',
+      model,
+      '--effort',
+      this.cfg.effort,
       '--dangerously-skip-permissions',
     ];
     if (this.sessionId) args.push('--resume', this.sessionId);
@@ -212,9 +221,7 @@ class ClaudeRunner implements Runner {
       if (this.disposed) return;
       if (this.sessionId) this.deps.store.setAgentSessionId(this.taskId, this.sessionId);
       if (this.inflight) {
-        this.inflight.reject(
-          new Error(`claude exited (${code}): ${this.stderrBuf.slice(-400)}`),
-        );
+        this.inflight.reject(new Error(`claude exited (${code}): ${this.stderrBuf.slice(-400)}`));
         this.inflight = null;
       }
       this.proc = null;
@@ -253,15 +260,22 @@ class ClaudeRunner implements Runner {
         break;
       case 'tool_use':
         if (inflight) inflight.toolCount++;
-        this.deps.store.logEvent(this.taskId, 'tool_start', e.name, { input: e.input });
-        inflight?.callbacks?.onToolUse?.(this.taskId, { name: e.name, input: e.input });
+        this.deps.store.logEvent(this.taskId, 'tool_start', e.name, {
+          input: e.input,
+        });
+        inflight?.callbacks?.onToolUse?.(this.taskId, {
+          name: e.name,
+          input: e.input,
+        });
         break;
       case 'tool_result':
         this.deps.store.logEvent(this.taskId, 'tool_end', undefined, {
           id: e.id,
           isError: e.isError,
         });
-        inflight?.callbacks?.onToolResult?.(this.taskId, { isError: e.isError });
+        inflight?.callbacks?.onToolResult?.(this.taskId, {
+          isError: e.isError,
+        });
         break;
       case 'usage':
         // already captured by parser.latestUsage

@@ -1,21 +1,21 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { createClaudeFactory } from './agents/claude/runner.js';
+import { createCodexFactory } from './agents/codex/runner.js';
+import { AgentPool } from './agents/pool.js';
+import type { ProgressCallbacks } from './agents/types.js';
+import { scheduleDailyBackup } from './backup.js';
+import { CommandHandler, currentTaskKey } from './bridge/commands.js';
 import { loadConfig } from './config.js';
-import { createLogger, type Logger } from './logger.js';
-import { Store } from './store.js';
+import { buildProcessingCard, buildResultCard, buildStatusCard } from './feishu/card.js';
 import { createFeishuClients } from './feishu/client.js';
 import { createDispatcher } from './feishu/event-router.js';
 import { Sender } from './feishu/sender.js';
-import { CommandHandler, currentTaskKey } from './bridge/commands.js';
-import { AgentPool } from './agents/pool.js';
-import { createClaudeFactory } from './agents/claude/runner.js';
-import { createCodexFactory } from './agents/codex/runner.js';
-import { buildResultCard, buildProcessingCard, buildStatusCard } from './feishu/card.js';
-import type { ProgressCallbacks } from './agents/types.js';
-import type { Task } from './store.js';
 import { StreamingCard } from './feishu/stream-card.js';
 import { installCrashGuard, startHeartbeat } from './lifecycle.js';
-import { scheduleDailyBackup } from './backup.js';
+import { createLogger, type Logger } from './logger.js';
+import type { Task } from './store.js';
+import { Store } from './store.js';
 
 const COMPACT_PROMPT = [
   '请把我们到目前为止的完整对话压缩成一份结构化摘要，供新会话继续使用。',
@@ -31,7 +31,10 @@ const COMPACT_PROMPT = [
 async function fetchBotOpenId(client: any, logger: Logger): Promise<string> {
   for (let i = 0; i < 3; i++) {
     try {
-      const resp = await client.request({ method: 'GET', url: '/open-apis/bot/v3/info' });
+      const resp = await client.request({
+        method: 'GET',
+        url: '/open-apis/bot/v3/info',
+      });
       const openId = resp?.data?.bot?.open_id ?? resp?.bot?.open_id ?? '';
       if (openId) return openId;
     } catch (err) {
@@ -133,10 +136,19 @@ async function main() {
     return fresh.map((e) => e.path);
   };
   const sanitizeName = (name: string): string =>
-    name.replace(/[/\\\x00-\x1f]/g, '_').replace(/^\.+/, '_').slice(0, 120) || 'file';
+    name
+      // biome-ignore lint/suspicious/noControlCharactersInRegex: 故意剥离文件名里的控制字符
+      .replace(/[/\\\x00-\x1f]/g, '_')
+      .replace(/^\.+/, '_')
+      .slice(0, 120) || 'file';
 
   // ---- per-task serial execution: queue while busy, drain after each turn ----
-  type TurnInput = { chatId: string; messageId: string; text: string; parentId?: string };
+  type TurnInput = {
+    chatId: string;
+    messageId: string;
+    text: string;
+    parentId?: string;
+  };
   const MAX_QUEUE = 10;
   const queues = new Map<string, TurnInput[]>();
   const cancelledTasks = new Set<string>();
@@ -170,11 +182,7 @@ async function main() {
   const compactKey = (taskId: string): string => `compact_summary:${taskId}`;
 
   const escapeAttr = (v: string): string =>
-    v
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;')
-      .replace(/"/g, '&quot;');
+    v.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 
   // 拉取被引用消息渲染成 <replied_message> 块；图片/文件下载进任务 inbox 并带上本地路径。
   // best-effort：拉取失败返回 null（跳过注入，不阻塞本轮）。
@@ -196,7 +204,10 @@ async function main() {
         lines.push(ok ? `📎 引用图片: ${dest}` : '📎 引用图片: (下载失败)');
       }
       if (m.fileKey) {
-        const dest = path.join(inboxDir, `replied-${parentId}-${sanitizeName(m.fileName ?? 'file')}`);
+        const dest = path.join(
+          inboxDir,
+          `replied-${parentId}-${sanitizeName(m.fileName ?? 'file')}`,
+        );
         const ok = await sender.downloadAttachment(parentId, m.fileKey, 'file', dest);
         lines.push(ok ? `📎 引用文件: ${dest}` : `📎 引用文件: (下载失败) ${m.fileName ?? ''}`);
       }
@@ -253,7 +264,7 @@ async function main() {
           }
         : undefined;
 
-      let result;
+      let result: Awaited<ReturnType<typeof pool.send>>;
       try {
         result = await pool.send(task, prompt, callbacks);
       } finally {
@@ -367,7 +378,11 @@ async function main() {
     const isAdmin = config.allowedOpenIds.has(msg.userId);
     if (!isAdmin && !store.isAllowed(msg.userId)) {
       logger.warn(
-        { userId: msg.userId, chatType: msg.chatType, text: msg.text.slice(0, 50) },
+        {
+          userId: msg.userId,
+          chatType: msg.chatType,
+          text: msg.text.slice(0, 50),
+        },
         'unauthorized sender, ignoring',
       );
       return;
@@ -391,14 +406,20 @@ async function main() {
       if (currentId) {
         task = store.getTask(currentId);
         if (task) {
-          logger.info({ fallbackTo: task.id, chatId: msg.chatId }, 'routed to current task in chat');
+          logger.info(
+            { fallbackTo: task.id, chatId: msg.chatId },
+            'routed to current task in chat',
+          );
         }
       }
     }
     if (!task) {
       task = store.mostRecentTaskInChat(msg.chatId);
       if (task) {
-        logger.info({ fallbackTo: task.id, chatId: msg.chatId }, 'fallback to most recent task in chat');
+        logger.info(
+          { fallbackTo: task.id, chatId: msg.chatId },
+          'fallback to most recent task in chat',
+        );
       }
     }
     if (!task) {
@@ -407,7 +428,10 @@ async function main() {
     }
 
     store.recordTaskMessage(task.id, msg.messageId);
-    store.logEvent(task.id, 'user', undefined, { text: msg.text, attachments: msg.attachments });
+    store.logEvent(task.id, 'user', undefined, {
+      text: msg.text,
+      attachments: msg.attachments,
+    });
     store.touchTask(task.id);
 
     if (msg.attachments.length > 0) {
@@ -465,7 +489,10 @@ async function main() {
   });
 
   await wsClient.start({ eventDispatcher: dispatcher });
-  logger.info({ botOpenId, appId: config.feishu.appId, dataDir: config.dataDir }, 'agent-pipe ready');
+  logger.info(
+    { botOpenId, appId: config.feishu.appId, dataDir: config.dataDir },
+    'agent-pipe ready',
+  );
 
   startHeartbeat(logger, () => ({
     uptimeSec: Math.floor(process.uptime()),

@@ -1,5 +1,5 @@
-import type { Sender } from './sender.js';
 import { buildStreamingCard } from './card.js';
+import type { Sender } from './sender.js';
 
 const MIN_INTERVAL_MS = 900;
 

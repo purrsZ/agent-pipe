@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import Database from 'better-sqlite3';
 import type { Logger } from './logger.js';
 import type { Store } from './store.js';
 
@@ -23,14 +24,7 @@ export function parseBackupTimestamp(name: string): Date | null {
   const m = BACKUP_NAME_RE.exec(name);
   if (!m) return null;
   const [, y, mo, d, h, mi, s] = m;
-  return new Date(
-    Number(y),
-    Number(mo) - 1,
-    Number(d),
-    Number(h),
-    Number(mi),
-    Number(s),
-  );
+  return new Date(Number(y), Number(mo) - 1, Number(d), Number(h), Number(mi), Number(s));
 }
 
 /** Among `names`, return the backup files beyond the `keep` newest (to delete). */
@@ -63,11 +57,25 @@ export async function runBackup(
   fs.mkdirSync(backupsDir, { recursive: true });
   const dest = path.join(backupsDir, backupFileName(now));
   await store.backup(dest);
-  for (const stale of selectBackupsToPrune(fs.readdirSync(backupsDir), keep)) {
+  // The source DB is WAL-mode, so the copy may land with a sidecar -wal file.
+  // Fold it in so the single .sqlite file alone is a complete restore artifact.
+  const copy = new Database(dest);
+  copy.pragma('wal_checkpoint(TRUNCATE)');
+  copy.close();
+  for (const sidecar of [`${dest}-wal`, `${dest}-shm`]) {
     try {
-      fs.unlinkSync(path.join(backupsDir, stale));
+      fs.unlinkSync(sidecar);
     } catch {
-      /* best-effort prune */
+      /* already gone */
+    }
+  }
+  for (const stale of selectBackupsToPrune(fs.readdirSync(backupsDir), keep)) {
+    for (const f of [stale, `${stale}-wal`, `${stale}-shm`]) {
+      try {
+        fs.unlinkSync(path.join(backupsDir, f));
+      } catch {
+        /* best-effort prune */
+      }
     }
   }
   return dest;

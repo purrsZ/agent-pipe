@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import * as readline from 'node:readline';
 import type { Task } from '../../store.js';
 import type {
@@ -206,9 +206,7 @@ class CodexRunner implements Runner {
             'codex exited without done event',
           );
           if (code !== 0) {
-            inflight.reject(
-              new Error(`codex exited (${code}): ${inflight.stderrBuf.slice(-400)}`),
-            );
+            inflight.reject(new Error(`codex exited (${code}): ${inflight.stderrBuf.slice(-400)}`));
             return;
           }
         }
@@ -224,15 +222,10 @@ class CodexRunner implements Runner {
           error: done?.error,
           toolCount: inflight.toolCount,
         };
-        this.deps.store.logEvent(
-          this.taskId,
-          result.error ? 'error' : 'assistant',
-          undefined,
-          {
-            fullText: result.fullText.slice(0, 2000),
-            error: result.error,
-          },
-        );
+        this.deps.store.logEvent(this.taskId, result.error ? 'error' : 'assistant', undefined, {
+          fullText: result.fullText.slice(0, 2000),
+          error: result.error,
+        });
         inflight.resolve(result);
       });
 
@@ -249,7 +242,7 @@ class CodexRunner implements Runner {
 
   abort(): boolean {
     const inf = this.inflight;
-    if (!inf || !inf.proc.pid || inf.proc.killed) return false;
+    if (!inf?.proc.pid || inf.proc.killed) return false;
     this.deps.logger.info({ taskId: this.taskId }, 'sending SIGINT to codex');
     inf.proc.kill('SIGINT');
     return true;
@@ -292,8 +285,13 @@ class CodexRunner implements Runner {
         break;
       case 'tool_use':
         inflight.toolCount++;
-        this.deps.store.logEvent(this.taskId, 'tool_start', e.name, { input: e.input });
-        inflight.callbacks?.onToolUse?.(this.taskId, { name: e.name, input: e.input });
+        this.deps.store.logEvent(this.taskId, 'tool_start', e.name, {
+          input: e.input,
+        });
+        inflight.callbacks?.onToolUse?.(this.taskId, {
+          name: e.name,
+          input: e.input,
+        });
         break;
       case 'tool_result':
         this.deps.store.logEvent(this.taskId, 'tool_end', undefined, {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { installCrashGuard, startHeartbeat, HEARTBEAT_INTERVAL_MS } from '../src/lifecycle.js';
+import { HEARTBEAT_INTERVAL_MS, installCrashGuard, startHeartbeat } from '../src/lifecycle.js';
 import type { Logger } from '../src/logger.js';
 
 function makeLogger() {
@@ -7,7 +7,11 @@ function makeLogger() {
     info: vi.fn(),
     warn: vi.fn(),
     fatal: vi.fn(),
-  } as unknown as Logger & { info: ReturnType<typeof vi.fn>; warn: ReturnType<typeof vi.fn>; fatal: ReturnType<typeof vi.fn> };
+  } as unknown as Logger & {
+    info: ReturnType<typeof vi.fn>;
+    warn: ReturnType<typeof vi.fn>;
+    fatal: ReturnType<typeof vi.fn>;
+  };
 }
 
 beforeEach(() => {
@@ -74,9 +78,7 @@ describe('installCrashGuard', () => {
     const cleanup = vi.fn();
     const before = process.listeners('uncaughtException');
     const guard = installCrashGuard(logger, cleanup);
-    const handler = process
-      .listeners('uncaughtException')
-      .find((l) => !before.includes(l))!;
+    const handler = process.listeners('uncaughtException').find((l) => !before.includes(l))!;
 
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
     try {
@@ -100,9 +102,7 @@ describe('installCrashGuard', () => {
     const guard = installCrashGuard(logger, () => {
       throw new Error('cleanup boom');
     });
-    const handler = process
-      .listeners('uncaughtException')
-      .find((l) => !before.includes(l))!;
+    const handler = process.listeners('uncaughtException').find((l) => !before.includes(l))!;
 
     const exitSpy = vi.spyOn(process, 'exit').mockImplementation((() => {}) as never);
     try {

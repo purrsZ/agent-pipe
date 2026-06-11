@@ -1,5 +1,5 @@
-import type { Task } from '../store.js';
 import type { TurnResult } from '../agents/types.js';
+import type { Task } from '../store.js';
 
 const MAX_CARD_MARKDOWN = 28_000;
 
@@ -59,7 +59,7 @@ export function buildResultCard(taskName: string, r: TurnResult): object {
   const text = (r.fullText ?? '').trim() || (error ? '' : '(无输出)');
   const shown =
     text.length > MAX_CARD_MARKDOWN
-      ? text.slice(0, MAX_CARD_MARKDOWN) + '\n\n_…已截断，完整结果请在本地查看 session_'
+      ? `${text.slice(0, MAX_CARD_MARKDOWN)}\n\n_…已截断，完整结果请在本地查看 session_`
       : text;
 
   if (error) {
@@ -80,14 +80,14 @@ export function buildResultCard(taskName: string, r: TurnResult): object {
   if (r.toolCount > 0) metaParts.push(`${r.toolCount} tools`);
 
   const ctxUsed =
-    (r.inputTokens ?? 0) +
-    (r.cacheCreationInputTokens ?? 0) +
-    (r.cacheReadInputTokens ?? 0);
+    (r.inputTokens ?? 0) + (r.cacheCreationInputTokens ?? 0) + (r.cacheReadInputTokens ?? 0);
   const ctxWindow = r.contextWindow;
   let ctxPct: number | null = null;
   if (ctxUsed > 0 && ctxWindow && ctxWindow > 0) {
     ctxPct = (ctxUsed / ctxWindow) * 100;
-    metaParts.push(`ctx ${ctxPct.toFixed(1)}% (${formatTokens(ctxUsed)} / ${formatTokens(ctxWindow)})`);
+    metaParts.push(
+      `ctx ${ctxPct.toFixed(1)}% (${formatTokens(ctxUsed)} / ${formatTokens(ctxWindow)})`,
+    );
   }
 
   if (metaParts.length > 0) {
@@ -128,12 +128,15 @@ const STREAM_PREVIEW_MAX = 2000;
 export function buildStreamingCard(
   taskName: string,
   agentKind: string,
-  s: { elapsedMs: number; toolCount: number; currentTool: string | null; text: string },
+  s: {
+    elapsedMs: number;
+    toolCount: number;
+    currentTool: string | null;
+    text: string;
+  },
 ): object {
   const who = agentKind === 'codex' ? 'Codex' : 'Claude';
-  const activity = s.currentTool
-    ? `正在调用 \`${s.currentTool}\`…`
-    : `${who} 正在思考…`;
+  const activity = s.currentTool ? `正在调用 \`${s.currentTool}\`…` : `${who} 正在思考…`;
   const elements: object[] = [
     { tag: 'markdown', content: `<font color="grey">${activity}</font>` },
   ];
@@ -141,9 +144,7 @@ export function buildStreamingCard(
   const preview = (s.text ?? '').trim();
   if (preview) {
     const shown =
-      preview.length > STREAM_PREVIEW_MAX
-        ? preview.slice(0, STREAM_PREVIEW_MAX) + ' …'
-        : preview;
+      preview.length > STREAM_PREVIEW_MAX ? `${preview.slice(0, STREAM_PREVIEW_MAX)} …` : preview;
     elements.push({ tag: 'hr' });
     elements.push({ tag: 'markdown', content: shown });
   }

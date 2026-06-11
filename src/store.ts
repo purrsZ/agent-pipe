@@ -1,6 +1,6 @@
-import Database from 'better-sqlite3';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import Database from 'better-sqlite3';
 
 export type TaskStatus = 'hot' | 'suspended' | 'done' | 'error';
 export type TaskMode = 'project' | 'sandbox';
@@ -92,9 +92,9 @@ export class Store {
   // ALTER TABLE ... RENAME COLUMN requires SQLite ≥ 3.25 (2018); better-sqlite3 ships
   // well above that, so we use it directly without a fallback.
   private migrateTasksLegacy(): void {
-    const cols = this.db
-      .prepare(`PRAGMA table_info(tasks)`)
-      .all() as Array<{ name: string }>;
+    const cols = this.db.prepare(`PRAGMA table_info(tasks)`).all() as Array<{
+      name: string;
+    }>;
     const names = new Set(cols.map((c) => c.name));
 
     if (!names.has('agent_kind')) {
@@ -124,18 +124,30 @@ export class Store {
     return result.changes > 0;
   }
 
-  listWhitelist(): Array<{ open_id: string; name: string | null; created_at: number }> {
-    return this.db
-      .prepare('SELECT * FROM whitelist ORDER BY created_at ASC')
-      .all() as Array<{ open_id: string; name: string | null; created_at: number }>;
+  listWhitelist(): Array<{
+    open_id: string;
+    name: string | null;
+    created_at: number;
+  }> {
+    return this.db.prepare('SELECT * FROM whitelist ORDER BY created_at ASC').all() as Array<{
+      open_id: string;
+      name: string | null;
+      created_at: number;
+    }>;
   }
 
   whitelistCount(): number {
-    return (this.db.prepare('SELECT COUNT(*) as c FROM whitelist').get() as { c: number }).c;
+    return (
+      this.db.prepare('SELECT COUNT(*) as c FROM whitelist').get() as {
+        c: number;
+      }
+    ).c;
   }
 
   getState(key: string): string | undefined {
-    const row = this.db.prepare('SELECT value FROM state WHERE key = ?').get(key) as { value: string } | undefined;
+    const row = this.db.prepare('SELECT value FROM state WHERE key = ?').get(key) as
+      | { value: string }
+      | undefined;
     return row?.value;
   }
 
@@ -149,7 +161,9 @@ export class Store {
 
   recordTaskMessage(taskId: string, feishuMsgId: string) {
     this.db
-      .prepare('INSERT OR IGNORE INTO task_messages (feishu_msg_id, task_id, created_at) VALUES (?, ?, ?)')
+      .prepare(
+        'INSERT OR IGNORE INTO task_messages (feishu_msg_id, task_id, created_at) VALUES (?, ?, ?)',
+      )
       .run(feishuMsgId, taskId, Date.now());
   }
 
@@ -178,7 +192,9 @@ export class Store {
   }
 
   getTaskByRootMsg(rootMsgId: string): Task | undefined {
-    return this.db.prepare('SELECT * FROM tasks WHERE root_msg_id = ?').get(rootMsgId) as Task | undefined;
+    return this.db.prepare('SELECT * FROM tasks WHERE root_msg_id = ?').get(rootMsgId) as
+      | Task
+      | undefined;
   }
 
   listTasks(): Task[] {
@@ -186,7 +202,9 @@ export class Store {
   }
 
   mostRecentTask(): Task | undefined {
-    return this.db.prepare('SELECT * FROM tasks ORDER BY last_active_at DESC LIMIT 1').get() as Task | undefined;
+    return this.db.prepare('SELECT * FROM tasks ORDER BY last_active_at DESC LIMIT 1').get() as
+      | Task
+      | undefined;
   }
 
   mostRecentTaskInChat(chatId: string): Task | undefined {
@@ -196,17 +214,19 @@ export class Store {
   }
 
   clearCurrentForTask(taskId: string): void {
-    this.db
-      .prepare("DELETE FROM state WHERE key LIKE 'current_task:%' AND value = ?")
-      .run(taskId);
+    this.db.prepare("DELETE FROM state WHERE key LIKE 'current_task:%' AND value = ?").run(taskId);
   }
 
   setRootMsg(id: string, rootMsgId: string, rootChatId: string) {
-    this.db.prepare('UPDATE tasks SET root_msg_id = ?, root_chat_id = ? WHERE id = ?').run(rootMsgId, rootChatId, id);
+    this.db
+      .prepare('UPDATE tasks SET root_msg_id = ?, root_chat_id = ? WHERE id = ?')
+      .run(rootMsgId, rootChatId, id);
   }
 
   setStatus(id: string, status: TaskStatus) {
-    this.db.prepare('UPDATE tasks SET status = ?, last_active_at = ? WHERE id = ?').run(status, Date.now(), id);
+    this.db
+      .prepare('UPDATE tasks SET status = ?, last_active_at = ? WHERE id = ?')
+      .run(status, Date.now(), id);
   }
 
   setAgentSessionId(id: string, sessionId: string) {
@@ -235,8 +255,16 @@ export class Store {
 
   logEvent(taskId: string, kind: string, tool?: string, payload?: unknown) {
     this.db
-      .prepare(`INSERT INTO events (task_id, kind, tool, payload, created_at) VALUES (?, ?, ?, ?, ?)`)
-      .run(taskId, kind, tool ?? null, payload != null ? JSON.stringify(payload) : null, Date.now());
+      .prepare(
+        `INSERT INTO events (task_id, kind, tool, payload, created_at) VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(
+        taskId,
+        kind,
+        tool ?? null,
+        payload != null ? JSON.stringify(payload) : null,
+        Date.now(),
+      );
   }
 
   recentEvents(taskId: string, n = 50): EventRow[] {

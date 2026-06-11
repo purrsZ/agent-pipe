@@ -2,14 +2,12 @@ import type { AgentEvent } from '../types.js';
 
 export class ClaudeParser {
   private _fullText = '';
-  private _latestUsage:
-    | {
-        inputTokens?: number;
-        outputTokens?: number;
-        cacheCreationInputTokens?: number;
-        cacheReadInputTokens?: number;
-      }
-    | null = null;
+  private _latestUsage: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheCreationInputTokens?: number;
+    cacheReadInputTokens?: number;
+  } | null = null;
 
   get fullText(): string {
     return this._fullText;

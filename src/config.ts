@@ -1,6 +1,6 @@
 import 'dotenv/config';
-import * as path from 'node:path';
 import * as os from 'node:os';
+import * as path from 'node:path';
 import type { AgentKind } from './store.js';
 
 function expandHome(p: string): string {
@@ -16,7 +16,11 @@ function required(name: string): string {
 export interface Config {
   feishu: { appId: string; appSecret: string };
   claude: { path: string; model: string; effort: string };
-  codex: { path: string; model: string; reasoningEffort?: 'low' | 'medium' | 'high' };
+  codex: {
+    path: string;
+    model: string;
+    reasoningEffort?: 'low' | 'medium' | 'high';
+  };
   defaultAgent: AgentKind;
   maxHot: number;
   allowedOpenIds: Set<string>;
