@@ -193,7 +193,10 @@ export class CommandHandler {
       const mark = t.id === current ? '★' : '•';
       return `${mark} ${t.display_name}  [${t.agent_kind}/${t.status}] (${t.mode})  ${age}前活跃\n    ${t.cwd}`;
     });
-    await this.sender.reply(msg.messageId, `任务 ${tasks.length} 个 (★=本会话当前):\n${lines.join('\n')}`);
+    await this.sender.reply(
+      msg.messageId,
+      `任务 ${tasks.length} 个 (★=本会话当前):\n${lines.join('\n')}`,
+    );
   }
 
   private async handleStatus(msg: IncomingMessage): Promise<void> {
@@ -340,7 +343,9 @@ export class CommandHandler {
       }
     }
     if (matches.length === 0) {
-      return { error: `没有找到匹配 "${raw}" 的目录（搜索范围: ${this.config.allowedCwdPrefixes.join(', ')}）` };
+      return {
+        error: `没有找到匹配 "${raw}" 的目录（搜索范围: ${this.config.allowedCwdPrefixes.join(', ')}）`,
+      };
     }
     if (matches.length > 1) {
       const list = matches.map((m) => `  ${m}`).join('\n');
@@ -358,9 +363,7 @@ export class CommandHandler {
         await this.sender.reply(msg.messageId, '白名单为空');
         return;
       }
-      const lines = list.map(
-        (w, i) => `${i + 1}. ${w.name ?? '(no name)'}  ${w.open_id}`,
-      );
+      const lines = list.map((w, i) => `${i + 1}. ${w.name ?? '(no name)'}  ${w.open_id}`);
       await this.sender.reply(msg.messageId, `白名单 ${list.length} 人:\n${lines.join('\n')}`);
       return;
     }
@@ -376,10 +379,7 @@ export class CommandHandler {
         if (arg.startsWith('ou_')) targets.push({ openId: arg });
       }
       if (targets.length === 0) {
-        await this.sender.reply(
-          msg.messageId,
-          `用法: /wl ${sub} @某人  或  /wl ${sub} ou_xxx`,
-        );
+        await this.sender.reply(msg.messageId, `用法: /wl ${sub} @某人  或  /wl ${sub} ou_xxx`);
         return;
       }
       const results: string[] = [];
@@ -440,10 +440,7 @@ export class CommandHandler {
     }
     this.store.clearAgentSessionId(name);
     this.pool.respawn(name);
-    await this.sender.reply(
-      msg.messageId,
-      `[${name}] 已清空会话上下文，下条消息开全新会话。`,
-    );
+    await this.sender.reply(msg.messageId, `[${name}] 已清空会话上下文，下条消息开全新会话。`);
   }
 
   private async handleCompact(msg: IncomingMessage, rest: string[]): Promise<void> {
@@ -474,7 +471,10 @@ export class CommandHandler {
   private async handleGet(msg: IncomingMessage, rest: string[]): Promise<void> {
     const raw = stripWrappingQuotes(rest.join(' ').trim());
     if (!raw) {
-      await this.sender.reply(msg.messageId, '用法: /get <path>  (相对路径基于本会话当前任务的 cwd)');
+      await this.sender.reply(
+        msg.messageId,
+        '用法: /get <path>  (相对路径基于本会话当前任务的 cwd)',
+      );
       return;
     }
     const task = this.resolveTaskForChat(msg.chatId);
@@ -484,7 +484,9 @@ export class CommandHandler {
     }
     const home = process.env.HOME ?? '';
     const expanded = raw.startsWith('~') ? path.join(home, raw.slice(1)) : raw;
-    const candidate = path.resolve(path.isAbsolute(expanded) ? expanded : path.join(task.cwd, expanded));
+    const candidate = path.resolve(
+      path.isAbsolute(expanded) ? expanded : path.join(task.cwd, expanded),
+    );
 
     let realPath: string;
     let realCwd: string;
@@ -525,7 +527,9 @@ export class CommandHandler {
     if (!task) {
       await this.sender.reply(
         msg.messageId,
-        name ? `任务不存在: ${name}` : '本会话没有任务。先用 /new <name> 新建并跑过消息后再 /export。',
+        name
+          ? `任务不存在: ${name}`
+          : '本会话没有任务。先用 /new <name> 新建并跑过消息后再 /export。',
       );
       return;
     }

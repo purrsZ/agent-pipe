@@ -39,13 +39,5 @@
         "organizeImports": "off"
       }
     }
-  },
-  "overrides": [
-    {
-      // 临时豁免：commands.ts 工作区里有未提交的 /export WIP，现在格式化会把
-      // 格式改动混进那份 WIP。等 /export 提交后：删掉本 override + 跑 npm run lint:fix。
-      "includes": ["src/bridge/commands.ts"],
-      "formatter": { "enabled": false }
-    }
-  ]
+  }
 }
