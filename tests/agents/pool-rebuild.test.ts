@@ -10,6 +10,7 @@ function fakeTask(id: string, kind: AgentKind): Task {
     id,
     display_name: id,
     agent_kind: kind,
+    owner_kind: 'bridge',
     mode: 'sandbox',
     cwd: '/tmp',
     root_msg_id: null,

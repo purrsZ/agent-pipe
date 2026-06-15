@@ -560,7 +560,7 @@ export class CommandHandler {
   private resolveTaskForChat(chatId: string) {
     const currentId = this.store.getState(currentTaskKey(chatId));
     if (currentId) {
-      const t = this.store.getTask(currentId);
+      const t = this.store.getBridgeTask(currentId);
       if (t) return t;
     }
     return this.store.mostRecentTaskInChat(chatId);
@@ -662,7 +662,8 @@ export class CommandHandler {
       await this.sender.reply(msg.messageId, '用法: /rm <name>');
       return;
     }
-    const task = this.store.getTask(name);
+    // getBridgeTask (not getTask): a managed shadow task must not be deletable via /rm.
+    const task = this.store.getBridgeTask(name);
     if (!task) {
       await this.sender.reply(msg.messageId, `任务不存在: ${name}`);
       return;

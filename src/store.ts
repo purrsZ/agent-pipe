@@ -5,11 +5,16 @@ import Database from 'better-sqlite3';
 export type TaskStatus = 'hot' | 'suspended' | 'done' | 'error';
 export type TaskMode = 'project' | 'sandbox';
 export type AgentKind = 'claude' | 'codex';
+// Neutral owner dimension (no business vocabulary, kernel-layer safe). `managed` rows
+// are shadow tasks borrowed by the non-bridge layer as a run channel; they stay invisible
+// to every bridge-facing query (routing / list / rm / status). See M1b plan WI-1.
+export type TaskOwnerKind = 'bridge' | 'managed';
 
 export interface Task {
   id: string;
   display_name: string;
   agent_kind: AgentKind;
+  owner_kind: TaskOwnerKind;
   mode: TaskMode;
   cwd: string;
   root_msg_id: string | null;
@@ -23,7 +28,7 @@ export interface Task {
 
 export interface ThreadClaim {
   thread_root_id: string;
-  owner_kind: 'bridge' | 'managed';
+  owner_kind: TaskOwnerKind;
   owner_id: string;
   created_at: number;
 }
@@ -54,6 +59,7 @@ export class Store {
         id               TEXT PRIMARY KEY,
         display_name     TEXT NOT NULL,
         agent_kind       TEXT NOT NULL DEFAULT 'claude',
+        owner_kind       TEXT NOT NULL DEFAULT 'bridge',
         mode             TEXT NOT NULL,
         cwd              TEXT NOT NULL,
         root_msg_id      TEXT UNIQUE,
@@ -112,6 +118,12 @@ export class Store {
 
     if (!names.has('agent_kind')) {
       this.db.exec(`ALTER TABLE tasks ADD COLUMN agent_kind TEXT NOT NULL DEFAULT 'claude'`);
+    }
+    // WI-1: owner_kind follows the agent_kind precedent — present in CREATE TABLE for
+    // new DBs, back-filled here for old ones (this guarded ADD COLUMN is the real
+    // migration mechanism; existing rows default to 'bridge', zero regression).
+    if (!names.has('owner_kind')) {
+      this.db.exec(`ALTER TABLE tasks ADD COLUMN owner_kind TEXT NOT NULL DEFAULT 'bridge'`);
     }
     if (names.has('cc_session_id') && !names.has('agent_session_id')) {
       this.db.exec(`ALTER TABLE tasks RENAME COLUMN cc_session_id TO agent_session_id`);
@@ -204,46 +216,86 @@ export class Store {
   getTaskByMessageId(feishuMsgId: string): Task | undefined {
     return this.db
       .prepare(
-        `SELECT t.* FROM tasks t JOIN task_messages m ON m.task_id = t.id WHERE m.feishu_msg_id = ?`,
+        `SELECT t.* FROM tasks t JOIN task_messages m ON m.task_id = t.id WHERE m.feishu_msg_id = ? AND t.owner_kind = 'bridge'`,
       )
       .get(feishuMsgId) as Task | undefined;
   }
 
-  createTask(t: Omit<Task, 'created_at' | 'last_active_at'>): Task {
+  createTask(
+    t: Omit<Task, 'created_at' | 'last_active_at' | 'owner_kind'> & { owner_kind?: TaskOwnerKind },
+  ): Task {
     const now = Date.now();
-    const row: Task = { ...t, created_at: now, last_active_at: now };
+    const row: Task = {
+      ...t,
+      owner_kind: t.owner_kind ?? 'bridge',
+      created_at: now,
+      last_active_at: now,
+    };
     this.db
       .prepare(
-        `INSERT INTO tasks (id, display_name, agent_kind, mode, cwd, root_msg_id, root_chat_id, agent_session_id, status, model, created_at, last_active_at)
-         VALUES (@id, @display_name, @agent_kind, @mode, @cwd, @root_msg_id, @root_chat_id, @agent_session_id, @status, @model, @created_at, @last_active_at)`,
+        `INSERT INTO tasks (id, display_name, agent_kind, owner_kind, mode, cwd, root_msg_id, root_chat_id, agent_session_id, status, model, created_at, last_active_at)
+         VALUES (@id, @display_name, @agent_kind, @owner_kind, @mode, @cwd, @root_msg_id, @root_chat_id, @agent_session_id, @status, @model, @created_at, @last_active_at)`,
       )
       .run(row);
     return row;
   }
 
+  // WI-1 (M1b): upsert a managed shadow task (a run channel owned by the non-bridge
+  // layer). Reuses the bridge run primitive (pool keys on task.id) but stays
+  // bridge-invisible via owner_kind. ON CONFLICT refreshes only cwd/last_active_at —
+  // never clobbers a session/status the runner wrote mid-turn.
+  upsertTask(t: Omit<Task, 'created_at' | 'last_active_at'>): Task {
+    const now = Date.now();
+    const row: Task = { ...t, created_at: now, last_active_at: now };
+    this.db
+      .prepare(
+        `INSERT INTO tasks (id, display_name, agent_kind, owner_kind, mode, cwd, root_msg_id, root_chat_id, agent_session_id, status, model, created_at, last_active_at)
+         VALUES (@id, @display_name, @agent_kind, @owner_kind, @mode, @cwd, @root_msg_id, @root_chat_id, @agent_session_id, @status, @model, @created_at, @last_active_at)
+         ON CONFLICT(id) DO UPDATE SET cwd = excluded.cwd, last_active_at = excluded.last_active_at`,
+      )
+      .run(row);
+    return this.getTask(t.id)!;
+  }
+
+  // Unfiltered by owner_kind: the pool/runner key on task.id and must reach managed rows
+  // to write back session/status (D6). Bridge-facing callers use getBridgeTask instead.
   getTask(id: string): Task | undefined {
     return this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Task | undefined;
   }
 
-  getTaskByRootMsg(rootMsgId: string): Task | undefined {
-    return this.db.prepare('SELECT * FROM tasks WHERE root_msg_id = ?').get(rootMsgId) as
+  // Bridge-facing lookup: never returns a managed shadow task, so /rm and current-task
+  // resolution can't target a managed run channel (WI-1 isolation).
+  getBridgeTask(id: string): Task | undefined {
+    return this.db.prepare("SELECT * FROM tasks WHERE id = ? AND owner_kind = 'bridge'").get(id) as
       | Task
       | undefined;
+  }
+
+  getTaskByRootMsg(rootMsgId: string): Task | undefined {
+    return this.db
+      .prepare("SELECT * FROM tasks WHERE root_msg_id = ? AND owner_kind = 'bridge'")
+      .get(rootMsgId) as Task | undefined;
   }
 
   listTasks(): Task[] {
-    return this.db.prepare('SELECT * FROM tasks ORDER BY last_active_at DESC').all() as Task[];
+    return this.db
+      .prepare("SELECT * FROM tasks WHERE owner_kind = 'bridge' ORDER BY last_active_at DESC")
+      .all() as Task[];
   }
 
   mostRecentTask(): Task | undefined {
-    return this.db.prepare('SELECT * FROM tasks ORDER BY last_active_at DESC LIMIT 1').get() as
-      | Task
-      | undefined;
+    return this.db
+      .prepare(
+        "SELECT * FROM tasks WHERE owner_kind = 'bridge' ORDER BY last_active_at DESC LIMIT 1",
+      )
+      .get() as Task | undefined;
   }
 
   mostRecentTaskInChat(chatId: string): Task | undefined {
     return this.db
-      .prepare('SELECT * FROM tasks WHERE root_chat_id = ? ORDER BY last_active_at DESC LIMIT 1')
+      .prepare(
+        "SELECT * FROM tasks WHERE root_chat_id = ? AND owner_kind = 'bridge' ORDER BY last_active_at DESC LIMIT 1",
+      )
       .get(chatId) as Task | undefined;
   }
 

@@ -15,6 +15,7 @@ const taskFixture = (
   id,
   display_name: id,
   agent_kind: 'claude',
+  owner_kind: 'bridge',
   mode: 'sandbox',
   cwd: `/tmp/${id}`,
   root_msg_id: null,

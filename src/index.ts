@@ -532,7 +532,7 @@ async function main() {
     if (!task) {
       const currentId = store.getState(currentTaskKey(msg.chatId));
       if (currentId) {
-        task = store.getTask(currentId);
+        task = store.getBridgeTask(currentId);
         if (task) {
           logger.info(
             { fallbackTo: task.id, chatId: msg.chatId },
