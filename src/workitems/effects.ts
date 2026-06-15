@@ -80,6 +80,10 @@ export class EffectRuntime {
   recoverRunning(effectId: number): void {
     const effect = this.deps.store.getEffect(effectId);
     if (effect?.status !== 'running' || this.inflight.has(effect.workitemId)) return;
+    if (this.isTerminalWorkitem(effect.workitemId)) {
+      this.abort(effectId, 'workitem_terminal');
+      return;
+    }
 
     const handler = this.handlers.get(effect.kind);
     if (!handler) {
@@ -92,6 +96,10 @@ export class EffectRuntime {
   recoverRun(effectId: number): void {
     const effect = this.deps.store.getEffect(effectId);
     if (effect?.status !== 'running' || this.inflight.has(effect.workitemId)) return;
+    if (this.isTerminalWorkitem(effect.workitemId)) {
+      this.abort(effectId, 'workitem_terminal');
+      return;
+    }
 
     const handler = this.handlers.get(effect.kind);
     if (!handler) {
@@ -147,6 +155,10 @@ export class EffectRuntime {
 
   private async drainOne(workitemId: string): Promise<void> {
     if (!this.intakeOpen || this.inflight.has(workitemId)) return;
+    // Never run a handler for a terminal workitem — a leftover pending effect on a
+    // done/failed item must not resurrect a zombie run (v4 #4). It stays parked;
+    // terminal-ization (reducer) abandons such effects rather than executing them.
+    if (this.isTerminalWorkitem(workitemId)) return;
 
     const inflightRows = this.deps.store.listInflightEffects(workitemId);
     if (inflightRows.some((effect) => effect.status === 'running')) return;
@@ -308,6 +320,14 @@ export class EffectRuntime {
       if (entry.effectId === effectId) return entry;
     }
     return undefined;
+  }
+
+  private isTerminalWorkitem(workitemId: string): boolean {
+    const item = this.deps.store.getWorkItem(workitemId);
+    return (
+      item !== undefined &&
+      (item.status === 'done' || item.status === 'failed' || item.status === 'cancelled')
+    );
   }
 }
 

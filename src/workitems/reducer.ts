@@ -14,6 +14,7 @@ import type {
   Wait,
   WorkItem,
   WorkItemEvent,
+  WorkItemStatus,
   WorkType,
 } from './types.js';
 import type { WorkitemsConfig } from './config.js';
@@ -145,7 +146,7 @@ export class ReducerRuntime {
     this.deps.store.tx(() => {
       const now = this.deps.clock.now();
       const seq = this.deps.store.nextSeq(workitemId);
-      if (item.status === 'done' || item.status === 'failed' || item.status === 'cancelled') {
+      if (isTerminalStatus(item.status)) {
         this.deps.store.appendEvent(workitemId, seq, pending.kind, pending.payload);
         return;
       }
@@ -235,6 +236,27 @@ export class ReducerRuntime {
         statusDetail: null,
         updatedAt: now,
       });
+      // A terminal transition is mutually exclusive with new work: a done/failed
+      // item must never spawn dispatch/waits/effects — that would resurrect a zombie
+      // run (drainOne/recovery would pick it up) and feed the watchdog's terminal
+      // event loop. Drop + audit rather than silently honoring the contradiction
+      // (v4 #4). A phase change alongside terminal is still allowed.
+      const droppedDispatch = transition.dispatch?.length ?? 0;
+      const droppedWaits = transition.waits?.length ?? 0;
+      const droppedEffects = transition.effects?.length ?? 0;
+      if (droppedDispatch || droppedWaits || droppedEffects) {
+        this.deps.logger?.warn?.(
+          { workitemId: item.id, terminal: transition.terminal },
+          'dropped dispatch/waits/effects declared alongside a terminal transition',
+        );
+        this.appendAudit(item.id, 'terminal_work_dropped', {
+          terminal: transition.terminal,
+          dispatch: droppedDispatch,
+          waits: droppedWaits,
+          effects: droppedEffects,
+        });
+      }
+      return;
     }
     for (const spec of transition.dispatch ?? []) {
       this.insertDispatchOrWake(item, seq, spec, now);
@@ -469,6 +491,14 @@ export class ReducerRuntime {
     now: number,
   ): void {
     validateAssignmentSpec(spec);
+    // Re-read status: a run conclusion can terminal-ize the item and still reach
+    // releaseWakePending in the same apply — a terminal item must never receive a
+    // fresh dispatch (v4 #4). This is the single chokepoint for every dispatch path.
+    const current = this.deps.store.getWorkItem(item.id);
+    if (current && isTerminalStatus(current.status)) {
+      this.deps.logger?.warn?.({ workitemId: item.id }, 'skipped dispatch on terminal workitem');
+      return;
+    }
     if (
       !spec.replacesAssignmentId &&
       this.isRunClass('run') &&
@@ -724,6 +754,10 @@ function isSqliteConstraint(err: unknown): boolean {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isTerminalStatus(status: WorkItemStatus): boolean {
+  return status === 'done' || status === 'failed' || status === 'cancelled';
 }
 
 function isRunConclusion(kind: string): boolean {
