@@ -172,6 +172,24 @@ describe('startupRecovery basic recovery', () => {
     store.close();
   });
 
+  it('isolates a throwing reconcile so one bad repo cannot block startup', () => {
+    const { api, reducer, effects, store, artifacts } = harness();
+    api.createWorkItem({ type: 'noop', title: 'A', source: {} });
+    api.createWorkItem({ type: 'noop', title: 'B', source: {} });
+    // A corrupt/locked artifact git repo makes reconcile throw. Recovery must log and
+    // continue rather than letting container.start() throw and the bridge never boot.
+    const boom = vi.spyOn(artifacts, 'reconcile').mockImplementation(() => {
+      throw new Error('corrupt git repo');
+    });
+
+    expect(() =>
+      startupRecovery({ store, effects, artifacts, clock, logger, reducer }),
+    ).not.toThrow();
+    expect(boom).toHaveBeenCalled();
+    expect(logger.error).toHaveBeenCalled();
+    store.close();
+  });
+
   it('does not depend on events when rebuilding non-terminal workitems', () => {
     const { api, reducer, store, dbPath } = harness();
     const item = api.createWorkItem({ type: 'noop', title: 'Events gone', source: {} }).item;

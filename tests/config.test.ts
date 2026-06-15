@@ -20,6 +20,7 @@ const MANAGED = [
   'CODEX_REASONING_EFFORT',
   'DEFAULT_AGENT',
   'MAX_HOT',
+  'MAX_CONCURRENT',
   'LOG_LEVEL',
   'WORKITEMS_DB_PATH',
   'WORKITEMS_DIR',
@@ -132,5 +133,44 @@ describe('loadConfig: parsing & defaults', () => {
     expect(loadConfig().maxHot).toBe(4);
     process.env.MAX_HOT = '8';
     expect(loadConfig().maxHot).toBe(8);
+  });
+
+  it('maxConcurrent defaults to maxHot, never NaN', () => {
+    // unset → defaults to maxHot default 4
+    expect(loadConfig().maxConcurrent).toBe(4);
+    // unset MAX_CONCURRENT inherits a custom MAX_HOT
+    process.env.MAX_HOT = '8';
+    expect(loadConfig().maxConcurrent).toBe(8);
+    // explicit MAX_CONCURRENT wins
+    process.env.MAX_CONCURRENT = '3';
+    expect(loadConfig().maxConcurrent).toBe(3);
+  });
+
+  it('blank MAX_HOT / MAX_CONCURRENT fall back instead of becoming NaN (deadlock guard)', () => {
+    // A blank env var must NOT slip through `??` into Number.parseInt('') = NaN, which
+    // would make the AgentPool concurrency Semaphore reject every acquire and freeze
+    // the whole bridge.
+    process.env.MAX_HOT = '';
+    process.env.MAX_CONCURRENT = '';
+    const cfg = loadConfig();
+    expect(cfg.maxHot).toBe(4);
+    expect(cfg.maxConcurrent).toBe(4);
+    expect(Number.isNaN(cfg.maxHot)).toBe(false);
+    expect(Number.isNaN(cfg.maxConcurrent)).toBe(false);
+  });
+
+  it('fails fast on non-numeric MAX_HOT / MAX_CONCURRENT', () => {
+    process.env.MAX_HOT = 'eight';
+    expect(() => loadConfig()).toThrow(/MAX_HOT/);
+    process.env.MAX_HOT = '4';
+    process.env.MAX_CONCURRENT = 'lots';
+    expect(() => loadConfig()).toThrow(/MAX_CONCURRENT/);
+  });
+
+  it('rejects zero and negative concurrency', () => {
+    process.env.MAX_HOT = '0';
+    expect(() => loadConfig()).toThrow(/MAX_HOT/);
+    process.env.MAX_HOT = '-1';
+    expect(() => loadConfig()).toThrow(/MAX_HOT/);
   });
 });

@@ -68,7 +68,12 @@ export class AgentPool {
     private store: Store,
     private logger: Logger,
   ) {
-    const cap = Math.max(1, Math.min(cfg.maxConcurrent ?? cfg.maxHot, cfg.maxHot));
+    // Defense-in-depth: a non-finite / non-positive cap (e.g. a misparsed config that
+    // slipped through) would make Semaphore.tryAcquire's `active < max` always false and
+    // deadlock every send(). Clamp to a floor of 1 so a bad value degrades to serial
+    // execution, never a permanent hang. config.ts validation is the primary guard.
+    const rawCap = Math.min(cfg.maxConcurrent ?? cfg.maxHot, cfg.maxHot);
+    const cap = Number.isFinite(rawCap) && rawCap >= 1 ? Math.floor(rawCap) : 1;
     this.slots = new Semaphore(cap);
   }
 

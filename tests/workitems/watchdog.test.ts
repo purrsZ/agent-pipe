@@ -321,6 +321,30 @@ describe('Watchdog.tick', () => {
     store.close();
   });
 
+  it('survives a throwing scan query without crashing the tick (crash isolation)', () => {
+    // safeEnqueue isolates per-workitem enqueue throws; this guards the OTHER half —
+    // a scan query (listOpenWaits / listRunningAssignments) throwing must not escape
+    // the 1Hz setInterval callback and take the whole bridge down.
+    const throwingStore = {
+      listOpenWaits: () => {
+        throw new Error('SQLITE_BUSY');
+      },
+      listRunningAssignments: () => [],
+      getAssignment: () => undefined,
+    } as unknown as WorkitemsStore;
+    const wd = new Watchdog({
+      store: throwingStore,
+      reducer: { enqueue: () => {} } as unknown as ReducerRuntime,
+      effects: { lastBeat: () => undefined },
+      clock,
+      logger,
+      cfg: loadWorkitemsConfig({}),
+    });
+
+    expect(() => wd.tick()).not.toThrow();
+    expect(logger.error).toHaveBeenCalled();
+  });
+
   it('never drives a terminal workitem — no timer/agent/assignment spam (v4 #3)', () => {
     const { api, store, watchdog } = harness();
     const item = createItem(api);

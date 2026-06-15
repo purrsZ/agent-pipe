@@ -44,6 +44,20 @@ function parseEffort(v: string | undefined): 'low' | 'medium' | 'high' | undefin
   return undefined;
 }
 
+// Parse an optional positive-integer env var: fall back when unset/blank, fail fast on
+// garbage. Mirrors workitems/config.ts positiveInt. The old `Number.parseInt(env ?? '4')`
+// let a blank or non-numeric value become NaN, which then flowed into the AgentPool
+// concurrency Semaphore (active < NaN is always false) and deadlocked every send — a
+// silent, hard-to-diagnose freeze. A bad value must surface at startup instead.
+function parsePositiveInt(raw: string | undefined, fallback: number, name: string): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`环境变量 ${name} 必须是正整数，收到: ${raw}`);
+  }
+  return value;
+}
+
 export function loadConfig(): Config {
   const appId = required('FEISHU_APP_ID');
   const appSecret = required('FEISHU_APP_SECRET');
@@ -62,6 +76,8 @@ export function loadConfig(): Config {
     .filter(Boolean);
 
   const dataDir = expandHome(process.env.DATA_DIR ?? '~/.agent-pipe');
+  const maxHot = parsePositiveInt(process.env.MAX_HOT, 4, 'MAX_HOT');
+  const maxConcurrent = parsePositiveInt(process.env.MAX_CONCURRENT, maxHot, 'MAX_CONCURRENT');
 
   return {
     feishu: { appId, appSecret },
@@ -76,8 +92,8 @@ export function loadConfig(): Config {
       reasoningEffort: parseEffort(process.env.CODEX_REASONING_EFFORT),
     },
     defaultAgent: parseAgent(process.env.DEFAULT_AGENT),
-    maxHot: Number.parseInt(process.env.MAX_HOT ?? '4', 10),
-    maxConcurrent: Number.parseInt(process.env.MAX_CONCURRENT ?? process.env.MAX_HOT ?? '4', 10),
+    maxHot,
+    maxConcurrent,
     allowedOpenIds: new Set(allowed),
     allowedCwdPrefixes: cwdPrefixes,
     logLevel: process.env.LOG_LEVEL ?? 'info',

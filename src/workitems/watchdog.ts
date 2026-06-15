@@ -37,6 +37,19 @@ export class Watchdog {
   constructor(private readonly deps: WatchdogDeps) {}
 
   tick(): void {
+    // The 1Hz sweep must never throw out of its setInterval callback — an uncaught error
+    // there crashes the whole bridge and re-fires from the same persisted state on every
+    // restart. Per-workitem enqueue failures are isolated by safeEnqueue; this outer
+    // guard additionally contains a throwing scan query (SQLITE_BUSY, a corrupt row's
+    // decode, …) so one bad read just skips this tick and retries next interval.
+    try {
+      this.runTick();
+    } catch (err) {
+      this.deps.logger?.error?.({ err }, 'watchdog tick failed (isolated, retrying next interval)');
+    }
+  }
+
+  private runTick(): void {
     const now = this.deps.clock.now();
     const stalled = new Map<string, StalledCandidate>();
 
