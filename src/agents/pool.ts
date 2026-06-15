@@ -11,19 +11,66 @@ import {
 
 export interface AgentPoolConfig {
   maxHot: number;
+  // WI-C: global cap on concurrent runTurns. Defaults to maxHot, clamped ≤ maxHot
+  // (more in-flight than hot slots would re-introduce "over hot cap").
+  maxConcurrent?: number;
+}
+
+// WI-C: global concurrency gate. Bounds how many runTurns run at once; excess send()
+// calls queue FIFO and resume in order as slots free. The slot is held across runTurn and
+// released in finally (§2.1). Replaces the old "busy → spawn over maxHot" behavior.
+class Semaphore {
+  private active = 0;
+  private readonly waiters: Array<() => void> = [];
+
+  constructor(private readonly max: number) {}
+
+  tryAcquire(): boolean {
+    if (this.active < this.max) {
+      this.active++;
+      return true;
+    }
+    return false;
+  }
+
+  acquire(): Promise<void> {
+    if (this.tryAcquire()) return Promise.resolve();
+    return new Promise<void>((resolve) => this.waiters.push(resolve));
+  }
+
+  release(): void {
+    // Hand the slot straight to the next waiter (active unchanged); only drop the count
+    // when nobody is queued.
+    const next = this.waiters.shift();
+    if (next) next();
+    else this.active = Math.max(0, this.active - 1);
+  }
+
+  get activeCount(): number {
+    return this.active;
+  }
+
+  get queuedCount(): number {
+    return this.waiters.length;
+  }
 }
 
 export class AgentPool {
   private runners = new Map<string, Runner>();
   // WI-A: last per-run options fingerprint per task — a change forces a rebuild (§2.1).
   private fingerprints = new Map<string, string>();
+  // WI-C: global concurrency gate (≤ maxHot).
+  private readonly slots: Semaphore;
 
   constructor(
     private factories: Record<AgentKind, AgentFactory>,
     private cfg: AgentPoolConfig,
     private store: Store,
     private logger: Logger,
-  ) {}
+  ) {
+    const cap = Math.max(1, Math.min(cfg.maxConcurrent ?? cfg.maxHot, cfg.maxHot));
+    this.slots = new Semaphore(cap);
+  }
 
   factoryFor(kind: AgentKind): AgentFactory {
     const f = this.factories[kind];
@@ -45,11 +92,21 @@ export class AgentPool {
     return this.runners.size;
   }
 
+  // WI-C: /diag-slots observability.
+  activeRuns(): number {
+    return this.slots.activeCount;
+  }
+
+  queuedRuns(): number {
+    return this.slots.queuedCount;
+  }
+
   async send(
     task: Task,
     text: string,
     callbacks?: ProgressCallbacks,
     options?: RunOptions,
+    onQueued?: () => void,
   ): Promise<TurnResult> {
     // §2.1 step 1: drop the cached runner when the kind changed (/agent switch) OR the
     // per-run options fingerprint changed (WI-A) — Claude bakes its args at spawn, so a
@@ -71,26 +128,37 @@ export class AgentPool {
       }
     }
 
-    if (!runner) {
-      // Resolve the factory BEFORE evicting — a corrupt/unknown agent_kind on the
-      // task row shouldn't punish a healthy hot Claude runner by booting it.
-      const factory = this.factoryFor(task.agent_kind);
-      if (this.hotCount() >= this.cfg.maxHot) this.evictLRU();
-      runner = factory.createRunner(task, {
-        store: this.store,
-        logger: this.logger,
-      });
-      this.runners.set(task.id, runner);
-    } else {
-      // refresh snapshot — model/agent_kind/cwd may have changed between turns
-      runner.setTask(task);
+    // §2.1 step 2 (WI-C): acquire a global slot BEFORE createRunner — otherwise N sends
+    // each build a runner (mutual evict thrash) and squat a maxHot slot while waiting.
+    // Full → onQueued once, then FIFO wait. Released in finally below.
+    if (!this.slots.tryAcquire()) {
+      onQueued?.();
+      await this.slots.acquire();
     }
-    this.fingerprints.set(task.id, fingerprint);
+    try {
+      if (!runner) {
+        // Resolve the factory BEFORE evicting — a corrupt/unknown agent_kind on the
+        // task row shouldn't punish a healthy hot Claude runner by booting it.
+        const factory = this.factoryFor(task.agent_kind);
+        if (this.hotCount() >= this.cfg.maxHot) this.evictLRU();
+        runner = factory.createRunner(task, {
+          store: this.store,
+          logger: this.logger,
+        });
+        this.runners.set(task.id, runner);
+      } else {
+        // refresh snapshot — model/agent_kind/cwd may have changed between turns
+        runner.setTask(task);
+      }
+      this.fingerprints.set(task.id, fingerprint);
 
-    if (runner.isBusy()) {
-      throw new Error(`任务 ${task.id} 正在处理上一条消息`);
+      if (runner.isBusy()) {
+        throw new Error(`任务 ${task.id} 正在处理上一条消息`);
+      }
+      return await runner.runTurn(text, callbacks, options);
+    } finally {
+      this.slots.release();
     }
-    return runner.runTurn(text, callbacks, options);
   }
 
   respawn(taskId: string): boolean {

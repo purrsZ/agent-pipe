@@ -108,6 +108,9 @@ export class CommandHandler {
         case '/diag-readonly':
           await this.handleDiagReadonly(msg, rest);
           return;
+        case '/diag-slots':
+          await this.handleDiagSlots(msg);
+          return;
         case '/help':
           await this.sender.reply(msg.messageId, HELP_TEXT);
           return;
@@ -242,6 +245,18 @@ export class CommandHandler {
       return;
     }
     this.onDiagReadonly(task.id, msg.messageId);
+  }
+
+  // WI-C temporary diagnostic (admin-only): print the global concurrency gate state.
+  private async handleDiagSlots(msg: IncomingMessage): Promise<void> {
+    if (!this.isAdmin(msg.userId)) {
+      await this.sender.reply(msg.messageId, '/diag-slots 仅管理员可用。');
+      return;
+    }
+    await this.sender.reply(
+      msg.messageId,
+      `pool: active=${this.pool.activeRuns()} queued=${this.pool.queuedRuns()} hot=${this.pool.hotCount()} total=${this.pool.totalRunners()}`,
+    );
   }
 
   private async handleStatus(msg: IncomingMessage): Promise<void> {

@@ -23,6 +23,7 @@ export interface Config {
   };
   defaultAgent: AgentKind;
   maxHot: number;
+  maxConcurrent: number;
   allowedOpenIds: Set<string>;
   allowedCwdPrefixes: string[];
   logLevel: string;
@@ -76,6 +77,7 @@ export function loadConfig(): Config {
     },
     defaultAgent: parseAgent(process.env.DEFAULT_AGENT),
     maxHot: Number.parseInt(process.env.MAX_HOT ?? '4', 10),
+    maxConcurrent: Number.parseInt(process.env.MAX_CONCURRENT ?? process.env.MAX_HOT ?? '4', 10),
     allowedOpenIds: new Set(allowed),
     allowedCwdPrefixes: cwdPrefixes,
     logLevel: process.env.LOG_LEVEL ?? 'info',

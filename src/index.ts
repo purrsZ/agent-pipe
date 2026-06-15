@@ -124,7 +124,7 @@ async function main() {
   });
   const pool = new AgentPool(
     { claude: claudeFactory, codex: codexFactory },
-    { maxHot: config.maxHot },
+    { maxHot: config.maxHot, maxConcurrent: config.maxConcurrent },
     store,
     logger,
   );
@@ -275,7 +275,13 @@ async function main() {
 
       let result: Awaited<ReturnType<typeof pool.send>>;
       try {
-        result = await pool.send(task, prompt, callbacks);
+        result = await pool.send(task, prompt, callbacks, undefined, () => {
+          // WI-C/R2: global concurrency slot full — tell the user instead of going silent.
+          void sender.reply(
+            input.messageId,
+            `[${task.display_name}] 全局繁忙，排队等待空闲运行槽…`,
+          );
+        });
       } finally {
         await streaming?.stop();
       }

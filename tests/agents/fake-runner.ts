@@ -12,6 +12,8 @@ export class FakeRunner implements Runner {
   disposed = false;
   busy = false;
   readonly calls: Array<{ text: string; options?: RunOptions }> = [];
+  // WI-C: if set, runTurn blocks on this until resolved (lets a test hold a slot).
+  hold: Promise<void> | null = null;
   private activity = 0;
 
   constructor(taskId: string, kind: AgentKind) {
@@ -35,6 +37,7 @@ export class FakeRunner implements Runner {
     options?: RunOptions,
   ): Promise<TurnResult> {
     this.calls.push({ text, options });
+    if (this.hold) await this.hold;
     return { fullText: '', sessionId: null, toolCount: 0 };
   }
 
