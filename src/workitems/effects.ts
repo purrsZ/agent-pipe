@@ -134,12 +134,18 @@ export class EffectRuntime {
     const effect = this.deps.store.getEffect(effectId);
     if (!effect) return;
 
-    const inflight = this.findInflight(effectId);
-    inflight?.controller.abort();
-    if (effect.status !== 'done' && effect.status !== 'aborted') {
-      this.deps.store.setEffectStatus(effectId, 'aborted');
-    }
+    // Signal any in-flight handler to unwind cooperatively (idempotent).
+    this.findInflight(effectId)?.controller.abort();
 
+    // Already settled — nothing to abort; re-emitting effect_aborted would be noise.
+    if (effect.status === 'done' || effect.status === 'aborted') return;
+
+    // abort() only signals + enqueues. Flipping the effect to aborted is deferred to
+    // the effect_aborted apply so that the status change, the audit event, and the
+    // replacement dispatch all land in ONE transaction. The previous two-phase form
+    // (standalone setEffectStatus, then a separate enqueue) left an aborted-but-
+    // unaudited effect with a still-running assignment and no replacement when the
+    // process died in between — recoverable only via the watchdog heartbeat (v4 #9).
     const assignment = assignmentForEffect(this.deps.store, effect);
     this.deps.reducer.enqueue(effect.workitemId, {
       kind: 'effect_aborted',

@@ -385,6 +385,23 @@ export class ReducerRuntime {
 
     if (event.kind !== 'effect_aborted') return {};
 
+    // Flip the effect to aborted inside this apply (v4 #9): abort() now only signals
+    // + enqueues, so the status change is atomic with the audit event and the
+    // replacement dispatch below — no crash window can strand an aborted-but-running
+    // assignment. Guard on ownership + live status so a replayed/late event is inert.
+    const effectId =
+      typeof event.payload.effectId === 'number' ? event.payload.effectId : undefined;
+    if (effectId !== undefined) {
+      const effect = this.deps.store.getEffect(effectId);
+      if (
+        effect &&
+        effect.workitemId === event.workitemId &&
+        (effect.status === 'pending' || effect.status === 'running')
+      ) {
+        this.deps.store.setEffectStatus(effectId, 'aborted');
+      }
+    }
+
     const assignmentId =
       typeof event.payload.assignmentId === 'string' ? event.payload.assignmentId : undefined;
     if (!assignmentId) return {};
