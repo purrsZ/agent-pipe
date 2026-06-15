@@ -21,6 +21,13 @@ export interface Task {
   last_active_at: number;
 }
 
+export interface ThreadClaim {
+  thread_root_id: string;
+  owner_kind: 'bridge' | 'managed';
+  owner_id: string;
+  created_at: number;
+}
+
 export interface EventRow {
   id: number;
   task_id: string;
@@ -82,6 +89,12 @@ export class Store {
         open_id    TEXT PRIMARY KEY,
         name       TEXT,
         created_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS thread_claims (
+        thread_root_id TEXT PRIMARY KEY,
+        owner_kind     TEXT NOT NULL,
+        owner_id       TEXT NOT NULL,
+        created_at     INTEGER NOT NULL
       );
     `);
     this.migrateTasksLegacy();
@@ -157,6 +170,27 @@ export class Store {
 
   deleteState(key: string): void {
     this.db.prepare('DELETE FROM state WHERE key = ?').run(key);
+  }
+
+  // WI-D: thread → owner claim registry. owner_kind is a neutral value (bridge | managed)
+  // so this kernel-layer file carries no business vocabulary. Routing consults this before
+  // the bridge task fallback so a managed thread is never swallowed by it (and vice versa).
+  claimThread(rootId: string, ownerKind: 'bridge' | 'managed', ownerId: string): void {
+    this.db
+      .prepare(
+        'INSERT OR REPLACE INTO thread_claims (thread_root_id, owner_kind, owner_id, created_at) VALUES (?, ?, ?, ?)',
+      )
+      .run(rootId, ownerKind, ownerId, Date.now());
+  }
+
+  getThreadClaim(rootId: string): ThreadClaim | undefined {
+    return this.db.prepare('SELECT * FROM thread_claims WHERE thread_root_id = ?').get(rootId) as
+      | ThreadClaim
+      | undefined;
+  }
+
+  releaseThreadClaim(rootId: string): void {
+    this.db.prepare('DELETE FROM thread_claims WHERE thread_root_id = ?').run(rootId);
   }
 
   recordTaskMessage(taskId: string, feishuMsgId: string) {

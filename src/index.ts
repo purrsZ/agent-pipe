@@ -505,6 +505,22 @@ async function main() {
       return;
     }
 
+    // WI-D: consult the thread-claim registry BEFORE the bridge task fallback. A thread
+    // claimed by the managed (workitems) layer must not be swallowed by the bridge's
+    // root→task / recent-task fallback. M1a stub: log + placeholder; real handoff is M1b.
+    const threadRoot = msg.rootId ?? msg.parentId;
+    if (threadRoot) {
+      const claim = store.getThreadClaim(threadRoot);
+      if (claim?.owner_kind === 'managed') {
+        logger.info(
+          { threadRoot, ownerId: claim.owner_id },
+          'inbound on managed-claimed thread (M1a stub, handoff in M1b)',
+        );
+        await sender.reply(msg.messageId, '该话题已归工作项系统管理（M1a 占位，真正处理在 M1b）。');
+        return;
+      }
+    }
+
     const candidates = [msg.rootId, msg.parentId].filter((v): v is string => !!v);
     let task = candidates.length > 0 ? store.getTaskByRootMsg(candidates[0]!) : undefined;
     if (!task) {

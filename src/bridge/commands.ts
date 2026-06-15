@@ -111,6 +111,12 @@ export class CommandHandler {
         case '/diag-slots':
           await this.handleDiagSlots(msg);
           return;
+        case '/diag-claim':
+          await this.handleDiagClaim(msg, rest);
+          return;
+        case '/diag-unclaim':
+          await this.handleDiagUnclaim(msg, rest);
+          return;
         case '/help':
           await this.sender.reply(msg.messageId, HELP_TEXT);
           return;
@@ -257,6 +263,38 @@ export class CommandHandler {
       msg.messageId,
       `pool: active=${this.pool.activeRuns()} queued=${this.pool.queuedRuns()} hot=${this.pool.hotCount()} total=${this.pool.totalRunners()}`,
     );
+  }
+
+  // WI-D temporary diagnostic (admin-only): claim/release a thread so routing can be
+  // verified to consult the registry before the bridge fallback. Neutral params (no
+  // business vocabulary, kernel-layer safe). Removed/replaced in M1b.
+  private async handleDiagClaim(msg: IncomingMessage, rest: string[]): Promise<void> {
+    if (!this.isAdmin(msg.userId)) {
+      await this.sender.reply(msg.messageId, '/diag-claim 仅管理员可用。');
+      return;
+    }
+    const rootId = rest[0];
+    const kind = rest[1];
+    if (!rootId || (kind !== 'managed' && kind !== 'bridge')) {
+      await this.sender.reply(msg.messageId, '用法: /diag-claim <root_id> managed|bridge');
+      return;
+    }
+    this.store.claimThread(rootId, kind, msg.userId);
+    await this.sender.reply(msg.messageId, `已登记认领: ${rootId} → ${kind}`);
+  }
+
+  private async handleDiagUnclaim(msg: IncomingMessage, rest: string[]): Promise<void> {
+    if (!this.isAdmin(msg.userId)) {
+      await this.sender.reply(msg.messageId, '/diag-unclaim 仅管理员可用。');
+      return;
+    }
+    const rootId = rest[0];
+    if (!rootId) {
+      await this.sender.reply(msg.messageId, '用法: /diag-unclaim <root_id>');
+      return;
+    }
+    this.store.releaseThreadClaim(rootId);
+    await this.sender.reply(msg.messageId, `已释放认领: ${rootId}`);
   }
 
   private async handleStatus(msg: IncomingMessage): Promise<void> {
