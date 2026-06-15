@@ -340,6 +340,11 @@ export class ReducerRuntime {
     }
   }
 
+  // Container-owned events dispatch through an explicit switch with an exhaustive
+  // default (v4 #10). The previous negative guard (`if (kind !== 'effect_aborted')
+  // return {}`) made effect_aborted an implicit fallthrough, so any branch appended
+  // below it (M1 checkpoint/artifact events are planned) would be silently
+  // unreachable with no compile error. New container events get a case here.
   private containerTransition(
     event: WorkItemEvent,
     now: number,
@@ -347,43 +352,52 @@ export class ReducerRuntime {
   ): Transition {
     if (!isObject(event.payload)) return {};
 
-    if (event.kind === 'wait_reminder') {
-      const waitId = typeof event.payload.waitId === 'string' ? event.payload.waitId : undefined;
-      const wait = waitId ? this.deps.store.getWait(waitId) : undefined;
-      if (wait && wait.resolvedAt === null && wait.remindedAt === null) {
-        this.deps.store.updateWait(wait.id, { remindedAt: now });
-      }
-      return {};
+    switch (event.kind) {
+      case 'wait_reminder':
+        this.applyWaitReminder(event, now);
+        return {};
+      case 'timer_fired':
+        this.applyTimerFired(event, now);
+        return {};
+      case 'wait_resolved':
+        this.applyWaitResolved(event, now);
+        return {};
+      case 'wait_renewed':
+        this.applyWaitRenewed(event);
+        return {};
+      case 'assignment_stalled':
+        return this.handleStalledAssignment(event, now, postCommit);
+      case 'effect_aborted':
+        return this.handleEffectAborted(event, now);
+      default:
+        return {};
     }
+  }
 
-    if (event.kind === 'timer_fired') {
-      const waitId = typeof event.payload.waitId === 'string' ? event.payload.waitId : undefined;
-      const wait = waitId ? this.deps.store.getWait(waitId) : undefined;
-      if (wait && wait.kind === 'timer' && wait.resolvedAt === null) {
-        this.deps.store.updateWait(wait.id, {
-          resolvedAt: now,
-          resolvedBy: 'container',
-          resolveReason: 'timer_fired',
-        });
-      }
-      return {};
+  private applyWaitReminder(event: WorkItemEvent, now: number): void {
+    if (!isObject(event.payload)) return;
+    const waitId = typeof event.payload.waitId === 'string' ? event.payload.waitId : undefined;
+    const wait = waitId ? this.deps.store.getWait(waitId) : undefined;
+    if (wait && wait.resolvedAt === null && wait.remindedAt === null) {
+      this.deps.store.updateWait(wait.id, { remindedAt: now });
     }
+  }
 
-    if (event.kind === 'wait_resolved') {
-      this.applyWaitResolved(event, now);
-      return {};
+  private applyTimerFired(event: WorkItemEvent, now: number): void {
+    if (!isObject(event.payload)) return;
+    const waitId = typeof event.payload.waitId === 'string' ? event.payload.waitId : undefined;
+    const wait = waitId ? this.deps.store.getWait(waitId) : undefined;
+    if (wait && wait.kind === 'timer' && wait.resolvedAt === null) {
+      this.deps.store.updateWait(wait.id, {
+        resolvedAt: now,
+        resolvedBy: 'container',
+        resolveReason: 'timer_fired',
+      });
     }
+  }
 
-    if (event.kind === 'wait_renewed') {
-      this.applyWaitRenewed(event);
-      return {};
-    }
-
-    if (event.kind === 'assignment_stalled') {
-      return this.handleStalledAssignment(event, now, postCommit);
-    }
-
-    if (event.kind !== 'effect_aborted') return {};
+  private handleEffectAborted(event: WorkItemEvent, now: number): Transition {
+    if (!isObject(event.payload)) return {};
 
     // Flip the effect to aborted inside this apply (v4 #9): abort() now only signals
     // + enqueues, so the status change is atomic with the audit event and the
