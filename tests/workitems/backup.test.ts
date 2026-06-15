@@ -114,7 +114,31 @@ describe('createWorkitemsBackupJob', () => {
   it('isolates artifact tar failures from DB backup', async () => {
     const store = new WorkitemsStore(dbPath, new SystemClock());
     store.insertWorkItem(item('wi-1'));
-    const missingArtifactsDir = path.join(tmpDir, 'missing-workitems-dir');
+    // The artifacts path exists but is a file, so `tar -C` fails — distinct from a
+    // missing dir (skipped quietly); this exercises failure isolation, not the skip.
+    const fileAsArtifactsDir = path.join(tmpDir, 'artifacts-as-file');
+    fs.writeFileSync(fileAsArtifactsDir, 'not a directory');
+    const job = createWorkitemsBackupJob({
+      store,
+      artifactsDir: fileAsArtifactsDir,
+      backupsDir,
+      logger,
+    });
+
+    await job.run(new Date(2026, 0, 10, 1, 0, 0));
+    store.close();
+
+    expect(fs.existsSync(path.join(backupsDir, 'workitems-20260110-010000.sqlite'))).toBe(true);
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ label: 'workitems.files' }),
+      'workitems backup failed',
+    );
+  });
+
+  it('skips the artifact tar quietly when the artifacts dir does not exist yet', async () => {
+    const store = new WorkitemsStore(dbPath, new SystemClock());
+    store.insertWorkItem(item('wi-1'));
+    const missingArtifactsDir = path.join(tmpDir, 'never-created');
     const job = createWorkitemsBackupJob({
       store,
       artifactsDir: missingArtifactsDir,
@@ -125,8 +149,12 @@ describe('createWorkitemsBackupJob', () => {
     await job.run(new Date(2026, 0, 10, 1, 0, 0));
     store.close();
 
+    // DB backup still ran; no tar produced; and no error logged for the files label.
     expect(fs.existsSync(path.join(backupsDir, 'workitems-20260110-010000.sqlite'))).toBe(true);
-    expect(logger.error).toHaveBeenCalledWith(
+    expect(fs.existsSync(path.join(backupsDir, 'workitems-files-20260110-010000.tar.gz'))).toBe(
+      false,
+    );
+    expect(logger.error).not.toHaveBeenCalledWith(
       expect.objectContaining({ label: 'workitems.files' }),
       'workitems backup failed',
     );

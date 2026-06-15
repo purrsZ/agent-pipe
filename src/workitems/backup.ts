@@ -52,6 +52,15 @@ async function backupSqlite(deps: WorkitemsBackupDeps, now: Date): Promise<void>
 }
 
 async function backupArtifacts(deps: WorkitemsBackupDeps, now: Date): Promise<void> {
+  // Nothing to archive until the first workitem creates its artifact repo — skip
+  // quietly rather than letting `tar` fail with "could not chdir" on a fresh install.
+  if (!fs.existsSync(deps.artifactsDir)) {
+    deps.logger.info?.(
+      { artifactsDir: deps.artifactsDir },
+      'no artifacts dir yet, skip files backup',
+    );
+    return;
+  }
   const dest = path.join(
     deps.backupsDir,
     backupFileName(now, { prefix: 'workitems-files', ext: '.tar.gz' }),
