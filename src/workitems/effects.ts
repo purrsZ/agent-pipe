@@ -108,6 +108,15 @@ export class EffectRuntime {
     }
 
     const assignment = assignmentForEffect(this.deps.store, effect);
+    // The stalled/abort pipeline may have already superseded/failed this assignment
+    // (committed) while the post-commit abort_effect never ran before the crash.
+    // Resuming would re-process a stall that is already handled (double wake / false
+    // thrash). Abort the orphaned run instead of resuming a non-running owner (v4 #8).
+    if (assignment && assignment.status !== 'running') {
+      this.abort(effectId, 'assignment_not_running');
+      return;
+    }
+
     const workitem = this.deps.store.getWorkItem(effect.workitemId);
     if (workitem && handler.canResume?.(effect.payload, assignment, workitem) === true) {
       void this.executeEffect(effect, handler, (ctx) => handler.resume?.(ctx) ?? handler.run(ctx));
