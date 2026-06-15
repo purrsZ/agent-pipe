@@ -202,6 +202,11 @@ function setClauses(
 
 export class WorkitemsStore {
   private db: Database.Database;
+  // better-sqlite3 does not cache prepared statements; re-preparing the same SQL on
+  // every call (hot paths: nextSeq, listInflightEffects, getWorkItem) re-parses each
+  // time. Cache by SQL text — Statements are reusable and bounded by the static query
+  // set (dynamic UPDATEs vary only by column subset) (v4 #14).
+  private readonly statements = new Map<string, Database.Statement>();
 
   constructor(
     dbPath: string,
@@ -214,12 +219,20 @@ export class WorkitemsStore {
     this.migrate();
   }
 
+  private stmt(sql: string): Database.Statement {
+    const cached = this.statements.get(sql);
+    if (cached) return cached;
+    const prepared = this.db.prepare(sql);
+    this.statements.set(sql, prepared);
+    return prepared;
+  }
+
   tx<T>(fn: () => T): T {
     return this.db.transaction(fn)();
   }
 
   private migrate(): void {
-    const version = (this.db.prepare('PRAGMA user_version').get() as { user_version: number })
+    const version = (this.stmt('PRAGMA user_version').get() as { user_version: number })
       .user_version;
     if (version < 1) {
       this.db.exec(`
@@ -360,9 +373,7 @@ export class WorkitemsStore {
   }
 
   getWorkItem(id: string): WorkItem | undefined {
-    const row = this.db.prepare('SELECT * FROM workitems WHERE id = ?').get(id) as
-      | DbWorkItem
-      | undefined;
+    const row = this.stmt('SELECT * FROM workitems WHERE id = ?').get(id) as DbWorkItem | undefined;
     return row ? toWorkItem(row) : undefined;
   }
 
@@ -403,7 +414,7 @@ export class WorkitemsStore {
       updatedAt: 'updated_at',
     });
     if (!clause) return;
-    this.db.prepare(`UPDATE workitems SET ${clause} WHERE id = @id`).run({ ...values, id });
+    this.stmt(`UPDATE workitems SET ${clause} WHERE id = @id`).run({ ...values, id });
   }
 
   insertAssignment(row: Assignment): void {
@@ -439,7 +450,7 @@ export class WorkitemsStore {
   }
 
   getAssignment(id: string): Assignment | undefined {
-    const row = this.db.prepare('SELECT * FROM workitem_assignments WHERE id = ?').get(id) as
+    const row = this.stmt('SELECT * FROM workitem_assignments WHERE id = ?').get(id) as
       | DbAssignment
       | undefined;
     return row ? toAssignment(row) : undefined;
@@ -489,7 +500,7 @@ export class WorkitemsStore {
       remindedAt: 'reminded_at',
     });
     if (!clause) return;
-    this.db.prepare(`UPDATE workitem_waits SET ${clause} WHERE id = @id`).run({ ...values, id });
+    this.stmt(`UPDATE workitem_waits SET ${clause} WHERE id = @id`).run({ ...values, id });
   }
 
   renewWaitDeadline(id: string, patch: WaitRenewalPatch): void {
@@ -498,11 +509,11 @@ export class WorkitemsStore {
       renewedCount: 'renewed_count',
       remindedAt: 'reminded_at',
     });
-    this.db.prepare(`UPDATE workitem_waits SET ${clause} WHERE id = @id`).run({ ...values, id });
+    this.stmt(`UPDATE workitem_waits SET ${clause} WHERE id = @id`).run({ ...values, id });
   }
 
   getWait(id: string): Wait | undefined {
-    const row = this.db.prepare('SELECT * FROM workitem_waits WHERE id = ?').get(id) as
+    const row = this.stmt('SELECT * FROM workitem_waits WHERE id = ?').get(id) as
       | DbWait
       | undefined;
     return row ? toWait(row) : undefined;
@@ -557,7 +568,7 @@ export class WorkitemsStore {
   }
 
   getEffect(id: number): Effect | undefined {
-    const row = this.db.prepare('SELECT * FROM workitem_effects WHERE id = ?').get(id) as
+    const row = this.stmt('SELECT * FROM workitem_effects WHERE id = ?').get(id) as
       | DbEffect
       | undefined;
     return row ? toEffect(row) : undefined;

@@ -231,6 +231,10 @@ export class EffectRuntime {
       }
     } finally {
       this.inflight.delete(workitemId);
+      // The assignment is terminal by now (conclusion emitted above, or aborted), so
+      // its heartbeat entry is dead weight — drop it to keep the beats map bounded
+      // across long-lived bridges and retry chains (v4 #14).
+      if (assignment) this.beats.delete(assignment.id);
       // Poke even after an abort: abort() applies its decision synchronously
       // (effect_aborted + replacement rows committed) before this handler
       // unwinds, so draining the next pending cannot bypass any decision —
