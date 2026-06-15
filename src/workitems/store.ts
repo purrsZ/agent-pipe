@@ -318,6 +318,16 @@ export class WorkitemsStore {
         PRAGMA user_version = 1;
       `);
     }
+    if (version < 2) {
+      // Partial index for the watchdog's 1Hz running-assignment scan (v4 #12): the
+      // base index idx_assignments_item leads with workitem_id, so a status-only
+      // filter degraded to a full SCAN + temp B-tree sort on an append-only table.
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_assignments_running
+          ON workitem_assignments(workitem_id) WHERE status = 'running';
+        PRAGMA user_version = 2;
+      `);
+    }
   }
 
   insertWorkItem(row: WorkItem): void {
@@ -618,6 +628,16 @@ export class WorkitemsStore {
       .prepare('SELECT * FROM workitem_events WHERE workitem_id = ? ORDER BY seq')
       .all(workitemId)
       .map((row) => toEvent(row as DbEvent));
+  }
+
+  // Existence-only probe for the rollup (v4 #12): the previous projection loaded and
+  // JSON-parsed every event just to test `.some(seq > 1)` — O(N) per apply, O(N²) over
+  // a long-lived workitem's lifecycle. An indexed EXISTS short-circuits at the first row.
+  hasEventsBeyondCreation(workitemId: string): boolean {
+    const row = this.db
+      .prepare('SELECT 1 FROM workitem_events WHERE workitem_id = ? AND seq > 1 LIMIT 1')
+      .get(workitemId);
+    return row !== undefined;
   }
 
   async backup(destPath: string): Promise<void> {

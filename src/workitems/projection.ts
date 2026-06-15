@@ -51,7 +51,7 @@ export function recomputeRollup(
     hasRunningAssignment: store
       .listAssignments(workitemId)
       .some((assignment) => assignment.status === 'running'),
-    hasEventsBeyondCreation: store.listEvents(workitemId).some((event) => event.seq > 1),
+    hasEventsBeyondCreation: store.hasEventsBeyondCreation(workitemId),
   });
   store.updateWorkItem(workitemId, {
     status: result.status,

@@ -100,8 +100,15 @@ describe('WorkitemsStore migration', () => {
 
     const db = new Database(dbPath);
     expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(
-      1,
+      2,
     );
+    expect(
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_assignments_running'",
+        )
+        .get(),
+    ).toMatchObject({ name: 'idx_assignments_running' });
     expect((db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode).toBe(
       'wal',
     );
