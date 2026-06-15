@@ -245,4 +245,32 @@ describe('ReducerRuntime transition writes', () => {
     expect(store.listInflightEffects(item.id)).toHaveLength(0);
     store.close();
   });
+
+  it('resolves open waits and supersedes running assignments on terminal-ization (v4 #3)', () => {
+    const { api, reducer, store } = harness((_item, ev) => {
+      if (ev.kind === 'arm') {
+        return {
+          waits: [{ kind: 'human', reason: 'review', deadlineTtlSec: 9 }],
+          dispatch: [{ role: 'solo', deadlineTtlSec: 60, wallclockCapSec: 30 }],
+        };
+      }
+      if (ev.kind === 'finish') return { terminal: 'done' };
+      return {};
+    });
+    const item = api.createWorkItem({ type: 'noop', title: 'Cleanup', source: {} }).item;
+    reducer.enqueue(item.id, { kind: 'arm' });
+    const assignment = store.listAssignments(item.id)[0]!;
+    expect(store.listOpenWaits(item.id)).toHaveLength(1);
+
+    reducer.enqueue(item.id, { kind: 'finish' });
+
+    expect(store.getWorkItem(item.id)!.status).toBe('done');
+    expect(store.listOpenWaits(item.id)).toHaveLength(0);
+    expect(store.getAssignment(assignment.id)).toMatchObject({
+      status: 'superseded',
+      endedAt: 1000,
+    });
+    expect(store.listEvents(item.id).map((event) => event.kind)).toContain('terminal_cleanup');
+    store.close();
+  });
 });

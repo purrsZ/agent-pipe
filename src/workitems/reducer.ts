@@ -236,6 +236,11 @@ export class ReducerRuntime {
         statusDetail: null,
         updatedAt: now,
       });
+      // Consume leftover open waits / running assignments at the source so the
+      // watchdog never sees a terminal item with an unresolved wait or running
+      // assignment (v4 #3: otherwise it re-enqueues timer_fired/agent_stalled every
+      // tick and the reducer's terminal short-circuit only appends audit forever).
+      this.finalizeTerminalState(item, now);
       // A terminal transition is mutually exclusive with new work: a done/failed
       // item must never spawn dispatch/waits/effects — that would resurrect a zombie
       // run (drainOne/recovery would pick it up) and feed the watchdog's terminal
@@ -289,6 +294,27 @@ export class ReducerRuntime {
         createdAt: now,
         updatedAt: now,
       });
+    }
+  }
+
+  private finalizeTerminalState(item: WorkItem, now: number): void {
+    let cleaned = 0;
+    for (const wait of this.deps.store.listOpenWaits(item.id)) {
+      this.deps.store.updateWait(wait.id, {
+        resolvedAt: now,
+        resolvedBy: 'container',
+        resolveReason: 'workitem_terminal',
+      });
+      cleaned += 1;
+    }
+    for (const assignment of this.deps.store.listAssignments(item.id)) {
+      if (assignment.status === 'running') {
+        this.deps.store.updateAssignment(assignment.id, { status: 'superseded', endedAt: now });
+        cleaned += 1;
+      }
+    }
+    if (cleaned > 0) {
+      this.appendAudit(item.id, 'terminal_cleanup', { resolved: cleaned });
     }
   }
 

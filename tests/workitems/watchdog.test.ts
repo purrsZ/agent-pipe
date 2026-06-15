@@ -319,4 +319,29 @@ describe('Watchdog.tick', () => {
     expect(store.listEvents(poison.id).map((e) => e.kind)).toEqual(['workitem_created']);
     store.close();
   });
+
+  it('never drives a terminal workitem — no timer/agent/assignment spam (v4 #3)', () => {
+    const { api, store, watchdog } = harness();
+    const item = createItem(api);
+    store.updateWorkItem(item.id, { status: 'done', updatedAt: 1000 });
+    // Dangling open wait + running assignment left on a now-terminal item.
+    store.insertWait(makeWait('wt-timer', item.id, { kind: 'timer', deadlineAt: 1000 }));
+    store.insertAssignment(
+      makeAssignment('as-run', item.id, {
+        deadlineAt: 1000,
+        wallclockCapSec: 5,
+        startedAt: 1000,
+        createdAt: 1000,
+      }),
+    );
+
+    now = 7000;
+    watchdog.tick();
+    watchdog.tick();
+    watchdog.tick();
+
+    // The terminal item is excluded from every scan: nothing appended across ticks.
+    expect(store.listEvents(item.id).map((event) => event.kind)).toEqual(['workitem_created']);
+    store.close();
+  });
 });
