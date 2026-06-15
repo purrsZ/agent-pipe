@@ -41,7 +41,11 @@ export interface ReducerRuntimeDeps {
   cfg: WorkitemsConfig;
   logger?: LoggerLike;
   isRunClass?: (kind: string) => boolean;
-  postCommit?: (actions: PostCommitAction[]) => void;
+  // Required (v4 #11): an assembler that forgets to wire this would silently drop
+  // every poke/abort — freshly committed run effects would sit pending forever and
+  // stalled replacements would never start. Tests pass a no-op; the container wires
+  // it to EffectRuntime. The call site stays `?.`-free so the contract is explicit.
+  postCommit: (actions: PostCommitAction[]) => void;
 }
 
 export class ReducerRuntime {
@@ -220,7 +224,7 @@ export class ReducerRuntime {
       postCommit.push({ kind: 'poke', workitemId });
     }
     if (postCommit.length > 0) {
-      this.deps.postCommit?.(postCommit);
+      this.deps.postCommit(postCommit);
     }
   }
 

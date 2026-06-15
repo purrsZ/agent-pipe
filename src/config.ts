@@ -29,6 +29,8 @@ export interface Config {
   dataDir: string;
   dbPath: string;
   sessionsDir: string;
+  workitemsDbPath: string;
+  workitemsDir: string;
 }
 
 function parseAgent(v: string | undefined): AgentKind {
@@ -80,5 +82,9 @@ export function loadConfig(): Config {
     dataDir,
     dbPath: path.join(dataDir, 'db.sqlite'),
     sessionsDir: path.join(dataDir, 'sessions'),
+    workitemsDbPath: expandHome(
+      process.env.WORKITEMS_DB_PATH ?? path.join(dataDir, 'workitems.sqlite'),
+    ),
+    workitemsDir: expandHome(process.env.WORKITEMS_DIR ?? path.join(dataDir, 'workitems')),
   };
 }

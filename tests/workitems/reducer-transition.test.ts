@@ -51,6 +51,7 @@ function harness(onEvent: (item: WorkItem, ev: WorkItemEvent) => Transition): {
     }),
     logger,
     isRunClass: (kind) => kind === 'run',
+    postCommit: () => {},
   });
   const artifacts = new ArtifactStore(path.join(tmpDir, 'workitems'), logger);
   registry.register(workType(onEvent));

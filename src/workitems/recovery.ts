@@ -1,0 +1,75 @@
+import type { ArtifactStore } from './artifacts.js';
+import type { Clock, WaitKind, WorkItemStatus } from './types.js';
+import type { EffectRuntime } from './effects.js';
+import { computeRollup } from './projection.js';
+import type { ReducerRuntime } from './reducer.js';
+import type { WorkitemsStore } from './store.js';
+
+type LoggerLike = {
+  info?: (...args: unknown[]) => void;
+  warn?: (...args: unknown[]) => void;
+  error?: (...args: unknown[]) => void;
+};
+
+export interface StartupRecoveryDeps {
+  store: WorkitemsStore;
+  effects: EffectRuntime;
+  artifacts: ArtifactStore;
+  clock: Clock;
+  logger?: LoggerLike;
+  reducer?: ReducerRuntime;
+}
+
+export function startupRecovery(deps: StartupRecoveryDeps): void {
+  deps.logger?.info?.('recovery: step 2 rebuild');
+  for (const item of deps.store.listNonTerminal()) {
+    recomputeFromStateTables(deps.store, item.id, item.status, deps.clock.now());
+  }
+
+  deps.logger?.info?.('recovery: step 3 outbox');
+  const pendingWorkitems = new Set<string>();
+  for (const effect of deps.store.listInflightEffects()) {
+    if (effect.status === 'pending') {
+      pendingWorkitems.add(effect.workitemId);
+      continue;
+    }
+    if (deps.effects.isRunClass(effect.kind)) {
+      deps.effects.recoverRun(effect.id);
+    } else {
+      deps.effects.recoverRunning(effect.id);
+    }
+  }
+
+  deps.logger?.info?.('recovery: step 4 reconcile');
+  for (const item of deps.store.listNonTerminal()) {
+    const result = deps.artifacts.reconcile(item.id, 'startup');
+    if (result !== 'noop') {
+      deps.reducer?.enqueue(item.id, { kind: 'artifact_reconciled', payload: { result } });
+    }
+  }
+
+  for (const workitemId of pendingWorkitems) {
+    deps.effects.poke(workitemId);
+  }
+}
+
+function recomputeFromStateTables(
+  store: WorkitemsStore,
+  workitemId: string,
+  current: WorkItemStatus,
+  updatedAt: number,
+): void {
+  const result = computeRollup({
+    current,
+    openWaitKinds: store.listOpenWaits(workitemId).map((wait) => wait.kind as WaitKind),
+    hasRunningAssignment: store
+      .listAssignments(workitemId)
+      .some((assignment) => assignment.status === 'running'),
+    hasEventsBeyondCreation: current !== 'open',
+  });
+  store.updateWorkItem(workitemId, {
+    status: result.status,
+    statusDetail: result.detail,
+    updatedAt,
+  });
+}

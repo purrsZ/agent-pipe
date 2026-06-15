@@ -45,6 +45,7 @@ function harness(): {
     cfg: loadWorkitemsConfig({}),
     logger,
     isRunClass: (kind) => kind === 'run',
+    postCommit: () => {},
   });
   const artifacts = new ArtifactStore(path.join(tmpDir, 'workitems'), logger);
   const effects = new EffectRuntime({ store, reducer, registry, artifacts, clock, logger });

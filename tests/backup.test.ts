@@ -2,12 +2,14 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import Database from 'better-sqlite3';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   backupFileName,
+  type BackupJob,
   parseBackupTimestamp,
   runBackup,
   STARTUP_BACKUP_MIN_AGE_MS,
+  scheduleDailyBackup,
   selectBackupsToPrune,
   shouldBackupNow,
 } from '../src/backup.js';
@@ -19,6 +21,22 @@ describe('backup naming', () => {
     const name = backupFileName(d);
     expect(name).toBe('db-20260105-030709.sqlite');
     expect(parseBackupTimestamp(name)!.getTime()).toBe(d.getTime());
+  });
+
+  it('supports independent filename prefixes and extensions', () => {
+    const d = new Date(2026, 0, 5, 3, 7, 9);
+    expect(backupFileName(d, { prefix: 'workitems', ext: '.sqlite' })).toBe(
+      'workitems-20260105-030709.sqlite',
+    );
+    expect(backupFileName(d, { prefix: 'workitems-files', ext: '.tar.gz' })).toBe(
+      'workitems-files-20260105-030709.tar.gz',
+    );
+    expect(
+      parseBackupTimestamp('workitems-files-20260105-030709.tar.gz', {
+        prefix: 'workitems-files',
+        ext: '.tar.gz',
+      })!.getTime(),
+    ).toBe(d.getTime());
   });
 
   it('parseBackupTimestamp rejects foreign filenames', () => {
@@ -39,6 +57,34 @@ describe('selectBackupsToPrune', () => {
     ];
     expect(selectBackupsToPrune(names, 2)).toEqual(['db-20260601-010101.sqlite']);
     expect(selectBackupsToPrune(names, 3)).toEqual([]);
+  });
+
+  it('prunes only files matching the selected prefix and extension', () => {
+    const names = [
+      'db-20260601-010101.sqlite',
+      'db-20260602-010101.sqlite',
+      'workitems-20260601-010101.sqlite',
+      'workitems-20260602-010101.sqlite',
+      'workitems-20260603-010101.sqlite',
+      'workitems-files-20260601-010101.tar.gz',
+      'workitems-files-20260602-010101.tar.gz',
+    ];
+
+    expect(
+      selectBackupsToPrune(names, {
+        prefix: 'workitems',
+        ext: '.sqlite',
+        keep: 2,
+      }),
+    ).toEqual(['workitems-20260601-010101.sqlite']);
+    expect(
+      selectBackupsToPrune(names, {
+        prefix: 'workitems-files',
+        ext: '.tar.gz',
+        keep: 1,
+      }),
+    ).toEqual(['workitems-files-20260601-010101.tar.gz']);
+    expect(selectBackupsToPrune(names, { prefix: 'db', ext: '.sqlite', keep: 2 })).toEqual([]);
   });
 });
 
@@ -114,5 +160,62 @@ describe('runBackup (integration)', () => {
     const count = (copy.prepare('SELECT COUNT(*) AS c FROM tasks').get() as { c: number }).c;
     copy.close();
     expect(count).toBe(1);
+  });
+});
+
+describe('scheduleDailyBackup extra jobs', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-backup-extra-test-'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('runs extra jobs independently so their failures do not block the kernel DB backup', async () => {
+    const store = new Store(path.join(tmpDir, 'db.sqlite'));
+    store.createTask({
+      id: 't1',
+      display_name: 't1',
+      agent_kind: 'claude',
+      mode: 'sandbox',
+      cwd: tmpDir,
+      root_msg_id: null,
+      root_chat_id: null,
+      agent_session_id: null,
+      status: 'suspended',
+      model: null,
+    });
+    const backupsDir = path.join(tmpDir, 'backups');
+    const logger = {
+      info: vi.fn(),
+      error: vi.fn(),
+    };
+    const extraJob: BackupJob = {
+      label: 'workitems',
+      run: vi.fn(async () => {
+        throw new Error('extra failed');
+      }),
+    };
+
+    const stop = scheduleDailyBackup(store, backupsDir, logger, [extraJob]);
+    for (let i = 0; i < 20 && vi.mocked(extraJob.run).mock.calls.length === 0; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    stop();
+    store.close();
+
+    expect(extraJob.run).toHaveBeenCalledOnce();
+    expect(fs.readdirSync(backupsDir).some((n) => /^db-\d{8}-\d{6}\.sqlite$/.test(n))).toBe(true);
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({ label: 'startup' }),
+      'db backup done',
+    );
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({ label: 'startup:workitems' }),
+      'backup extra job failed',
+    );
   });
 });

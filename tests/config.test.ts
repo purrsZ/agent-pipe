@@ -1,5 +1,7 @@
 import { afterAll, beforeEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 // config.ts side-effect-imports dotenv, which loads the repo's real .env on first
 // import. To keep tests hermetic we explicitly set/delete every variable that
@@ -19,6 +21,9 @@ const MANAGED = [
   'DEFAULT_AGENT',
   'MAX_HOT',
   'LOG_LEVEL',
+  'WORKITEMS_DB_PATH',
+  'WORKITEMS_DIR',
+  'WORKITEMS_RETRY_BUDGET',
 ] as const;
 
 const saved: Record<string, string | undefined> = {};
@@ -79,6 +84,34 @@ describe('loadConfig: parsing & defaults', () => {
     const cfg = loadConfig();
     expect(cfg.dbPath).toBe('/tmp/ap-data/db.sqlite');
     expect(cfg.sessionsDir).toBe('/tmp/ap-data/sessions');
+  });
+
+  it('derives default workitems paths from dataDir', () => {
+    process.env.DATA_DIR = '/tmp/ap-data';
+    const cfg = loadConfig();
+    expect(cfg.workitemsDbPath).toBe('/tmp/ap-data/workitems.sqlite');
+    expect(cfg.workitemsDir).toBe('/tmp/ap-data/workitems');
+  });
+
+  it('allows workitems DB and artifact paths to be overridden', () => {
+    process.env.DATA_DIR = '/tmp/ap-data';
+    process.env.WORKITEMS_DB_PATH = '~/wi.sqlite';
+    process.env.WORKITEMS_DIR = '~/wi-artifacts';
+    const cfg = loadConfig();
+
+    expect(cfg.workitemsDbPath.startsWith('/')).toBe(true);
+    expect(cfg.workitemsDbPath.endsWith('/wi.sqlite')).toBe(true);
+    expect(cfg.workitemsDir.startsWith('/')).toBe(true);
+    expect(cfg.workitemsDir.endsWith('/wi-artifacts')).toBe(true);
+  });
+
+  it('leaves workitems behavioral tuning to workitems config', () => {
+    process.env.WORKITEMS_RETRY_BUDGET = '99';
+    const cfg = loadConfig();
+    const source = fs.readFileSync(path.join(process.cwd(), 'src/config.ts'), 'utf8');
+
+    expect('retryBudget' in cfg).toBe(false);
+    expect(source).not.toContain('loadWorkitemsConfig');
   });
 
   it('defaultAgent falls back to claude on unknown values', () => {

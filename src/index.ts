@@ -1,12 +1,13 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { createClaudeFactory } from './agents/claude/runner.js';
 import { createCodexFactory } from './agents/codex/runner.js';
 import { AgentPool } from './agents/pool.js';
 import type { ProgressCallbacks } from './agents/types.js';
 import { scheduleDailyBackup } from './backup.js';
 import { CommandHandler, currentTaskKey } from './bridge/commands.js';
-import { loadConfig } from './config.js';
+import { loadConfig, type Config } from './config.js';
 import { buildProcessingCard, buildResultCard, buildStatusCard } from './feishu/card.js';
 import { createFeishuClients } from './feishu/client.js';
 import { createDispatcher } from './feishu/event-router.js';
@@ -16,6 +17,9 @@ import { installCrashGuard, removeOwnPidFile, startHeartbeat } from './lifecycle
 import { createLogger, type Logger } from './logger.js';
 import type { Task } from './store.js';
 import { Store } from './store.js';
+import { createWorkitemsContainer, type WorkitemsContainer } from './workitems/container.js';
+import { registerNoop } from './worktypes/noop/index.js';
+import { createNoopRunHandler } from './worktypes/noop/run-handler.js';
 
 const COMPACT_PROMPT = [
   '请把我们到目前为止的完整对话压缩成一份结构化摘要，供新会话继续使用。',
@@ -45,7 +49,7 @@ async function fetchBotOpenId(client: any, logger: Logger): Promise<string> {
   return '';
 }
 
-function ensureSingleInstance(pidPath: string, logger: Logger): void {
+export function ensureSingleInstance(pidPath: string, logger: Logger): void {
   fs.mkdirSync(path.dirname(pidPath), { recursive: true });
   try {
     const oldPid = Number.parseInt(fs.readFileSync(pidPath, 'utf-8').trim(), 10);
@@ -72,6 +76,7 @@ async function main() {
   ensureSingleInstance(pidPath, logger);
 
   const store = new Store(config.dbPath);
+  const workitems = createWorkitemsRuntime({ config, logger });
 
   if (store.whitelistCount() === 0) {
     for (const id of config.allowedOpenIds) store.addWhitelist(id, 'bootstrap');
@@ -104,23 +109,9 @@ async function main() {
   const runningTasks = new Set<string>();
   const botStartTime = Date.now();
 
-  // Shared by graceful shutdown (exit 0) and the crash guard (exit 1) — the
-  // supervisor restarts us only on non-zero exit.
-  const releaseResources = () => {
-    try {
-      pool.killAll();
-    } catch {
-      /* ignore */
-    }
-    try {
-      store.close();
-    } catch {
-      /* ignore */
-    }
-    removeOwnPidFile(pidPath);
-  };
+  const releaseResources = createReleaseResources({ pool, workitems, store, pidPath });
   installCrashGuard(logger, releaseResources);
-  scheduleDailyBackup(store, path.join(config.dataDir, 'backups'), logger);
+  scheduleDailyBackup(store, path.join(config.dataDir, 'backups'), logger, [workitems.backupJob()]);
 
   const ATTACHMENT_TTL_MS = 30 * 60 * 1000;
   const pendingAttachments = new Map<string, Array<{ path: string; expiresAt: number }>>();
@@ -507,7 +498,58 @@ async function main() {
   process.on('SIGTERM', shutdown);
 }
 
-main().catch((err) => {
-  console.error('fatal:', err);
-  process.exit(1);
-});
+export function createWorkitemsRuntime(deps: {
+  config: Pick<Config, 'workitemsDbPath' | 'workitemsDir' | 'dataDir'>;
+  logger: Logger;
+  createContainer?: typeof createWorkitemsContainer;
+}): WorkitemsContainer {
+  const createContainer = deps.createContainer ?? createWorkitemsContainer;
+  const workitems = createContainer({
+    dbPath: deps.config.workitemsDbPath,
+    workitemsDir: deps.config.workitemsDir,
+    backupsDir: path.join(deps.config.dataDir, 'backups'),
+    logger: deps.logger,
+  });
+  registerNoop(workitems.registry);
+  workitems.effects.registerHandler(createNoopRunHandler());
+  workitems.start();
+  return workitems;
+}
+
+export function createReleaseResources(deps: {
+  pool: Pick<AgentPool, 'killAll'>;
+  workitems: Pick<WorkitemsContainer, 'stop'>;
+  store: Pick<Store, 'close'>;
+  pidPath: string;
+  removePidFile?: typeof removeOwnPidFile;
+}): () => void {
+  return () => {
+    try {
+      deps.pool.killAll();
+    } catch {
+      /* ignore */
+    }
+    try {
+      deps.workitems.stop();
+    } catch {
+      /* ignore */
+    }
+    try {
+      deps.store.close();
+    } catch {
+      /* ignore */
+    }
+    (deps.removePidFile ?? removeOwnPidFile)(deps.pidPath);
+  };
+}
+
+function isCliEntrypoint(): boolean {
+  return process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href;
+}
+
+if (isCliEntrypoint()) {
+  main().catch((err) => {
+    console.error('fatal:', err);
+    process.exit(1);
+  });
+}
