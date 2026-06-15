@@ -2,16 +2,17 @@ import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
-import Database from 'better-sqlite3';
-import { BACKUP_KEEP, backupFileName, type BackupJob, selectBackupsToPrune } from '../backup.js';
+import {
+  BACKUP_KEEP,
+  backupFileName,
+  type BackupJob,
+  runBackup,
+  selectBackupsToPrune,
+} from '../backup.js';
+import type { LoggerLike } from './shared.js';
 import type { WorkitemsStore } from './store.js';
 
 const execFileAsync = promisify(execFile);
-
-type LoggerLike = {
-  info?: (obj: unknown, msg?: string) => void;
-  error?: (obj: unknown, msg?: string) => void;
-};
 
 export interface WorkitemsBackupDeps {
   store: Pick<WorkitemsStore, 'backup'>;
@@ -34,17 +35,13 @@ export function createWorkitemsBackupJob(deps: WorkitemsBackupDeps): BackupJob {
 }
 
 async function backupSqlite(deps: WorkitemsBackupDeps, now: Date): Promise<void> {
-  const dest = path.join(
-    deps.backupsDir,
-    backupFileName(now, { prefix: 'workitems', ext: '.sqlite' }),
-  );
   try {
-    await deps.store.backup(dest);
-    const copy = new Database(dest);
-    copy.pragma('wal_checkpoint(TRUNCATE)');
-    copy.close();
-    removeSidecars(dest);
-    prune(deps, { prefix: 'workitems', ext: '.sqlite' });
+    // Reuse the kernel online-backup primitive (v4 #15): online backup + WAL
+    // checkpoint(TRUNCATE) + sidecar fold + naming-scoped prune were duplicated here.
+    const dest = await runBackup(deps.store, deps.backupsDir, deps.keep ?? BACKUP_KEEP, now, {
+      prefix: 'workitems',
+      ext: '.sqlite',
+    });
     deps.logger.info?.({ dest, label: 'workitems.sqlite' }, 'workitems backup done');
   } catch (err) {
     deps.logger.error?.(
@@ -84,16 +81,6 @@ function prune(deps: WorkitemsBackupDeps, options: { prefix: string; ext: string
       } catch {
         /* best-effort prune */
       }
-    }
-  }
-}
-
-function removeSidecars(dest: string): void {
-  for (const sidecar of [`${dest}-wal`, `${dest}-shm`]) {
-    try {
-      fs.unlinkSync(sidecar);
-    } catch {
-      /* already gone */
     }
   }
 }

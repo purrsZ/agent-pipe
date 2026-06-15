@@ -1,14 +1,9 @@
 import type { ArtifactStore } from './artifacts.js';
 import type { ReducerRuntime } from './reducer.js';
 import type { WorkTypeRegistry } from './registry.js';
+import { isObject, isRunConclusion, type LoggerLike } from './shared.js';
 import type { WorkitemsStore } from './store.js';
 import type { Assignment, Clock, Effect, WorkItem, WorkItemEvent } from './types.js';
-
-type LoggerLike = {
-  info?: (...args: unknown[]) => void;
-  warn?: (...args: unknown[]) => void;
-  error?: (...args: unknown[]) => void;
-};
 
 export interface EffectHandler {
   kind: string;
@@ -359,12 +354,4 @@ function assignmentForEffect(store: WorkitemsStore, effect: Effect): Assignment 
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
-}
-
-function isRunConclusion(kind: string): boolean {
-  return kind === 'run_completed' || kind === 'run_failed';
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

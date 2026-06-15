@@ -2,6 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { OpenLimitError, TypeNotRegisteredError } from './errors.js';
 import { recomputeRollup } from './projection.js';
 import type { WorkTypeRegistry } from './registry.js';
+import {
+  assertPositiveFinite,
+  isObject,
+  isRunConclusion,
+  isTerminalStatus,
+  type LoggerLike,
+} from './shared.js';
 import type { WorkitemsStore } from './store.js';
 import type {
   Assignment,
@@ -14,7 +21,6 @@ import type {
   Wait,
   WorkItem,
   WorkItemEvent,
-  WorkItemStatus,
   WorkType,
 } from './types.js';
 import type { WorkitemsConfig } from './config.js';
@@ -27,12 +33,6 @@ export interface PendingEvent {
 export type PostCommitAction =
   | { kind: 'abort_effect'; effectId: number; reason: string }
   | { kind: 'poke'; workitemId: string };
-
-type LoggerLike = {
-  info?: (...args: unknown[]) => void;
-  warn?: (...args: unknown[]) => void;
-  error?: (...args: unknown[]) => void;
-};
 
 export interface ReducerRuntimeDeps {
   store: WorkitemsStore;
@@ -865,18 +865,6 @@ function isSqliteConstraint(err: unknown): boolean {
   );
 }
 
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
-function isTerminalStatus(status: WorkItemStatus): boolean {
-  return status === 'done' || status === 'failed' || status === 'cancelled';
-}
-
-function isRunConclusion(kind: string): boolean {
-  return kind === 'run_completed' || kind === 'run_failed';
-}
-
 function mergeTransitions(container: Transition, type: Transition): Transition {
   return {
     phase: type.phase,
@@ -911,12 +899,6 @@ function originalDeadlineTtlSec(assignment: Assignment): number {
   // deadline_at is always derived as created_at + ttl*1000 at insert time, so the
   // original TTL can be recovered without persisting a separate column.
   return Math.max(1, Math.round((assignment.deadlineAt - assignment.createdAt) / 1000));
-}
-
-function assertPositiveFinite(value: unknown, name: string): asserts value is number {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-    throw new Error(`${name} must be a positive finite number`);
-  }
 }
 
 function conclusionDetails(payload: unknown): ConclusionDetails {

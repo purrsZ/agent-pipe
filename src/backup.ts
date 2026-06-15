@@ -9,6 +9,11 @@ export const BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // must not churn through the retention window and destroy older good copies.
 export const STARTUP_BACKUP_MIN_AGE_MS = 12 * 60 * 60 * 1000;
 
+/** Minimal surface runBackup needs — any store exposing an online `backup(dest)`. */
+export interface BackupSource {
+  backup(destPath: string): Promise<void>;
+}
+
 export interface BackupNameOptions {
   prefix?: string;
   ext?: string;
@@ -101,7 +106,7 @@ export function shouldBackupNow(names: string[], now: Date): boolean {
 
 /** Online-backup the live DB into backupsDir and prune old copies. Returns the new file path. */
 export async function runBackup(
-  store: Store,
+  store: BackupSource,
   backupsDir: string,
   keep: number = BACKUP_KEEP,
   now: Date = new Date(),

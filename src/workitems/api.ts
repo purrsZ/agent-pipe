@@ -2,6 +2,7 @@ import type { ArtifactStore } from './artifacts.js';
 import { TimerNotResolvableError } from './errors.js';
 import type { ReducerRuntime } from './reducer.js';
 import type { WorkTypeRegistry } from './registry.js';
+import { assertPositiveFinite } from './shared.js';
 import type { WorkitemsStore } from './store.js';
 import type { Clock, CreateInput, CreateResult, Wait, WorkItem, WorkItemEvent } from './types.js';
 
@@ -79,11 +80,5 @@ export class WorkitemsApi {
 
   private now(): number {
     return this.deps.clock?.now() ?? Date.now();
-  }
-}
-
-function assertPositiveFinite(value: unknown, name: string): asserts value is number {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-    throw new Error(`${name} must be a positive finite number`);
   }
 }

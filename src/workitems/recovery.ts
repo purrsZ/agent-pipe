@@ -1,15 +1,10 @@
 import type { ArtifactStore } from './artifacts.js';
-import type { Clock, WaitKind, WorkItemStatus } from './types.js';
 import type { EffectRuntime } from './effects.js';
 import { computeRollup } from './projection.js';
 import type { ReducerRuntime } from './reducer.js';
+import type { LoggerLike } from './shared.js';
 import type { WorkitemsStore } from './store.js';
-
-type LoggerLike = {
-  info?: (...args: unknown[]) => void;
-  warn?: (...args: unknown[]) => void;
-  error?: (...args: unknown[]) => void;
-};
+import type { Clock, WaitKind, WorkItemStatus } from './types.js';
 
 export interface StartupRecoveryDeps {
   store: WorkitemsStore;

@@ -1,13 +1,8 @@
 import type { WorkitemsConfig } from './config.js';
-import type { Clock } from './types.js';
 import type { ReducerRuntime } from './reducer.js';
+import type { LoggerLike } from './shared.js';
 import type { WorkitemsStore } from './store.js';
-
-type LoggerLike = {
-  info?: (...args: unknown[]) => void;
-  warn?: (...args: unknown[]) => void;
-  error?: (...args: unknown[]) => void;
-};
+import type { Clock } from './types.js';
 
 type BeatSource = {
   lastBeat(assignmentId: string): number | undefined;

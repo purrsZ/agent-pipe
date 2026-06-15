@@ -1,12 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-
-type LoggerLike = {
-  info?: (...args: unknown[]) => void;
-  warn?: (...args: unknown[]) => void;
-  error?: (...args: unknown[]) => void;
-};
+import type { LoggerLike } from './shared.js';
 
 export type ReconcileResult = 'noop' | 'committed' | 'recreated';
 

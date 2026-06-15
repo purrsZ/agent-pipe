@@ -10,13 +10,8 @@ import { ArtifactStore } from './artifacts.js';
 import { WorkitemsApi } from './api.js';
 import { Watchdog } from './watchdog.js';
 import type { BackupJob } from '../backup.js';
+import type { LoggerLike } from './shared.js';
 import type { Clock } from './types.js';
-
-type LoggerLike = {
-  info?: (...args: unknown[]) => void;
-  warn?: (...args: unknown[]) => void;
-  error?: (...args: unknown[]) => void;
-};
 
 export interface WorkitemsContainerOptions {
   dbPath: string;
