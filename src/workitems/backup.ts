@@ -1,9 +1,12 @@
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { promisify } from 'node:util';
 import Database from 'better-sqlite3';
 import { BACKUP_KEEP, backupFileName, type BackupJob, selectBackupsToPrune } from '../backup.js';
 import type { WorkitemsStore } from './store.js';
+
+const execFileAsync = promisify(execFile);
 
 type LoggerLike = {
   info?: (obj: unknown, msg?: string) => void;
@@ -24,7 +27,7 @@ export function createWorkitemsBackupJob(deps: WorkitemsBackupDeps): BackupJob {
     run: async (now: Date) => {
       fs.mkdirSync(deps.backupsDir, { recursive: true });
       await backupSqlite(deps, now);
-      backupArtifacts(deps, now);
+      await backupArtifacts(deps, now);
       return undefined;
     },
   };
@@ -51,13 +54,17 @@ async function backupSqlite(deps: WorkitemsBackupDeps, now: Date): Promise<void>
   }
 }
 
-function backupArtifacts(deps: WorkitemsBackupDeps, now: Date): void {
+async function backupArtifacts(deps: WorkitemsBackupDeps, now: Date): Promise<void> {
   const dest = path.join(
     deps.backupsDir,
     backupFileName(now, { prefix: 'workitems-files', ext: '.tar.gz' }),
   );
   try {
-    execFileSync('tar', ['-czf', dest, '-C', deps.artifactsDir, '.'], { stdio: 'pipe' });
+    // Async spawn (v4 #13): a large artifact tree makes tar run for seconds; a
+    // synchronous execFileSync would block the event loop that whole time, starving
+    // the watchdog into missed ticks and false heartbeat_silent verdicts on healthy
+    // runs — a perf cost escalating into supervisor mis-kills.
+    await execFileAsync('tar', ['-czf', dest, '-C', deps.artifactsDir, '.']);
     prune(deps, { prefix: 'workitems-files', ext: '.tar.gz' });
     deps.logger.info?.({ dest, label: 'workitems.files' }, 'workitems backup done');
   } catch (err) {
