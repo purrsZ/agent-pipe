@@ -151,6 +151,28 @@ export class ReducerRuntime {
         return;
       }
 
+      // Boundary gate for run conclusions (v4 #5 + #7):
+      //  - malformed payload is poison — a missing effectId leaves the run effect
+      //    forever running (hasInflightRunEffect stays true → every dispatch becomes
+      //    a wakePending that releaseWakePending can never release → deadlock);
+      //  - an effectId/assignmentId owned by *another* workitem would let this apply
+      //    mutate B's effect/assignment inside A's transaction (cross-item corruption).
+      // Reject either at the boundary rather than acting on it.
+      if (isRunConclusion(pending.kind)) {
+        const verdict = this.verifyConclusion(workitemId, pending.payload);
+        if (!verdict.ok) {
+          this.deps.store.appendEvent(workitemId, seq, 'conclusion_rejected', {
+            kind: pending.kind,
+            reason: verdict.reason,
+          });
+          this.deps.logger?.warn?.(
+            { workitemId, kind: pending.kind, reason: verdict.reason },
+            'rejected invalid run conclusion',
+          );
+          return;
+        }
+      }
+
       const decisionCheck = isRunConclusion(pending.kind)
         ? this.checkDecision(workitemId, pending.payload, type, seq)
         : undefined;
@@ -641,6 +663,33 @@ export class ReducerRuntime {
     }
   }
 
+  // Structural contract (the EffectRuntime always emits these three fields) plus
+  // ownership: the effect and assignment a conclusion names must belong to *this*
+  // workitem, or closeRunConclusion would terminal-ize another item's rows from
+  // inside this transaction (v4 #5 + #7).
+  private verifyConclusion(
+    workitemId: string,
+    payload: unknown,
+  ): { ok: true } | { ok: false; reason: string } {
+    if (
+      !isObject(payload) ||
+      typeof payload.assignmentId !== 'string' ||
+      typeof payload.effectId !== 'number' ||
+      typeof payload.basedOnSeq !== 'number'
+    ) {
+      return { ok: false, reason: 'malformed_payload' };
+    }
+    const effect = this.deps.store.getEffect(payload.effectId);
+    if (!effect || effect.workitemId !== workitemId) {
+      return { ok: false, reason: 'effect_not_owned' };
+    }
+    const assignment = this.deps.store.getAssignment(payload.assignmentId);
+    if (!assignment || assignment.workitemId !== workitemId) {
+      return { ok: false, reason: 'assignment_not_owned' };
+    }
+    return { ok: true };
+  }
+
   private checkDecision(
     workitemId: string,
     payload: unknown,
@@ -648,7 +697,7 @@ export class ReducerRuntime {
     currentSeq: number,
   ): DecisionCheck {
     const details = conclusionDetails(payload);
-    const structural = this.structuralCheck(details);
+    const structural = this.structuralCheck(workitemId, details);
     if (!structural.ok) return structural;
 
     const eventsSince = this.deps.store.eventsSince(workitemId, details.basedOnSeq, currentSeq);
@@ -658,7 +707,7 @@ export class ReducerRuntime {
     return { ...details, ok: true };
   }
 
-  private structuralCheck(details: ConclusionDetails): DecisionCheck {
+  private structuralCheck(workitemId: string, details: ConclusionDetails): DecisionCheck {
     const effect =
       details.effectId === undefined ? undefined : this.deps.store.getEffect(details.effectId);
     if (effect?.status === 'aborted') {
@@ -671,7 +720,9 @@ export class ReducerRuntime {
     ];
     for (const assignmentId of assignmentIds) {
       const assignment = this.deps.store.getAssignment(assignmentId);
-      if (!assignment) continue;
+      // Ignore refs that point at another workitem — a decision must only be judged
+      // stale against its own item's state, never coupled to a foreign row (v4 #7).
+      if (!assignment || assignment.workitemId !== workitemId) continue;
       if (assignment.status === 'superseded') {
         return { ...details, ok: false, reason: 'assignment_superseded', assignmentId };
       }
@@ -687,6 +738,7 @@ export class ReducerRuntime {
 
     for (const waitId of details.decision.refs?.waitIds ?? []) {
       const wait = this.deps.store.getWait(waitId);
+      if (wait && wait.workitemId !== workitemId) continue;
       if (wait?.resolvedAt !== null && wait?.resolvedAt !== undefined) {
         return { ...details, ok: false, reason: 'wait_resolved', waitId };
       }
