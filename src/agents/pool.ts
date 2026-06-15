@@ -1,6 +1,13 @@
 import type { Logger } from '../logger.js';
 import type { AgentKind, Store, Task } from '../store.js';
-import type { AgentFactory, ProgressCallbacks, Runner, TurnResult } from './types.js';
+import {
+  type AgentFactory,
+  type ProgressCallbacks,
+  type RunOptions,
+  type Runner,
+  type TurnResult,
+  runOptionsFingerprint,
+} from './types.js';
 
 export interface AgentPoolConfig {
   maxHot: number;
@@ -8,6 +15,8 @@ export interface AgentPoolConfig {
 
 export class AgentPool {
   private runners = new Map<string, Runner>();
+  // WI-A: last per-run options fingerprint per task — a change forces a rebuild (§2.1).
+  private fingerprints = new Map<string, string>();
 
   constructor(
     private factories: Record<AgentKind, AgentFactory>,
@@ -36,18 +45,30 @@ export class AgentPool {
     return this.runners.size;
   }
 
-  async send(task: Task, text: string, callbacks?: ProgressCallbacks): Promise<TurnResult> {
+  async send(
+    task: Task,
+    text: string,
+    callbacks?: ProgressCallbacks,
+    options?: RunOptions,
+  ): Promise<TurnResult> {
+    // §2.1 step 1: drop the cached runner when the kind changed (/agent switch) OR the
+    // per-run options fingerprint changed (WI-A) — Claude bakes its args at spawn, so a
+    // changed profile/tool-set needs a fresh process. Default options collapse to ''
+    // (runOptionsFingerprint), so the no-options bridge path never rebuilds (zero regression).
+    const fingerprint = runOptionsFingerprint(options);
     let runner = this.runners.get(task.id);
-
-    // If the cached runner is for a different kind (after /agent switch), drop it.
-    if (runner && runner.kind !== task.agent_kind) {
-      this.logger.info(
-        { taskId: task.id, was: runner.kind, now: task.agent_kind },
-        'agent kind changed, disposing old runner',
-      );
-      runner.dispose();
-      this.runners.delete(task.id);
-      runner = undefined;
+    if (runner) {
+      const kindChanged = runner.kind !== task.agent_kind;
+      const optionsChanged = (this.fingerprints.get(task.id) ?? '') !== fingerprint;
+      if (kindChanged || optionsChanged) {
+        this.logger.info(
+          { taskId: task.id, kindChanged, optionsChanged },
+          'disposing runner before rebuild (kind/options changed)',
+        );
+        runner.dispose();
+        this.runners.delete(task.id);
+        runner = undefined;
+      }
     }
 
     if (!runner) {
@@ -64,11 +85,12 @@ export class AgentPool {
       // refresh snapshot — model/agent_kind/cwd may have changed between turns
       runner.setTask(task);
     }
+    this.fingerprints.set(task.id, fingerprint);
 
     if (runner.isBusy()) {
       throw new Error(`任务 ${task.id} 正在处理上一条消息`);
     }
-    return runner.runTurn(text, callbacks);
+    return runner.runTurn(text, callbacks, options);
   }
 
   respawn(taskId: string): boolean {

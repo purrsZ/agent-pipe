@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createClaudeFactory } from './agents/claude/runner.js';
 import { createCodexFactory } from './agents/codex/runner.js';
 import { AgentPool } from './agents/pool.js';
@@ -30,6 +30,28 @@ const COMPACT_PROMPT = [
   '4. 进行中的任务与下一步计划；',
   '5. 重要的上下文、约束与未决事项。',
   '只输出摘要正文，不要任何寒暄或额外说明。',
+].join('\n');
+
+// WI-A /diag-mcp (admin-only): resolve the echo MCP fixture relative to this module
+// (not cwd), injected for one turn to confirm per-run tool injection reaches Claude.
+const DIAG_ECHO_MCP_PATH = fileURLToPath(new URL('../scripts/diag-echo-mcp.mjs', import.meta.url));
+
+const DIAG_MCP_PROMPT = [
+  '这是一次 MCP 工具注入自检。请：',
+  '1) 列出你当前能看到的 MCP 工具名；',
+  "2) 调用名为 echo 的工具，参数 message 设为 'mcp-injection-ok'，把返回原样贴出来；",
+  '3) 如果完全看不到任何 MCP 工具，直接说明“未注入”。',
+].join('\n');
+
+const DIAG_READONLY_PROMPT = [
+  '这是一次 readonly 权限档的【边界】自检。它是弱档：预期写工具(Write/Edit)被工具级拦截，',
+  '但 Bash 这类不受工具级限制的路径可能仍能写——目的就是如实暴露拦住了什么、没拦住什么，别美化。',
+  '请在当前工作目录内，分别独立尝试一次（不重试、互不依赖）：',
+  '1) 用 Write 工具创建 probe-write.txt；',
+  '2) 用 Edit 工具创建/修改 probe-edit.txt；',
+  '3) 用 Bash 执行 `echo probe > probe-bash.txt`。',
+  '然后逐项如实报告每一项落在哪一档：「成功落盘 / 被工具级拒绝 / 被要求人工批准 / 卡住无返回」，',
+  '并把系统的原始拒绝信息原文贴出。最后给一句总结：这个档到底算不算只读。',
 ].join('\n');
 
 async function fetchBotOpenId(client: any, logger: Logger): Promise<string> {
@@ -346,6 +368,97 @@ async function main() {
     }
   }
 
+  // /diag-mcp: inject the echo MCP server for one turn and report the agent's output.
+  // Shares runningTasks (can't race a normal turn); the injected options change the
+  // fingerprint → pool rebuilds the Claude proc with --mcp-config (§2.1 / WI-A).
+  async function runDiagMcp(taskId: string, replyMsgId: string): Promise<void> {
+    const task = store.getTask(taskId);
+    if (!task) {
+      await sender.reply(replyMsgId, `任务不存在: ${taskId}`);
+      return;
+    }
+    if (runningTasks.has(taskId)) {
+      await sender.reply(replyMsgId, `[${task.display_name}] 正忙，等当前消息处理完再 /diag-mcp`);
+      return;
+    }
+    runningTasks.add(taskId);
+    try {
+      await sender.reply(
+        replyMsgId,
+        `[${task.display_name}] 注入 MCP server「diag-echo」跑一轮自检…（会触发 runner 重建）`,
+      );
+      const result = await pool.send(task, DIAG_MCP_PROMPT, undefined, {
+        mcpServers: [{ name: 'diag-echo', command: 'node', args: [DIAG_ECHO_MCP_PATH] }],
+      });
+      if (result.error) {
+        await sender.reply(replyMsgId, `[${task.display_name}] /diag-mcp 失败: ${result.error}`);
+        return;
+      }
+      await sender.reply(
+        replyMsgId,
+        `[${task.display_name}] /diag-mcp 完成，agent 输出：\n${(result.fullText ?? '').slice(0, 1500)}`,
+      );
+    } catch (err) {
+      await sender.reply(
+        replyMsgId,
+        `[${task.display_name}] /diag-mcp 异常: ${(err as Error).message}`,
+      );
+    } finally {
+      cancelledTasks.delete(taskId);
+      runningTasks.delete(taskId);
+      const next = dequeue(taskId);
+      if (next) void runWithDrain(taskId, next);
+    }
+  }
+
+  // /diag-readonly: run one turn under the readonly permission profile and report the
+  // agent's output — confirms the write-tool deny works (and surfaces reject-vs-hang, D6).
+  async function runDiagReadonly(taskId: string, replyMsgId: string): Promise<void> {
+    const task = store.getTask(taskId);
+    if (!task) {
+      await sender.reply(replyMsgId, `任务不存在: ${taskId}`);
+      return;
+    }
+    if (runningTasks.has(taskId)) {
+      await sender.reply(
+        replyMsgId,
+        `[${task.display_name}] 正忙，等当前消息处理完再 /diag-readonly`,
+      );
+      return;
+    }
+    runningTasks.add(taskId);
+    try {
+      await sender.reply(
+        replyMsgId,
+        `[${task.display_name}] 以 readonly 权限档跑一轮写入自检…（会触发 runner 重建）`,
+      );
+      const result = await pool.send(task, DIAG_READONLY_PROMPT, undefined, {
+        permission: { mode: 'readonly' },
+      });
+      if (result.error) {
+        await sender.reply(
+          replyMsgId,
+          `[${task.display_name}] /diag-readonly 失败: ${result.error}`,
+        );
+        return;
+      }
+      await sender.reply(
+        replyMsgId,
+        `[${task.display_name}] /diag-readonly 完成，agent 输出：\n${(result.fullText ?? '').slice(0, 1500)}`,
+      );
+    } catch (err) {
+      await sender.reply(
+        replyMsgId,
+        `[${task.display_name}] /diag-readonly 异常: ${(err as Error).message}`,
+      );
+    } finally {
+      cancelledTasks.delete(taskId);
+      runningTasks.delete(taskId);
+      const next = dequeue(taskId);
+      if (next) void runWithDrain(taskId, next);
+    }
+  }
+
   const commands = new CommandHandler(
     store,
     sender,
@@ -356,6 +469,12 @@ async function main() {
       void runCompact(taskId, replyMsgId);
     },
     (taskId) => requestStop(taskId),
+    (taskId, replyMsgId) => {
+      void runDiagMcp(taskId, replyMsgId);
+    },
+    (taskId, replyMsgId) => {
+      void runDiagReadonly(taskId, replyMsgId);
+    },
   );
 
   const dispatcher = createDispatcher(botOpenId, logger, botStartTime, async (msg) => {

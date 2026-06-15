@@ -28,6 +28,29 @@ function codexContextWindow(model: string | null | undefined): number {
   return 272_000;
 }
 
+/**
+ * Pure args builder (WI-A). Extracted from runTurn() to mirror buildClaudeArgs and
+ * make the legacy vector assertable byte-for-byte. Codex is per-turn spawn, so per-run
+ * MCP/permission injection is trivial to add here — wired when Codex is actually
+ * adopted (§6 D3), not in M1a.
+ */
+export function buildCodexArgs(p: {
+  model: string | null;
+  sessionId: string | null;
+  reasoningEffort?: 'low' | 'medium' | 'high';
+}): string[] {
+  const args = p.sessionId
+    ? ['exec', 'resume', p.sessionId, '--json', '--skip-git-repo-check']
+    : ['exec', '--json', '--skip-git-repo-check'];
+  if (p.model) args.push('--model', p.model);
+  if (p.reasoningEffort) args.push('-c', `model_reasoning_effort=${p.reasoningEffort}`);
+  // dangerously auto-approve everything for unattended use
+  args.push('--dangerously-bypass-approvals-and-sandbox');
+  // prompt comes from stdin
+  args.push('-');
+  return args;
+}
+
 export function createCodexFactory(cfg: CodexFactoryConfig): AgentFactory {
   return {
     kind: 'codex',
@@ -108,20 +131,11 @@ class CodexRunner implements Runner {
     this._lastActivity = Date.now();
 
     const model = this.task.model ?? this.cfg.defaultModel;
-    const finalArgs: string[] = this.sessionId
-      ? ['exec', 'resume', this.sessionId, '--json', '--skip-git-repo-check']
-      : ['exec', '--json', '--skip-git-repo-check'];
-
-    if (model) {
-      finalArgs.push('--model', model);
-    }
-    if (this.cfg.reasoningEffort) {
-      finalArgs.push('-c', `model_reasoning_effort=${this.cfg.reasoningEffort}`);
-    }
-    // dangerously auto-approve everything for unattended use
-    finalArgs.push('--dangerously-bypass-approvals-and-sandbox');
-    // prompt comes from stdin
-    finalArgs.push('-');
+    const finalArgs = buildCodexArgs({
+      model,
+      sessionId: this.sessionId,
+      reasoningEffort: this.cfg.reasoningEffort,
+    });
 
     this.deps.logger.info(
       {

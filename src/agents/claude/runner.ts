@@ -1,4 +1,7 @@
 import { type ChildProcess, spawn } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import * as readline from 'node:readline';
 import type { Task } from '../../store.js';
 import type {
@@ -6,6 +9,7 @@ import type {
   AgentFactory,
   AgentFactoryDeps,
   ProgressCallbacks,
+  RunOptions,
   Runner,
   TurnResult,
 } from '../types.js';
@@ -15,6 +19,49 @@ export interface ClaudeFactoryConfig {
   binPath: string;
   defaultModel: string;
   effort: string;
+}
+
+/**
+ * Pure args builder (WI-A). Extracted from spawn() so the no-options path can be
+ * asserted byte-for-byte (zero regression) and the --mcp-config injection point is
+ * testable in isolation. The readonly permission profile is added in WI-B; here the
+ * runner always launches full (--dangerously-skip-permissions), exactly as before.
+ */
+// Write tools denied in the readonly profile (WI-B). Deterministic deny via
+// --disallowedTools (yields a rejected tool_result, not an interactive approval → no
+// hang). This is a WEAK readonly: it does not block network egress or Bash — strong
+// readonly (OS sandbox, no network) is Codex-only and deferred (§6 D1).
+const READONLY_DENIED_TOOLS = 'Write Edit MultiEdit NotebookEdit';
+
+export function buildClaudeArgs(p: {
+  model: string;
+  effort: string;
+  sessionId: string | null;
+  mcpConfigPath?: string;
+  readonly?: boolean;
+}): string[] {
+  const args = [
+    '-p',
+    '--input-format',
+    'stream-json',
+    '--output-format',
+    'stream-json',
+    '--verbose',
+    '--model',
+    p.model,
+    '--effort',
+    p.effort,
+  ];
+  // Permission profile (WI-B). readonly: drop the blanket bypass and deny write tools
+  // deterministically. full (default): legacy --dangerously-skip-permissions, unchanged.
+  if (p.readonly) {
+    args.push('--disallowedTools', READONLY_DENIED_TOOLS);
+  } else {
+    args.push('--dangerously-skip-permissions');
+  }
+  if (p.mcpConfigPath) args.push('--mcp-config', p.mcpConfigPath, '--strict-mcp-config');
+  if (p.sessionId) args.push('--resume', p.sessionId);
+  return args;
 }
 
 export function createClaudeFactory(cfg: ClaudeFactoryConfig): AgentFactory {
@@ -53,6 +100,11 @@ class ClaudeRunner implements Runner {
   private inflight: InFlight | null = null;
   private stderrBuf = '';
   private disposed = false;
+  // WI-A: per-process MCP config temp file. Bound to the proc lifecycle — cleaned on
+  // dispose() AND proc close/error (crash/normal exit skip dispose), never on turn end
+  // (the proc spans many turns; deleting per-turn would drop the config on turn 2).
+  private mcpConfigPath: string | null = null;
+  private mcpSeq = 0;
 
   constructor(
     private task: Task,
@@ -82,12 +134,16 @@ class ClaudeRunner implements Runner {
     this.task = task;
   }
 
-  async runTurn(text: string, callbacks?: ProgressCallbacks): Promise<TurnResult> {
+  async runTurn(
+    text: string,
+    callbacks?: ProgressCallbacks,
+    options?: RunOptions,
+  ): Promise<TurnResult> {
     if (this.state === 'busy') {
       throw new Error(`任务 ${this.taskId} 正在处理上一条消息`);
     }
     if (!this.proc || this.proc.killed) {
-      this.spawn();
+      this.spawn(options);
     }
     this.state = 'busy';
     this.parser.reset();
@@ -143,36 +199,57 @@ class ClaudeRunner implements Runner {
     }
     this.proc = null;
     this.state = 'cold';
+    this.cleanupMcpConfig();
   }
 
-  private spawn(): void {
+  private writeMcpConfig(options?: RunOptions): string | null {
+    if (!options?.mcpServers?.length) return null;
+    const servers: Record<string, unknown> = {};
+    for (const s of options.mcpServers) {
+      servers[s.name] = { command: s.command, args: s.args ?? [], env: s.env ?? {} };
+    }
+    const file = path.join(os.tmpdir(), `agent-pipe-mcp-${this.taskId}-${this.mcpSeq++}.json`);
+    fs.writeFileSync(file, JSON.stringify({ mcpServers: servers }));
+    return file;
+  }
+
+  private cleanupMcpConfig(): void {
+    if (!this.mcpConfigPath) return;
+    try {
+      fs.unlinkSync(this.mcpConfigPath);
+    } catch {
+      /* best-effort: temp file may already be gone */
+    }
+    this.mcpConfigPath = null;
+  }
+
+  private spawn(options?: RunOptions): void {
     const model = this.task.model ?? this.cfg.defaultModel;
-    const args: string[] = [
-      '-p',
-      '--input-format',
-      'stream-json',
-      '--output-format',
-      'stream-json',
-      '--verbose',
-      '--model',
+    this.mcpConfigPath = this.writeMcpConfig(options);
+    const readonly = options?.permission?.mode === 'readonly';
+    const args = buildClaudeArgs({
       model,
-      '--effort',
-      this.cfg.effort,
-      '--dangerously-skip-permissions',
-    ];
-    if (this.sessionId) args.push('--resume', this.sessionId);
+      effort: this.cfg.effort,
+      sessionId: this.sessionId,
+      mcpConfigPath: this.mcpConfigPath ?? undefined,
+      readonly,
+    });
 
     const cleanEnv: Record<string, string | undefined> = { ...process.env };
     for (const k of Object.keys(cleanEnv)) {
       if (k.startsWith('CLAUDE') || k === 'ANTHROPIC_INNER') delete cleanEnv[k];
     }
 
+    // Observability (WI-B 顺带): surface the injected MCP servers + permission profile
+    // server-side, so per-run injection is visible in logs, not only the agent's output.
     this.deps.logger.info(
       {
         taskId: this.taskId,
         cwd: this.task.cwd,
         hasResume: !!this.sessionId,
         model,
+        mcpServers: (options?.mcpServers ?? []).map((s) => s.name),
+        permission: readonly ? 'readonly' : 'full',
       },
       'spawning claude process',
     );
@@ -216,6 +293,9 @@ class ClaudeRunner implements Runner {
         { taskId: this.taskId, code, stderr: this.stderrBuf.slice(-500) },
         'claude exited',
       );
+      // Crash/normal exit lands here, not in dispose() — clean the MCP temp file on
+      // every proc end so it can't leak (WI-A / review #6).
+      this.cleanupMcpConfig();
       // If we were disposed (e.g. by /clear, /model, /agent or LRU eviction) a fresh
       // runner may already own this taskId. Don't touch shared store state in that case.
       if (this.disposed) return;
@@ -231,6 +311,7 @@ class ClaudeRunner implements Runner {
 
     proc.on('error', (err) => {
       this.deps.logger.error({ err, taskId: this.taskId }, 'claude spawn error');
+      this.cleanupMcpConfig();
       if (this.inflight) {
         this.inflight.reject(err);
         this.inflight = null;

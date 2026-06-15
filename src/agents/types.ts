@@ -61,7 +61,7 @@ export interface Runner {
   isHot(): boolean;
   /** Refresh the task snapshot held by the runner — pool calls this before runTurn. */
   setTask(task: Task): void;
-  runTurn(text: string, callbacks?: ProgressCallbacks): Promise<TurnResult>;
+  runTurn(text: string, callbacks?: ProgressCallbacks, options?: RunOptions): Promise<TurnResult>;
   abort(): boolean;
   dispose(): void;
   lastActivity(): number;
@@ -80,4 +80,38 @@ export interface AgentFactory {
   /** Context window in tokens for a given model name. */
   contextWindow(model: string | null | undefined): number;
   createRunner(task: Task, deps: AgentFactoryDeps): Runner;
+}
+
+/**
+ * Per-run launch options (WI-A / WI-B). `undefined` ≡ current behavior (full
+ * permissions, no tool injection) so the bridge's default path is a zero regression.
+ */
+export interface PermissionProfile {
+  mode: 'full' | 'readonly'; // M1a two profiles; 'write' lands in M2
+}
+
+export interface McpServerSpec {
+  name: string;
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+export interface RunOptions {
+  permission?: PermissionProfile;
+  mcpServers?: McpServerSpec[];
+}
+
+/**
+ * Stable serialization of RunOptions for the pool's per-process rebuild decision
+ * (§2.1). Default options collapse to '' so the no-options bridge path never triggers
+ * a rebuild — this is the zero-regression guarantee the pool relies on.
+ */
+export function runOptionsFingerprint(o?: RunOptions): string {
+  const permission = o?.permission?.mode ?? 'full';
+  const servers = (o?.mcpServers ?? [])
+    .map((s) => ({ name: s.name, command: s.command, args: s.args ?? [], env: s.env ?? {} }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  if (permission === 'full' && servers.length === 0) return '';
+  return JSON.stringify({ permission, servers });
 }

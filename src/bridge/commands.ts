@@ -49,6 +49,8 @@ export class CommandHandler {
     private pool: AgentPool,
     private onCompact: (taskId: string, replyMsgId: string) => void,
     private onStop: (taskId: string) => { aborted: boolean; dropped: number },
+    private onDiagMcp: (taskId: string, replyMsgId: string) => void,
+    private onDiagReadonly: (taskId: string, replyMsgId: string) => void,
   ) {}
 
   private isAdmin(openId: string): boolean {
@@ -99,6 +101,12 @@ export class CommandHandler {
           return;
         case '/rm':
           await this.handleRm(msg, rest);
+          return;
+        case '/diag-mcp':
+          await this.handleDiagMcp(msg, rest);
+          return;
+        case '/diag-readonly':
+          await this.handleDiagReadonly(msg, rest);
           return;
         case '/help':
           await this.sender.reply(msg.messageId, HELP_TEXT);
@@ -197,6 +205,43 @@ export class CommandHandler {
       msg.messageId,
       `任务 ${tasks.length} 个 (★=本会话当前):\n${lines.join('\n')}`,
     );
+  }
+
+  // WI-A temporary diagnostic (admin-only): inject a per-run MCP echo server and run
+  // one turn, so an admin can confirm per-run tool injection reaches a real Claude
+  // process. Removed/replaced in M1b. Stays within kernel vocabulary (no business terms).
+  private async handleDiagMcp(msg: IncomingMessage, rest: string[]): Promise<void> {
+    if (!this.isAdmin(msg.userId)) {
+      await this.sender.reply(msg.messageId, '/diag-mcp 仅管理员可用。');
+      return;
+    }
+    const taskId = rest[0] ?? this.store.getState(currentTaskKey(msg.chatId)) ?? undefined;
+    const task = taskId ? this.store.getTask(taskId) : undefined;
+    if (!task) {
+      await this.sender.reply(msg.messageId, '用法: /diag-mcp [task]（未指定则用本会话当前任务）');
+      return;
+    }
+    this.onDiagMcp(task.id, msg.messageId);
+  }
+
+  // WI-B temporary diagnostic (admin-only): run one turn under the readonly profile so
+  // an admin can confirm the deterministic write-tool deny and its real behavior
+  // (reject vs hang, D6). Removed/replaced in M1b.
+  private async handleDiagReadonly(msg: IncomingMessage, rest: string[]): Promise<void> {
+    if (!this.isAdmin(msg.userId)) {
+      await this.sender.reply(msg.messageId, '/diag-readonly 仅管理员可用。');
+      return;
+    }
+    const taskId = rest[0] ?? this.store.getState(currentTaskKey(msg.chatId)) ?? undefined;
+    const task = taskId ? this.store.getTask(taskId) : undefined;
+    if (!task) {
+      await this.sender.reply(
+        msg.messageId,
+        '用法: /diag-readonly [task]（未指定则用本会话当前任务）',
+      );
+      return;
+    }
+    this.onDiagReadonly(task.id, msg.messageId);
   }
 
   private async handleStatus(msg: IncomingMessage): Promise<void> {
