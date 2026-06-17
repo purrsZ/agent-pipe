@@ -9,7 +9,9 @@ import { scheduleDailyBackup } from './backup.js';
 import { CommandHandler, currentTaskKey } from './bridge/commands.js';
 import { loadConfig, type Config } from './config.js';
 import {
+  anchorAction,
   buildAnchorCard,
+  buildErrorCard,
   buildProcessingCard,
   buildReportCard,
   buildResultCard,
@@ -26,7 +28,8 @@ import type { Task } from './store.js';
 import { Store } from './store.js';
 import { createWorkitemsContainer, type WorkitemsContainer } from './workitems/container.js';
 import { OpenLimitError } from './workitems/errors.js';
-import type { WorkItem } from './workitems/types.js';
+import { isTerminalStatus } from './workitems/shared.js';
+import type { WorkItem, WorkItemEvent } from './workitems/types.js';
 import { createAgentRunHandler } from './worktypes/agent-run/run-handler.js';
 import { registerProbe } from './worktypes/probe/index.js';
 
@@ -615,6 +618,17 @@ async function main() {
       if (claim?.owner_kind === 'managed') {
         const item = workitems.api.getWorkItem(claim.owner_id);
         if (item) {
+          // WI-7 P1: a terminal item (e.g. failed) keeps its claim until /done. Injecting a
+          // follow-up would hit the reducer terminal short-circuit (recorded, never
+          // dispatched) — so reply honestly instead of "已转交…稍候进展", which would promise
+          // a report that never comes. /done still releases the claim and closes the card.
+          if (isTerminalStatus(item.status)) {
+            await sender.reply(
+              msg.messageId,
+              '该调查已结束，回复 `/done` 关闭后可重新发起 `/probe`。',
+            );
+            return;
+          }
           workitems.api.injectHumanMessage(item.id, {
             text: msg.text,
             feishuMsgId: msg.messageId,
@@ -757,21 +771,37 @@ function chatIdFromSource(source: unknown): string | undefined {
   return undefined;
 }
 
+// M1b WI-7: pull the failure message out of a run_failed event payload (effects.ts stores
+// it as `error`). Falls back to a generic string so the error card is never blank.
+function errorFromPayload(event: WorkItemEvent): string {
+  const p = event.payload;
+  if (p && typeof p === 'object' && 'error' in p) {
+    const v = (p as { error?: unknown }).error;
+    if (typeof v === 'string' && v.trim().length > 0) return v;
+  }
+  return '运行失败';
+}
+
 export function createWorkitemsRuntime(deps: {
   config: Pick<Config, 'workitemsDbPath' | 'workitemsDir' | 'dataDir'>;
   logger: Logger;
   pool: AgentPool;
-  sender: Pick<Sender, 'replyCard' | 'sendCard'>;
+  sender: Pick<Sender, 'replyCard' | 'sendCard' | 'updateCard'>;
   kernelStore: Store;
   defaultCwd: string;
   createContainer?: typeof createWorkitemsContainer;
 }): WorkitemsContainer {
   const createContainer = deps.createContainer ?? createWorkitemsContainer;
+  // WI-7: post-commit observer. Late-bound via a thunk because postStatus needs `workitems`
+  // (the createContainer return value); the thunk defers the lookup until events actually
+  // fire (well after assembly — create-time never emits onCommitted).
+  let postStatus: (workitemId: string, event: WorkItemEvent) => void = () => {};
   const workitems = createContainer({
     dbPath: deps.config.workitemsDbPath,
     workitemsDir: deps.config.workitemsDir,
     backupsDir: path.join(deps.config.dataDir, 'backups'),
     logger: deps.logger,
+    onCommitted: (workitemId, event) => postStatus(workitemId, event),
   });
   // M1b WI-6: outbound bridge — post a finished run's report back into the managed thread
   // (reverse-lookup the anchor card via the claim; fall back to the source chat). Keeps the
@@ -794,6 +824,48 @@ export function createWorkitemsRuntime(deps: {
         }
       } catch (err) {
         deps.logger.error({ err, workitemId: info.workitemId }, 'post report failed');
+      }
+    })();
+  };
+  // M1b WI-7: outbound status bridge — subscribe to committed events and (per anchorAction)
+  // post a failure card and/or refresh the anchor card. Success report full-text stays with
+  // postReport (D3); done is left to runDone (D6); reply falls back to the source chat,
+  // update can't fall back (updateCard needs the original message id) so it just logs (P2).
+  postStatus = (workitemId, event) => {
+    void (async () => {
+      try {
+        const item = workitems.api.getWorkItem(workitemId);
+        if (!item) return;
+        const { reply, update } = anchorAction(event.kind, isTerminalStatus(item.status));
+        if (!reply && !update) return;
+        const threadRoot = deps.kernelStore.getThreadRootByOwner(workitemId);
+        if (reply) {
+          const card = buildErrorCard(item.title, errorFromPayload(event));
+          if (threadRoot) {
+            await deps.sender.replyCard(threadRoot, card);
+          } else {
+            const chatId = chatIdFromSource(item.source);
+            if (chatId) await deps.sender.sendCard(chatId, card);
+            else deps.logger.warn({ workitemId }, 'no thread/chat to post failure');
+          }
+        }
+        if (update) {
+          if (threadRoot) {
+            await deps.sender.updateCard(
+              threadRoot,
+              buildAnchorCard({
+                id: item.id,
+                title: item.title,
+                stage: item.phase,
+                status: item.status,
+              }),
+            );
+          } else {
+            deps.logger.warn({ workitemId }, 'no thread to refresh anchor');
+          }
+        }
+      } catch (err) {
+        deps.logger.error({ err, workitemId }, 'post status failed');
       }
     })();
   };

@@ -10,7 +10,7 @@ import {
   createWorkitemsContainer,
   type WorkitemsContainer,
 } from '../../src/workitems/container.js';
-import type { Clock, WorkItem } from '../../src/workitems/types.js';
+import type { Clock, WorkItem, WorkItemEvent } from '../../src/workitems/types.js';
 import { createAgentRunHandler } from '../../src/worktypes/agent-run/run-handler.js';
 import { registerProbe } from '../../src/worktypes/probe/index.js';
 
@@ -73,6 +73,7 @@ function fakeKernelStore(): Store {
 function harness(opts: {
   pool: AgentPool;
   onReport: (info: { workitemId: string; report: string }) => void;
+  onCommitted?: (workitemId: string, event: WorkItemEvent) => void;
 }): WorkitemsContainer {
   const container = createWorkitemsContainer({
     dbPath: path.join(tmpDir, 'workitems.sqlite'),
@@ -80,6 +81,7 @@ function harness(opts: {
     backupsDir: path.join(tmpDir, 'backups'),
     clock,
     logger,
+    onCommitted: opts.onCommitted,
     env: {
       // High heartbeat budget + no manual clock advance → the watchdog never fires here;
       // these tests are about the dispatch/event loop, not stalls (covered by noop-e2e).
@@ -231,6 +233,36 @@ describe('probe in-process e2e (WI-2/3/4/5/6)', () => {
     );
     expect(container.api.getWorkItem(item.id)!.wakePending).toBe(false);
     expect(reports.map((r) => r.report)).toEqual(['REPORT-1', 'REPORT-2']);
+    container.stop();
+  });
+
+  it('surfaces terminal failure via onCommitted(run_failed) and never calls onReport (WI-7)', async () => {
+    // probe maxRetries defaults to 1 → first run_failed redispatches, the second is terminal.
+    // (This is the worktype's own retry budget, NOT the harness WORKITEMS_RETRY_BUDGET, which
+    // is the reducer stall path and does not gate run_failed — plan P4.)
+    const { pool, sends } = fakePool(
+      () => ({ fullText: '', error: 'boom: spawn failed' }) as TurnResult,
+    );
+    const reports: unknown[] = [];
+    const committed: Array<{ workitemId: string; kind: string }> = [];
+    const container = harness({
+      pool,
+      onReport: () => reports.push(1),
+      onCommitted: (workitemId, event) => committed.push({ workitemId, kind: event.kind }),
+    });
+
+    const item = createProbe(container, 'probe that fails');
+
+    // two failed rounds (attempt + one retry) → terminal failed.
+    await waitFor(() => expect(container.api.getWorkItem(item.id)!.status).toBe('failed'));
+
+    expect(sends).toHaveLength(2);
+    // onCommitted saw run_failed (the terminal one at minimum) — the bridge's failure hook source.
+    expect(committed.some((c) => c.kind === 'run_failed' && c.workitemId === item.id)).toBe(true);
+    // bootstrapApply's workitem_created does NOT flow through onCommitted (plan §2.1 / #3).
+    expect(committed.some((c) => c.kind === 'workitem_created')).toBe(false);
+    // success-only onReport never fired on the failure path (D3).
+    expect(reports).toEqual([]);
     container.stop();
   });
 });

@@ -70,4 +70,17 @@ describe('index workitems wiring', () => {
     expect(source).toContain('getThreadRootByOwner');
     expect(source).toContain('buildReportCard');
   });
+
+  it('wires the post-commit status bridge: failure card + anchor refresh + terminal guard (WI-7)', () => {
+    const source = indexSource();
+
+    expect(source).toContain('postStatus');
+    expect(source).toContain('onCommitted');
+    expect(source).toContain('anchorAction');
+    expect(source).toContain('buildErrorCard');
+    expect(source).toContain('updateCard');
+    // dispatcher terminal guard + postStatus terminal check go through isTerminalStatus,
+    // never `status===` (the latter is also caught by the wiring guard above).
+    expect(source).toContain('isTerminalStatus');
+  });
 });
