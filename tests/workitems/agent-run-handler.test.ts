@@ -132,7 +132,7 @@ describe('agent-run handler (WI-2)', () => {
 
   it('drives pool.send with a managed shadow task, readonly profile, and writes report.md', async () => {
     const { pool, sends } = fakePool((_t, _text, callbacks) => {
-      callbacks?.onText?.('tid', 'partial'); // exercise heartbeat bridge
+      callbacks?.onActivity?.('tid'); // WI-9: exercise heartbeat bridge (any stdout line)
       return { fullText: 'REPORT BODY', sessionId: 'sess-1' } as TurnResult;
     });
     const { store, upserts } = fakeStore();
@@ -153,7 +153,7 @@ describe('agent-run handler (WI-2)', () => {
     // readonly profile + prompt carries the title
     expect(sends[0]?.options?.permission?.mode).toBe('readonly');
     expect(sends[0]?.text).toContain('看看 src 里有几个 runner');
-    // heartbeat fired from onText
+    // heartbeat fired from onActivity (any stdout line)
     expect((rec as unknown as { heartbeats: number }).heartbeats).toBeGreaterThan(0);
     // outputs: session recorded + report written
     expect(rec.sessionIds).toEqual(['sess-1']);

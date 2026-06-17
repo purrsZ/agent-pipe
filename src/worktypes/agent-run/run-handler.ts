@@ -79,8 +79,11 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
 
   // 3) Heartbeat bridge: real runner stream → container watchdog liveness.
   const callbacks: ProgressCallbacks = {
-    onText: () => ctx.heartbeat(),
-    onToolUse: () => ctx.heartbeat(),
+    // WI-9: heartbeat on ANY stdout activity (onActivity), not just visible text/tool events.
+    // A thinking/long turn that streams no assistant text still keeps the watchdog alive —
+    // heartbeatTimeoutSec now means "stdout fully silent for N s" (= true wedge), decoupled
+    // from how long the turn legitimately runs. wallclockCapSec stays the resource ceiling.
+    onActivity: () => ctx.heartbeat(),
   };
 
   // 4) Permission: worktype readonly → agents-layer readonly weak profile (WI-B).

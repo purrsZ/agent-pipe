@@ -279,6 +279,11 @@ class ClaudeRunner implements Runner {
     const rl = readline.createInterface({ input: proc.stdout! });
     rl.on('line', (line) => {
       this._lastActivity = Date.now();
+      // WI-9: liveness tick on EVERY stdout line (before parsing) — a thinking/long turn that
+      // streams no assistant text still signals "alive". A consumer bridges this to its own
+      // liveness heartbeat so a silence judgement can mean "stdout fully silent", not "no
+      // visible text/tool event". This mirrors the existing _lastActivity above.
+      this.inflight?.callbacks?.onActivity?.(this.taskId);
       const events = this.parser.parseLine(line);
       for (const e of events) this.handleEvent(e);
     });

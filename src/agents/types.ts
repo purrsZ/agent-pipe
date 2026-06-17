@@ -13,6 +13,15 @@ export interface ProgressCallbacks {
   onToolUse?: (taskId: string, tool: { name: string; input?: string }) => void;
   onToolResult?: (taskId: string, r: { isError?: boolean }) => void;
   onText?: (taskId: string, fullText: string) => void;
+  /**
+   * WI-9 liveness tick — invoked on EVERY stdout line (before parsing), so a turn that
+   * streams anything (thinking deltas, SSE pings, tool noise) keeps signalling "alive" even
+   * when it produces no assistant text. A consumer bridges this to a liveness heartbeat so a
+   * silence judgement can mean "stdout fully silent for N s" (= true wedge), not
+   * "no visible output" — long/thinking turns no longer false-stall. (cf. ai-sentinel tmux
+   * stuck-detector: any pane change resets the stuck counter; only a frozen pane is a wedge.)
+   */
+  onActivity?: (taskId: string) => void;
 }
 
 export interface TurnResult {
