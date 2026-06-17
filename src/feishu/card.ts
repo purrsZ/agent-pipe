@@ -58,21 +58,32 @@ export interface AnchorCardData {
 
 export function buildAnchorCard(data: AnchorCardData): object {
   const title = data.title.length > 40 ? `${data.title.slice(0, 40)}…` : data.title;
+  // Three visual states, closed taking precedence: closed (grey) > failed (red) > open (blue).
+  // `failed` is driven by the neutral status value so callers just pass through item.status.
+  const failed = !data.closed && data.status === 'failed';
+  const footer = data.closed
+    ? '_已关闭。_'
+    : failed
+      ? '_已失败，可回复 `/done` 关闭。_'
+      : '_在此消息下回复即可追问；满意后回复 `/done` 关闭。_';
   const lines = [
     `**ID**: \`${data.id}\``,
     `**进度**: ${data.stage}`,
     `**状态**: ${data.status}`,
     '',
-    data.closed ? '_已关闭。_' : '_在此消息下回复即可追问；满意后回复 `/done` 关闭。_',
+    footer,
   ].join('\n');
+  const template = data.closed ? 'grey' : failed ? 'red' : 'blue';
+  const headTitle = data.closed
+    ? `已关闭 · ${title}`
+    : failed
+      ? `调查失败 · ${title}`
+      : `调查 · ${title}`;
   return {
     schema: '2.0',
     header: {
-      template: data.closed ? 'grey' : 'blue',
-      title: {
-        tag: 'plain_text',
-        content: data.closed ? `已关闭 · ${title}` : `调查 · ${title}`,
-      },
+      template,
+      title: { tag: 'plain_text', content: headTitle },
     },
     body: {
       direction: 'vertical',
@@ -106,6 +117,48 @@ export function buildReportCard(title: string, report: string): object {
       elements: [{ tag: 'markdown', content: shown }],
     },
   };
+}
+
+/**
+ * M1b WI-7: failure card posted back into a managed thread when a run reaches a terminal
+ * failure. Red header + the error summary (truncated, same budget as the report card).
+ * Neutral naming keeps this kernel-layer file within the architecture guard.
+ */
+export function buildErrorCard(title: string, error: string): object {
+  const head = title.length > 40 ? `${title.slice(0, 40)}…` : title;
+  const body = (error ?? '').trim() || '(未知错误)';
+  const shown =
+    body.length > MAX_CARD_MARKDOWN ? `${body.slice(0, MAX_CARD_MARKDOWN)}\n\n_…已截断_` : body;
+  return {
+    schema: '2.0',
+    header: {
+      template: 'red',
+      title: { tag: 'plain_text', content: `调查失败 · ${head}` },
+    },
+    body: {
+      direction: 'vertical',
+      padding: '12px',
+      elements: [{ tag: 'markdown', content: `**失败原因**：${shown}` }],
+    },
+  };
+}
+
+/**
+ * M1b WI-7: maps a committed main event + terminal flag to the outbound card action(s).
+ * Pure (takes raw kind + bool, no work-item types) so it's unit-testable in isolation and
+ * lets the bridge wiring pass `isTerminalStatus(...)` instead of writing `status===`
+ * (which the index guard forbids).
+ *  - run_failed at a terminal state → error card AND refresh the anchor to its failed state.
+ *  - any other terminal (i.e. done) → skip: runDone already refreshed the anchor on /done.
+ *  - non-terminal progress          → refresh the anchor stage only.
+ */
+export function anchorAction(
+  kind: string,
+  isTerminal: boolean,
+): { reply: boolean; update: boolean } {
+  if (kind === 'run_failed' && isTerminal) return { reply: true, update: true };
+  if (isTerminal) return { reply: false, update: false };
+  return { reply: false, update: true };
 }
 
 export function buildProcessingCard(taskName: string, agentKind?: string): object {

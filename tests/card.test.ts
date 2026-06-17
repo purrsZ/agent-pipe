@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { buildAnchorCard, buildReportCard, formatClock } from '../src/feishu/card.js';
+import {
+  anchorAction,
+  buildAnchorCard,
+  buildErrorCard,
+  buildReportCard,
+  formatClock,
+} from '../src/feishu/card.js';
 
 describe('formatClock', () => {
   it('under an hour: m:ss', () => {
@@ -56,6 +62,30 @@ describe('buildAnchorCard (M1b WI-4)', () => {
     }) as { header: { title: { content: string } } };
     expect(card.header.title.content).toContain('…');
   });
+
+  it('uses a red header and a failed hint when status is failed (M1b WI-7)', () => {
+    const card = buildAnchorCard({
+      id: 'wi-1',
+      title: 't',
+      stage: 'probe:failed',
+      status: 'failed',
+    }) as { header: { template: string } };
+    expect(card.header.template).toBe('red');
+    const json = JSON.stringify(card);
+    expect(json).toContain('调查失败');
+    expect(json).toContain('已失败');
+  });
+
+  it('closed takes precedence over failed (grey, not red)', () => {
+    const card = buildAnchorCard({
+      id: 'wi-1',
+      title: 't',
+      stage: 'probe:failed',
+      status: 'failed',
+      closed: true,
+    }) as { header: { template: string } };
+    expect(card.header.template).toBe('grey');
+  });
 });
 
 describe('buildReportCard (M1b WI-6)', () => {
@@ -75,5 +105,44 @@ describe('buildReportCard (M1b WI-6)', () => {
   it('shows a placeholder for an empty report', () => {
     const card = buildReportCard('t', '   ');
     expect(JSON.stringify(card)).toContain('空报告');
+  });
+});
+
+describe('buildErrorCard (M1b WI-7)', () => {
+  it('renders the title + error summary under a red header', () => {
+    const card = buildErrorCard('看看 runner', 'boom: cwd not found') as {
+      header: { template: string };
+    };
+    const json = JSON.stringify(card);
+    expect(json).toContain('看看 runner');
+    expect(json).toContain('boom: cwd not found');
+    expect(card.header.template).toBe('red');
+  });
+
+  it('truncates an overlong error', () => {
+    const card = buildErrorCard('t', 'x'.repeat(40_000));
+    expect(JSON.stringify(card)).toContain('已截断');
+  });
+
+  it('shows a placeholder for an empty error', () => {
+    const card = buildErrorCard('t', '   ');
+    expect(JSON.stringify(card)).toContain('未知错误');
+  });
+});
+
+describe('anchorAction (M1b WI-7)', () => {
+  it('terminal run_failed → reply error card + refresh anchor', () => {
+    expect(anchorAction('run_failed', true)).toEqual({ reply: true, update: true });
+  });
+
+  it('other terminal (done) → skip — runDone owns the anchor (D6)', () => {
+    expect(anchorAction('close_requested', true)).toEqual({ reply: false, update: false });
+    expect(anchorAction('run_completed', true)).toEqual({ reply: false, update: false });
+  });
+
+  it('non-terminal progress → refresh anchor only (incl. mid-retry run_failed, D4)', () => {
+    expect(anchorAction('run_completed', false)).toEqual({ reply: false, update: true });
+    expect(anchorAction('human_message', false)).toEqual({ reply: false, update: true });
+    expect(anchorAction('run_failed', false)).toEqual({ reply: false, update: true });
   });
 });
