@@ -32,6 +32,8 @@ const HELP_TEXT = [
   '  /wl add @某人 [@某人...]                   把 @ 的人加入白名单',
   '  /wl add <open_id>                         按 ID 加入',
   '  /wl rm @某人 / <open_id>                   移除',
+  '  /probe [--repo <path>] <问题>             新建只读调查（在飞书里直接问代码库，回贴报告）',
+  '  /done                                     关闭当前话题的调查（在锚点卡下回复）',
   '  /help                                     本帮助',
   '',
   '普通消息（不带 /）：优先发给本会话当前任务；若无则发给本会话最近活跃。',
@@ -51,6 +53,8 @@ export class CommandHandler {
     private onStop: (taskId: string) => { aborted: boolean; dropped: number },
     private onDiagMcp: (taskId: string, replyMsgId: string) => void,
     private onDiagReadonly: (taskId: string, replyMsgId: string) => void,
+    private onProbe: (msg: IncomingMessage, opts: { repo?: string; description: string }) => void,
+    private onDone: (msg: IncomingMessage, threadRoot: string) => void,
   ) {}
 
   private isAdmin(openId: string): boolean {
@@ -116,6 +120,12 @@ export class CommandHandler {
           return;
         case '/diag-unclaim':
           await this.handleDiagUnclaim(msg, rest);
+          return;
+        case '/probe':
+          await this.handleProbe(msg, rest);
+          return;
+        case '/done':
+          await this.handleDone(msg);
           return;
         case '/help':
           await this.sender.reply(msg.messageId, HELP_TEXT);
@@ -295,6 +305,30 @@ export class CommandHandler {
     }
     this.store.releaseThreadClaim(rootId);
     await this.sender.reply(msg.messageId, `已释放认领: ${rootId}`);
+  }
+
+  // M1b WI-4: create a managed (upper-layer) read-only investigation from Feishu. Parsing
+  // and basic validation only — the create + anchor card + thread claim happen in index.ts
+  // via onProbe (this kernel-layer file stays free of upper-layer vocabulary).
+  private async handleProbe(msg: IncomingMessage, rest: string[]): Promise<void> {
+    const { positional, flags } = parseArgs(rest);
+    const description = positional.join(' ').trim();
+    if (!description) {
+      await this.sender.reply(msg.messageId, '用法: /probe [--repo <path>] <要调查的问题>');
+      return;
+    }
+    this.onProbe(msg, { repo: flags.repo, description });
+  }
+
+  // M1b WI-4: close the investigation owning the current thread. The thread root resolves
+  // the owner inside index.ts (onDone); here we only locate the thread anchor.
+  private async handleDone(msg: IncomingMessage): Promise<void> {
+    const threadRoot = msg.rootId ?? msg.parentId;
+    if (!threadRoot) {
+      await this.sender.reply(msg.messageId, '请在某个调查话题（锚点卡）下回复 /done 来关闭它。');
+      return;
+    }
+    this.onDone(msg, threadRoot);
   }
 
   private async handleStatus(msg: IncomingMessage): Promise<void> {

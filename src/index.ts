@@ -8,18 +8,27 @@ import type { ProgressCallbacks } from './agents/types.js';
 import { scheduleDailyBackup } from './backup.js';
 import { CommandHandler, currentTaskKey } from './bridge/commands.js';
 import { loadConfig, type Config } from './config.js';
-import { buildProcessingCard, buildResultCard, buildStatusCard } from './feishu/card.js';
+import {
+  buildAnchorCard,
+  buildProcessingCard,
+  buildReportCard,
+  buildResultCard,
+  buildStatusCard,
+} from './feishu/card.js';
 import { createFeishuClients } from './feishu/client.js';
 import { createDispatcher } from './feishu/event-router.js';
 import { Sender } from './feishu/sender.js';
 import { StreamingCard } from './feishu/stream-card.js';
+import type { IncomingMessage } from './feishu/types.js';
 import { installCrashGuard, removeOwnPidFile, startHeartbeat } from './lifecycle.js';
 import { createLogger, type Logger } from './logger.js';
 import type { Task } from './store.js';
 import { Store } from './store.js';
 import { createWorkitemsContainer, type WorkitemsContainer } from './workitems/container.js';
-import { registerNoop } from './worktypes/noop/index.js';
-import { createNoopRunHandler } from './worktypes/noop/run-handler.js';
+import { OpenLimitError } from './workitems/errors.js';
+import type { WorkItem } from './workitems/types.js';
+import { createAgentRunHandler } from './worktypes/agent-run/run-handler.js';
+import { registerProbe } from './worktypes/probe/index.js';
 
 const COMPACT_PROMPT = [
   '请把我们到目前为止的完整对话压缩成一份结构化摘要，供新会话继续使用。',
@@ -98,7 +107,6 @@ async function main() {
   ensureSingleInstance(pidPath, logger);
 
   const store = new Store(config.dbPath);
-  const workitems = createWorkitemsRuntime({ config, logger });
 
   if (store.whitelistCount() === 0) {
     for (const id of config.allowedOpenIds) store.addWhitelist(id, 'bootstrap');
@@ -128,6 +136,17 @@ async function main() {
     store,
     logger,
   );
+  // workitems runtime drives real agent runs through the pool (managed shadow tasks),
+  // so it must be wired after the pool exists. defaultCwd is the fallback dir the
+  // readonly probe agent browses when a workitem declares no repo.
+  const workitems = createWorkitemsRuntime({
+    config,
+    logger,
+    pool,
+    sender,
+    kernelStore: store,
+    defaultCwd: config.allowedCwdPrefixes[0] ?? process.cwd(),
+  });
   const runningTasks = new Set<string>();
   const botStartTime = Date.now();
 
@@ -465,6 +484,81 @@ async function main() {
     }
   }
 
+  // M1b WI-4: /probe creates a managed read-only investigation, posts an anchor card, and
+  // claims the thread so follow-ups route into it (WI-5). /done closes it and MUST release
+  // the claim — otherwise a closed thread keeps a stale managed claim and later follow-ups
+  // hit the terminal short-circuit and silently vanish.
+  async function runProbe(
+    msg: IncomingMessage,
+    opts: { repo?: string; description: string },
+  ): Promise<void> {
+    const repos = opts.repo ? [opts.repo] : [config.allowedCwdPrefixes[0] ?? process.cwd()];
+    let item: WorkItem;
+    try {
+      item = workitems.api.createWorkItem({
+        type: 'probe',
+        title: opts.description,
+        source: {
+          kind: 'feishu',
+          userId: msg.userId,
+          chatId: msg.chatId,
+          messageId: msg.messageId,
+        },
+        repos,
+        context: {},
+      }).item;
+    } catch (err) {
+      if (err instanceof OpenLimitError) {
+        await sender.reply(msg.messageId, `${err.message}（先用 /done 关掉几个再来）`);
+        return;
+      }
+      logger.error({ err }, 'probe create failed');
+      await sender.reply(msg.messageId, `调查创建失败: ${(err as Error).message}`);
+      return;
+    }
+    const anchorMsgId = await sender.replyCard(
+      msg.messageId,
+      buildAnchorCard({
+        id: item.id,
+        title: item.title,
+        stage: item.phase,
+        status: item.status,
+      }),
+    );
+    if (!anchorMsgId) {
+      await sender.reply(msg.messageId, `锚点卡发送失败（调查已创建，id=${item.id}）。`);
+      return;
+    }
+    store.claimThread(anchorMsgId, 'managed', item.id);
+  }
+
+  async function runDone(msg: IncomingMessage, threadRoot: string): Promise<void> {
+    const claim = store.getThreadClaim(threadRoot);
+    if (!claim || claim.owner_kind !== 'managed') {
+      await sender.reply(msg.messageId, '当前话题不是调查，无需 /done。');
+      return;
+    }
+    const item = workitems.api.getWorkItem(claim.owner_id);
+    if (!item) {
+      store.releaseThreadClaim(threadRoot);
+      await sender.reply(msg.messageId, '该调查已不存在，已清理话题认领。');
+      return;
+    }
+    workitems.api.injectClose(item.id);
+    store.releaseThreadClaim(threadRoot);
+    await sender.updateCard(
+      threadRoot,
+      buildAnchorCard({
+        id: item.id,
+        title: item.title,
+        stage: item.phase,
+        status: 'done',
+        closed: true,
+      }),
+    );
+    await sender.reply(msg.messageId, `已关闭调查 ${item.id}。`);
+  }
+
   const commands = new CommandHandler(
     store,
     sender,
@@ -480,6 +574,12 @@ async function main() {
     },
     (taskId, replyMsgId) => {
       void runDiagReadonly(taskId, replyMsgId);
+    },
+    (msg, opts) => {
+      void runProbe(msg, opts);
+    },
+    (msg, threadRoot) => {
+      void runDone(msg, threadRoot);
     },
   );
 
@@ -505,19 +605,27 @@ async function main() {
       return;
     }
 
-    // WI-D: consult the thread-claim registry BEFORE the bridge task fallback. A thread
-    // claimed by the managed (workitems) layer must not be swallowed by the bridge's
-    // root→task / recent-task fallback. M1a stub: log + placeholder; real handoff is M1b.
+    // WI-D/WI-5: consult the thread-claim registry BEFORE the bridge task fallback. A
+    // thread claimed by the managed (workitems) layer must not be swallowed by the bridge's
+    // root→task / recent-task fallback — the follow-up is routed into the owning work
+    // item's next round instead.
     const threadRoot = msg.rootId ?? msg.parentId;
     if (threadRoot) {
       const claim = store.getThreadClaim(threadRoot);
       if (claim?.owner_kind === 'managed') {
-        logger.info(
-          { threadRoot, ownerId: claim.owner_id },
-          'inbound on managed-claimed thread (M1a stub, handoff in M1b)',
-        );
-        await sender.reply(msg.messageId, '该话题已归工作项系统管理（M1a 占位，真正处理在 M1b）。');
-        return;
+        const item = workitems.api.getWorkItem(claim.owner_id);
+        if (item) {
+          workitems.api.injectHumanMessage(item.id, {
+            text: msg.text,
+            feishuMsgId: msg.messageId,
+          });
+          await sender.reply(msg.messageId, '已转交给调查，稍候进展会在本话题更新。');
+          return;
+        }
+        // Owner vanished but the claim lingered — release it and fall through to normal
+        // bridge routing instead of swallowing the message forever.
+        logger.warn({ threadRoot, ownerId: claim.owner_id }, 'managed claim with missing owner');
+        store.releaseThreadClaim(threadRoot);
       }
     }
 
@@ -639,9 +747,23 @@ async function main() {
   process.on('SIGTERM', shutdown);
 }
 
+// M1b WI-6: extract the IM chat id from a work item's source for the report fallback path
+// (used when the anchor-card thread can't be reverse-looked-up).
+function chatIdFromSource(source: unknown): string | undefined {
+  if (source && typeof source === 'object' && 'chatId' in source) {
+    const v = (source as { chatId?: unknown }).chatId;
+    return typeof v === 'string' ? v : undefined;
+  }
+  return undefined;
+}
+
 export function createWorkitemsRuntime(deps: {
   config: Pick<Config, 'workitemsDbPath' | 'workitemsDir' | 'dataDir'>;
   logger: Logger;
+  pool: AgentPool;
+  sender: Pick<Sender, 'replyCard' | 'sendCard'>;
+  kernelStore: Store;
+  defaultCwd: string;
   createContainer?: typeof createWorkitemsContainer;
 }): WorkitemsContainer {
   const createContainer = deps.createContainer ?? createWorkitemsContainer;
@@ -651,8 +773,42 @@ export function createWorkitemsRuntime(deps: {
     backupsDir: path.join(deps.config.dataDir, 'backups'),
     logger: deps.logger,
   });
-  registerNoop(workitems.registry);
-  workitems.effects.registerHandler(createNoopRunHandler());
+  // M1b WI-6: outbound bridge — post a finished run's report back into the managed thread
+  // (reverse-lookup the anchor card via the claim; fall back to the source chat). Keeps the
+  // run handler free of any IM type; the posting closure lives here at the assembly root.
+  const postReport = (info: { workitemId: string; report: string }): void => {
+    void (async () => {
+      try {
+        const item = workitems.api.getWorkItem(info.workitemId);
+        const card = buildReportCard(item?.title ?? '调查', info.report);
+        const threadRoot = deps.kernelStore.getThreadRootByOwner(info.workitemId);
+        if (threadRoot) {
+          await deps.sender.replyCard(threadRoot, card);
+          return;
+        }
+        const chatId = chatIdFromSource(item?.source);
+        if (chatId) {
+          await deps.sender.sendCard(chatId, card);
+        } else {
+          deps.logger.warn({ workitemId: info.workitemId }, 'no thread/chat to post report');
+        }
+      } catch (err) {
+        deps.logger.error({ err, workitemId: info.workitemId }, 'post report failed');
+      }
+    })();
+  };
+  // Production wiring: the real agent-run handler (drives the pool) replaces the noop
+  // run handler; noop stays a test-only fixture (M1b WI-2/WI-3).
+  registerProbe(workitems.registry);
+  workitems.effects.registerHandler(
+    createAgentRunHandler({
+      pool: deps.pool,
+      kernelStore: deps.kernelStore,
+      defaultCwd: deps.defaultCwd,
+      logger: deps.logger,
+      onReport: postReport,
+    }),
+  );
   workitems.start();
   return workitems;
 }

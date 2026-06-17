@@ -7,16 +7,16 @@ function indexSource(): string {
 }
 
 describe('index workitems wiring', () => {
-  it('exposes testable runtime helpers and wires noop through the container', () => {
+  it('exposes testable runtime helpers and wires probe + agent-run through the container', () => {
     const source = indexSource();
 
     expect(source).toContain('export function createWorkitemsRuntime');
     expect(source).toContain("from './workitems/container.js'");
-    expect(source).toContain("from './worktypes/noop/index.js'");
-    expect(source).toContain("from './worktypes/noop/run-handler.js'");
+    expect(source).toContain("from './worktypes/probe/index.js'");
+    expect(source).toContain("from './worktypes/agent-run/run-handler.js'");
     expect(source).toContain('createWorkitemsContainer');
-    expect(source).toContain('registerNoop');
-    expect(source).toContain('createNoopRunHandler');
+    expect(source).toContain('registerProbe');
+    expect(source).toContain('createAgentRunHandler');
     expect(source).toContain('workitems.start()');
   });
 
@@ -47,5 +47,27 @@ describe('index workitems wiring', () => {
     const source = indexSource();
 
     expect(source).not.toMatch(/workitems?\.[^\n]*(status|phase)|\b(status|phase)\b\s*={2,3}/);
+  });
+
+  it('wires /probe create + anchor claim and /done close + claim release (WI-4/WI-5)', () => {
+    const source = indexSource();
+
+    expect(source).toContain('async function runProbe');
+    expect(source).toContain('async function runDone');
+    expect(source).toContain('workitems.api.createWorkItem');
+    expect(source).toContain('workitems.api.injectClose');
+    expect(source).toContain('workitems.api.injectHumanMessage');
+    expect(source).toContain("store.claimThread(anchorMsgId, 'managed'");
+    expect(source).toContain('store.releaseThreadClaim(threadRoot)');
+    expect(source).toContain('buildAnchorCard');
+  });
+
+  it('wires the outbound report bridge back to the IM thread (WI-6)', () => {
+    const source = indexSource();
+
+    expect(source).toContain('const postReport');
+    expect(source).toContain('onReport: postReport');
+    expect(source).toContain('getThreadRootByOwner');
+    expect(source).toContain('buildReportCard');
   });
 });
