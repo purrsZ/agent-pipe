@@ -30,6 +30,9 @@ export interface ThreadClaim {
   thread_root_id: string;
   owner_kind: TaskOwnerKind;
   owner_id: string;
+  // WI-8: the anchor card's message id (updateCard target), kept apart from thread_root_id
+  // (the routing/claim key). NULL for pre-WI-8 rows and bridge claims.
+  anchor_msg_id: string | null;
   created_at: number;
 }
 
@@ -100,10 +103,12 @@ export class Store {
         thread_root_id TEXT PRIMARY KEY,
         owner_kind     TEXT NOT NULL,
         owner_id       TEXT NOT NULL,
+        anchor_msg_id  TEXT,
         created_at     INTEGER NOT NULL
       );
     `);
     this.migrateTasksLegacy();
+    this.migrateThreadClaimsLegacy();
     this.db.prepare("DELETE FROM state WHERE key = 'current_task_id'").run();
   }
 
@@ -129,6 +134,19 @@ export class Store {
       this.db.exec(`ALTER TABLE tasks RENAME COLUMN cc_session_id TO agent_session_id`);
     } else if (!names.has('agent_session_id')) {
       this.db.exec(`ALTER TABLE tasks ADD COLUMN agent_session_id TEXT`);
+    }
+  }
+
+  // WI-8: thread_claims gained anchor_msg_id so the anchor card (updateCard target) is
+  // stored apart from the thread root (the routing/claim key). Guarded ADD COLUMN back-fills
+  // old DBs with NULL — those pre-existing claims simply can't refresh their anchor card,
+  // zero regression.
+  private migrateThreadClaimsLegacy(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(thread_claims)`).all() as Array<{
+      name: string;
+    }>;
+    if (!cols.some((c) => c.name === 'anchor_msg_id')) {
+      this.db.exec(`ALTER TABLE thread_claims ADD COLUMN anchor_msg_id TEXT`);
     }
   }
 
@@ -187,12 +205,17 @@ export class Store {
   // WI-D: thread → owner claim registry. owner_kind is a neutral value (bridge | managed)
   // so this kernel-layer file carries no business vocabulary. Routing consults this before
   // the bridge task fallback so a managed thread is never swallowed by it (and vice versa).
-  claimThread(rootId: string, ownerKind: 'bridge' | 'managed', ownerId: string): void {
+  claimThread(
+    rootId: string,
+    ownerKind: 'bridge' | 'managed',
+    ownerId: string,
+    anchorMsgId: string | null = null,
+  ): void {
     this.db
       .prepare(
-        'INSERT OR REPLACE INTO thread_claims (thread_root_id, owner_kind, owner_id, created_at) VALUES (?, ?, ?, ?)',
+        'INSERT OR REPLACE INTO thread_claims (thread_root_id, owner_kind, owner_id, anchor_msg_id, created_at) VALUES (?, ?, ?, ?, ?)',
       )
-      .run(rootId, ownerKind, ownerId, Date.now());
+      .run(rootId, ownerKind, ownerId, anchorMsgId, Date.now());
   }
 
   getThreadClaim(rootId: string): ThreadClaim | undefined {
@@ -214,6 +237,17 @@ export class Store {
       )
       .get(ownerId) as { thread_root_id: string } | undefined;
     return row?.thread_root_id;
+  }
+
+  // M1b WI-8: reverse lookup the anchor card message id (updateCard target), kept apart from
+  // the thread root (replyCard / routing key). Newest managed claim wins.
+  getThreadAnchorByOwner(ownerId: string): string | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT anchor_msg_id FROM thread_claims WHERE owner_id = ? AND owner_kind = 'managed' ORDER BY created_at DESC LIMIT 1",
+      )
+      .get(ownerId) as { anchor_msg_id: string | null } | undefined;
+    return row?.anchor_msg_id ?? undefined;
   }
 
   recordTaskMessage(taskId: string, feishuMsgId: string) {

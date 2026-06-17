@@ -532,7 +532,11 @@ async function main() {
       await sender.reply(msg.messageId, `锚点卡发送失败（调查已创建，id=${item.id}）。`);
       return;
     }
-    store.claimThread(anchorMsgId, 'managed', item.id);
+    // WI-8: claim the thread on its TRUE root (the /probe message's thread root), NOT the
+    // anchor card's id — inbound follow-ups carry rootId = that thread root, so a claim keyed
+    // on the anchor card never matches (the real-bot串台 bug). anchorMsgId is stored apart for
+    // updateCard (anchor refresh / close).
+    store.claimThread(msg.rootId ?? msg.messageId, 'managed', item.id, anchorMsgId);
   }
 
   async function runDone(msg: IncomingMessage, threadRoot: string): Promise<void> {
@@ -549,16 +553,20 @@ async function main() {
     }
     workitems.api.injectClose(item.id);
     store.releaseThreadClaim(threadRoot);
-    await sender.updateCard(
-      threadRoot,
-      buildAnchorCard({
-        id: item.id,
-        title: item.title,
-        stage: item.phase,
-        status: 'done',
-        closed: true,
-      }),
-    );
+    // WI-8: refresh the anchor card via its own message id, not the thread root — updateCard
+    // targets the original card message.
+    if (claim.anchor_msg_id) {
+      await sender.updateCard(
+        claim.anchor_msg_id,
+        buildAnchorCard({
+          id: item.id,
+          title: item.title,
+          stage: item.phase,
+          status: 'done',
+          closed: true,
+        }),
+      );
+    }
     await sender.reply(msg.messageId, `已关闭调查 ${item.id}。`);
   }
 
@@ -850,9 +858,12 @@ export function createWorkitemsRuntime(deps: {
           }
         }
         if (update) {
-          if (threadRoot) {
+          // WI-8: anchor refresh targets the anchor card's own message id, not the thread
+          // root (which now keys routing / report replies).
+          const anchorMsgId = deps.kernelStore.getThreadAnchorByOwner(workitemId);
+          if (anchorMsgId) {
             await deps.sender.updateCard(
-              threadRoot,
+              anchorMsgId,
               buildAnchorCard({
                 id: item.id,
                 title: item.title,
@@ -861,7 +872,7 @@ export function createWorkitemsRuntime(deps: {
               }),
             );
           } else {
-            deps.logger.warn({ workitemId }, 'no thread to refresh anchor');
+            deps.logger.warn({ workitemId }, 'no anchor to refresh');
           }
         }
       } catch (err) {

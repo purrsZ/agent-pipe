@@ -57,7 +57,10 @@ describe('index workitems wiring', () => {
     expect(source).toContain('workitems.api.createWorkItem');
     expect(source).toContain('workitems.api.injectClose');
     expect(source).toContain('workitems.api.injectHumanMessage');
-    expect(source).toContain("store.claimThread(anchorMsgId, 'managed'");
+    // WI-8: claim keys on the thread root (rootId ?? messageId), NOT the anchor card id —
+    // the anchor card id rides as the 4th arg for later updateCard (anchor refresh / close).
+    expect(source).toContain("store.claimThread(msg.rootId ?? msg.messageId, 'managed'");
+    expect(source).toContain('item.id, anchorMsgId)');
     expect(source).toContain('store.releaseThreadClaim(threadRoot)');
     expect(source).toContain('buildAnchorCard');
   });
@@ -79,6 +82,9 @@ describe('index workitems wiring', () => {
     expect(source).toContain('anchorAction');
     expect(source).toContain('buildErrorCard');
     expect(source).toContain('updateCard');
+    // WI-8: anchor refresh targets the anchor card's own id via getThreadAnchorByOwner,
+    // not the thread root (which now keys routing / report replies).
+    expect(source).toContain('getThreadAnchorByOwner');
     // dispatcher terminal guard + postStatus terminal check go through isTerminalStatus,
     // never `status===` (the latter is also caught by the wiring guard above).
     expect(source).toContain('isTerminalStatus');

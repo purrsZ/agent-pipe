@@ -52,4 +52,33 @@ describe('thread claims registry (WI-D)', () => {
     store.claimThread('root-b', 'bridge', 'task-x');
     expect(store.getThreadRootByOwner('task-x')).toBeUndefined();
   });
+
+  // WI-8: the real-bot串台 bug — the claim must key on the thread root (the user's /probe
+  // message), while the anchor card lives at a DIFFERENT message id. Both round-trip apart.
+  it('WI-8: stores anchor_msg_id apart from the thread-root key', () => {
+    const threadRoot = 'om_user_probe_msg';
+    const anchor = 'om_anchor_card_msg';
+    store.claimThread(threadRoot, 'managed', 'wi-7', anchor);
+
+    // routing + report replies key on the thread root, NOT the anchor card
+    const c = store.getThreadClaim(threadRoot);
+    expect(c?.owner_id).toBe('wi-7');
+    expect(c?.anchor_msg_id).toBe(anchor);
+    expect(store.getThreadClaim(anchor)).toBeUndefined();
+
+    // reverse lookups: root for replyCard, anchor for updateCard
+    expect(store.getThreadRootByOwner('wi-7')).toBe(threadRoot);
+    expect(store.getThreadAnchorByOwner('wi-7')).toBe(anchor);
+  });
+
+  it('WI-8: anchor_msg_id defaults to null when omitted', () => {
+    store.claimThread('root-x', 'managed', 'wi-8');
+    expect(store.getThreadClaim('root-x')?.anchor_msg_id).toBeNull();
+    expect(store.getThreadAnchorByOwner('wi-8')).toBeUndefined();
+  });
+
+  it('WI-8: getThreadAnchorByOwner ignores bridge claims', () => {
+    store.claimThread('root-bridge', 'bridge', 'task-y', 'anchor-y');
+    expect(store.getThreadAnchorByOwner('task-y')).toBeUndefined();
+  });
 });
