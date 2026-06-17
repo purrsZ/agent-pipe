@@ -18,6 +18,7 @@ import {
   buildStatusCard,
 } from './feishu/card.js';
 import { createFeishuClients } from './feishu/client.js';
+import { startWsReconnectGuard } from './feishu/ws-health.js';
 import { createDispatcher } from './feishu/event-router.js';
 import { Sender } from './feishu/sender.js';
 import { StreamingCard } from './feishu/stream-card.js';
@@ -115,7 +116,11 @@ async function main() {
     for (const id of config.allowedOpenIds) store.addWhitelist(id, 'bootstrap');
     logger.info({ count: config.allowedOpenIds.size }, 'seeded whitelist from .env');
   }
-  const { client, wsClient } = createFeishuClients(config.feishu.appId, config.feishu.appSecret);
+  const { client, wsClient, wsHealth } = createFeishuClients(
+    config.feishu.appId,
+    config.feishu.appSecret,
+    logger,
+  );
   const sender = new Sender(client, logger);
 
   const botOpenId = await fetchBotOpenId(client, logger);
@@ -747,6 +752,14 @@ async function main() {
   });
 
   await wsClient.start({ eventDispatcher: dispatcher });
+  // WS reconnect guard: the SDK's reconnect interval is a hard-coded 120s, so a dropped ws
+  // leaves the bot "deaf" for up to 2 min. This proactively re-starts the ws once it's been
+  // unhealthy past the grace window — start() is re-entrant (see feishu/ws-health.ts).
+  startWsReconnectGuard({
+    reconnect: () => wsClient.start({ eventDispatcher: dispatcher }),
+    health: wsHealth,
+    logger,
+  });
   logger.info(
     { botOpenId, appId: config.feishu.appId, dataDir: config.dataDir },
     'agent-pipe ready',
