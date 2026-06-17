@@ -25,6 +25,7 @@ export interface EffectContext {
   eventsSince(afterSeq: number): WorkItemEvent[];
   setAgentSessionId(id: string): void;
   writeArtifact(relPath: string, content: string, message: string): void;
+  readArtifact(relPath: string): string | undefined;
   emit(kind: string, payload: unknown): void;
 }
 
@@ -278,6 +279,7 @@ export class EffectRuntime {
       writeArtifact: (relPath, content, message) => {
         this.deps.artifacts.writeFile(effect.workitemId, relPath, content, message);
       },
+      readArtifact: (relPath) => this.deps.artifacts.readFile(effect.workitemId, relPath),
       emit: (kind, payload) => {
         if (controller.signal.aborted) return;
         // Run conclusions are the EffectRuntime's exclusive vocabulary: they alone

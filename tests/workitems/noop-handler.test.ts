@@ -58,6 +58,7 @@ function deferredContext(options: {
       eventsSince: (afterSeq) => events.filter((ev) => ev.seq > afterSeq),
       setAgentSessionId: (id) => agentSessionIds.push(id),
       writeArtifact: (relPath, content) => artifacts.set(relPath, content),
+      readArtifact: (relPath) => artifacts.get(relPath),
       emit: () => {
         throw new Error('noop handler should not emit conclusions directly');
       },
