@@ -53,6 +53,26 @@ export class WorkitemsApi {
     return { resolved: true };
   }
 
+  /**
+   * Inject a human follow-up into a work item's event stream (M1b WI-5). The work type's
+   * onEvent decides what to do with it (probe dispatches a fresh round). Routed here from
+   * the bridge when an inbound message lands on a managed-claimed thread. A terminal item
+   * short-circuits the enqueue — the bridge releases the claim on close so a closed thread
+   * never reaches this with a stale claim.
+   */
+  injectHumanMessage(workitemId: string, payload: { text: string; feishuMsgId?: string }): void {
+    this.deps.reducer.enqueue(workitemId, { kind: 'human_message', payload });
+  }
+
+  /**
+   * Request closing a work item to a terminal state (M1b WI-4). The work type's onEvent
+   * maps the event to its terminal transition (probe → done). Routed from the `/done`
+   * bridge command. An already-terminal item simply short-circuits the enqueue.
+   */
+  injectClose(workitemId: string): void {
+    this.deps.reducer.enqueue(workitemId, { kind: 'close_requested', payload: {} });
+  }
+
   renewWait(waitId: string, input: { operator: string; deadlineTtlSec: number }): void {
     const wait = this.requireWait(waitId);
     if (wait.kind !== 'human') {

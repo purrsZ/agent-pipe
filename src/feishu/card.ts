@@ -42,6 +42,72 @@ export function buildTaskRootCard(task: Task): object {
   };
 }
 
+/**
+ * Anchor card for a managed (upper-layer) thread. Pure display: id / title / stage /
+ * status. Replying under it routes a follow-up into the owning unit; `/done` closes it.
+ * Kept free of upper-layer vocabulary so this kernel-layer file stays within the
+ * architecture guard (neutral field names: `stage`, `status`).
+ */
+export interface AnchorCardData {
+  id: string;
+  title: string;
+  stage: string;
+  status: string;
+  closed?: boolean;
+}
+
+export function buildAnchorCard(data: AnchorCardData): object {
+  const title = data.title.length > 40 ? `${data.title.slice(0, 40)}…` : data.title;
+  const lines = [
+    `**ID**: \`${data.id}\``,
+    `**进度**: ${data.stage}`,
+    `**状态**: ${data.status}`,
+    '',
+    data.closed ? '_已关闭。_' : '_在此消息下回复即可追问；满意后回复 `/done` 关闭。_',
+  ].join('\n');
+  return {
+    schema: '2.0',
+    header: {
+      template: data.closed ? 'grey' : 'blue',
+      title: {
+        tag: 'plain_text',
+        content: data.closed ? `已关闭 · ${title}` : `调查 · ${title}`,
+      },
+    },
+    body: {
+      direction: 'vertical',
+      padding: '12px',
+      elements: [{ tag: 'markdown', content: lines }],
+    },
+  };
+}
+
+/**
+ * M1b WI-6: result card posted back into a managed thread once a run produces a report.
+ * Green header + markdown body (reuses the same truncation budget as the task result card).
+ * Neutral naming keeps this kernel-layer file within the architecture guard.
+ */
+export function buildReportCard(title: string, report: string): object {
+  const head = title.length > 40 ? `${title.slice(0, 40)}…` : title;
+  const body = (report ?? '').trim() || '(空报告)';
+  const shown =
+    body.length > MAX_CARD_MARKDOWN
+      ? `${body.slice(0, MAX_CARD_MARKDOWN)}\n\n_…已截断，完整报告见本地仓库_`
+      : body;
+  return {
+    schema: '2.0',
+    header: {
+      template: 'green',
+      title: { tag: 'plain_text', content: `调查报告 · ${head}` },
+    },
+    body: {
+      direction: 'vertical',
+      padding: '12px',
+      elements: [{ tag: 'markdown', content: shown }],
+    },
+  };
+}
+
 export function buildProcessingCard(taskName: string, agentKind?: string): object {
   const who = agentKind === 'codex' ? 'Codex' : 'Claude';
   return {

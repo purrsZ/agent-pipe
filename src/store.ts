@@ -205,6 +205,17 @@ export class Store {
     this.db.prepare('DELETE FROM thread_claims WHERE thread_root_id = ?').run(rootId);
   }
 
+  // M1b WI-6: reverse lookup — find the thread root a managed owner claimed, so the
+  // outbound bridge can post a result back into that thread. Newest claim wins.
+  getThreadRootByOwner(ownerId: string): string | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT thread_root_id FROM thread_claims WHERE owner_id = ? AND owner_kind = 'managed' ORDER BY created_at DESC LIMIT 1",
+      )
+      .get(ownerId) as { thread_root_id: string } | undefined;
+    return row?.thread_root_id;
+  }
+
   recordTaskMessage(taskId: string, feishuMsgId: string) {
     this.db
       .prepare(

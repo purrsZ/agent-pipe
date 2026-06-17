@@ -41,4 +41,15 @@ describe('thread claims registry (WI-D)', () => {
   it('release of an unclaimed root is a no-op (no throw)', () => {
     expect(() => store.releaseThreadClaim('nope')).not.toThrow();
   });
+
+  it('getThreadRootByOwner reverse-looks-up the managed claim (M1b WI-6)', () => {
+    store.claimThread('anchor-1', 'managed', 'wi-1');
+    expect(store.getThreadRootByOwner('wi-1')).toBe('anchor-1');
+    expect(store.getThreadRootByOwner('wi-missing')).toBeUndefined();
+  });
+
+  it('getThreadRootByOwner ignores bridge claims', () => {
+    store.claimThread('root-b', 'bridge', 'task-x');
+    expect(store.getThreadRootByOwner('task-x')).toBeUndefined();
+  });
 });
