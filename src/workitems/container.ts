@@ -11,7 +11,7 @@ import { WorkitemsApi } from './api.js';
 import { Watchdog } from './watchdog.js';
 import type { BackupJob } from '../backup.js';
 import type { LoggerLike } from './shared.js';
-import type { Clock } from './types.js';
+import type { Clock, WorkItemEvent } from './types.js';
 
 export interface WorkitemsContainerOptions {
   dbPath: string;
@@ -21,6 +21,9 @@ export interface WorkitemsContainerOptions {
   logger?: LoggerLike;
   cfg?: WorkitemsConfig;
   env?: Record<string, string | undefined>;
+  // M1b WI-7: optional post-commit event observer (e.g. the bridge subscribes to post a
+  // result/failure card back to IM and refresh the anchor card). Passed straight to the reducer.
+  onCommitted?: (workitemId: string, event: WorkItemEvent) => void;
 }
 
 export interface WorkitemsContainer {
@@ -61,6 +64,7 @@ export function createWorkitemsContainer(options: WorkitemsContainerOptions): Wo
         }
       }
     },
+    onCommitted: options.onCommitted,
   });
   effects = new EffectRuntime({ store, reducer, registry, artifacts, clock, logger });
   const watchdog = new Watchdog({ store, reducer, effects, clock, logger, cfg });

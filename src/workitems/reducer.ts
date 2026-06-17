@@ -46,6 +46,14 @@ export interface ReducerRuntimeDeps {
   // stalled replacements would never start. Tests pass a no-op; the container wires
   // it to EffectRuntime. The call site stays `?.`-free so the contract is explicit.
   postCommit: (actions: PostCommitAction[]) => void;
+  // M1b WI-7: optional post-commit observer of the main applied event. Fires AFTER the
+  // tx commits (state already durable) so subscribers may do async IO (e.g. post a card
+  // back to IM). Only the triggering main event is passed — not phase_changed audits;
+  // subscribers read the latest projection themselves. The three early-returns
+  // (terminal short-circuit / conclusion_rejected / decision_discarded) never reach the
+  // commit point, so they correctly do NOT notify (already-terminal / rejected / discarded
+  // shouldn't refresh a card). Optional: bridge wires it, tests omit it.
+  onCommitted?: (workitemId: string, event: WorkItemEvent) => void;
 }
 
 export class ReducerRuntime {
@@ -146,6 +154,10 @@ export class ReducerRuntime {
     }
 
     const postCommit: PostCommitAction[] = [];
+    // WI-7: hoisted out of the tx closure (the `event` below lives inside it). Stays
+    // undefined on the three early-returns, so onCommitted only fires for a genuinely
+    // applied main event.
+    let committed: WorkItemEvent | undefined;
     this.pokeNeeded = false;
     this.deps.store.tx(() => {
       const now = this.deps.clock.now();
@@ -203,6 +215,7 @@ export class ReducerRuntime {
         payload: pending.payload ?? null,
         createdAt: now,
       };
+      committed = event;
       if (isRunConclusion(pending.kind)) {
         this.closeRunConclusion(pending.kind, pending.payload, now);
         this.deps.store.updateWorkItem(item.id, { discardStreak: 0, updatedAt: now });
@@ -225,6 +238,11 @@ export class ReducerRuntime {
     }
     if (postCommit.length > 0) {
       this.deps.postCommit(postCommit);
+    }
+    // WI-7: notify the post-commit observer AFTER the tx + postCommit actions (state is
+    // durable, IO is safe here). Skipped on the three early-returns (committed stays undefined).
+    if (committed) {
+      this.deps.onCommitted?.(workitemId, committed);
     }
   }
 
