@@ -32,8 +32,8 @@ const HELP_TEXT = [
   '  /wl add @某人 [@某人...]                   把 @ 的人加入白名单',
   '  /wl add <open_id>                         按 ID 加入',
   '  /wl rm @某人 / <open_id>                   移除',
-  '  /probe [--repo <path>] <问题>             新建只读调查（在飞书里直接问代码库，回贴报告）',
-  '  /done                                     关闭当前话题的调查（在锚点卡下回复）',
+  '  /probe [--repo <path>] <问题>             只读代码调查：缺省查默认目录、--repo 指定项目，过程+报告回贴到话题',
+  '  /done                                     关闭当前调查（在其话题里回复）',
   '  /help                                     本帮助',
   '',
   '普通消息（不带 /）：优先发给本会话当前任务；若无则发给本会话最近活跃。',
@@ -323,7 +323,8 @@ export class CommandHandler {
   // M1b WI-4: close the investigation owning the current thread. The thread root resolves
   // the owner inside index.ts (onDone); here we only locate the thread anchor.
   private async handleDone(msg: IncomingMessage): Promise<void> {
-    const threadRoot = msg.rootId ?? msg.parentId;
+    // 与入站追问路由同源：话题里的 /done 带 thread_id（= claim key），回退到回复根。
+    const threadRoot = msg.threadId ?? msg.rootId ?? msg.parentId;
     if (!threadRoot) {
       await this.sender.reply(msg.messageId, '请在某个调查话题（锚点卡）下回复 /done 来关闭它。');
       return;

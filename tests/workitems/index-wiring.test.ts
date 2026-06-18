@@ -59,29 +59,35 @@ describe('index workitems wiring', () => {
     expect(source).toContain('workitems.api.injectHumanMessage');
     // WI-8: claim keys on the thread root (rootId ?? messageId), NOT the anchor card id —
     // the anchor card id rides as the 4th arg for later updateCard (anchor refresh / close).
-    expect(source).toContain("store.claimThread(msg.rootId ?? msg.messageId, 'managed'");
+    expect(source).toContain("store.claimThread(claimKey, 'managed'");
     expect(source).toContain('item.id, anchorMsgId)');
+    // 群聊：用 reply_in_thread 把 probe 收进一个飞书话题（claim key = 话题 id）。
+    expect(source).toContain('sender.replyCardInThread');
     expect(source).toContain('store.releaseThreadClaim(threadRoot)');
     expect(source).toContain('buildAnchorCard');
   });
 
-  it('wires the outbound report bridge back to the IM thread (WI-6)', () => {
+  it('wires the outbound progress bridge: a streaming card per run via ProgressCards (M2, merges WI-6)', () => {
     const source = indexSource();
 
-    expect(source).toContain('const postReport');
-    expect(source).toContain('onReport: postReport');
-    expect(source).toContain('getThreadRootByOwner');
-    expect(source).toContain('buildReportCard');
+    // M2: report回贴并入流式卡终态——不再有独立的 postReport closure / onReport 注入。
+    expect(source).toContain("from './feishu/progress-cards.js'");
+    expect(source).toContain('new ProgressCards');
+    expect(source).toContain('progress: progressCards');
+    expect(source).not.toContain('const postReport');
+    expect(source).not.toContain('onReport:');
   });
 
-  it('wires the post-commit status bridge: failure card + anchor refresh + terminal guard (WI-7)', () => {
+  it('wires the post-commit status bridge: anchor refresh + terminal guard, failure card归流式卡 (WI-7 → M2)', () => {
     const source = indexSource();
 
     expect(source).toContain('postStatus');
     expect(source).toContain('onCommitted');
     expect(source).toContain('anchorAction');
-    expect(source).toContain('buildErrorCard');
     expect(source).toContain('updateCard');
+    // M2: the observer no longer replies its own error card (failure card is the streaming
+    // card's onRunEnd(failed) terminal patch), so index drops buildErrorCard entirely.
+    expect(source).not.toContain('buildErrorCard');
     // WI-8: anchor refresh targets the anchor card's own id via getThreadAnchorByOwner,
     // not the thread root (which now keys routing / report replies).
     expect(source).toContain('getThreadAnchorByOwner');

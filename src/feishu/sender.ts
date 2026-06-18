@@ -103,6 +103,33 @@ export class Sender {
     }
   }
 
+  /**
+   * spike：以话题（thread）形式回复一张卡片。reply_in_thread=true 会创建/加入一个飞书原生
+   * 话题，返回体带 thread_id。用于把一次 probe 收进一个话题，而非平铺在主消息流。
+   */
+  async replyCardInThread(
+    messageId: string,
+    card: object,
+  ): Promise<{ messageId: string; threadId: string | null } | null> {
+    try {
+      const resp = await this.client.im.message.reply({
+        path: { message_id: messageId },
+        data: {
+          msg_type: 'interactive',
+          content: JSON.stringify(card),
+          reply_in_thread: true,
+        } as any,
+      });
+      const data = (resp as any)?.data;
+      const mid: string | null = data?.message_id ?? null;
+      if (!mid) return null;
+      return { messageId: mid, threadId: data?.thread_id ?? null };
+    } catch (err) {
+      this.logger.error({ err, messageId }, 'replyCardInThread failed');
+      return null;
+    }
+  }
+
   async updateCard(messageId: string, card: object): Promise<boolean> {
     try {
       await this.client.im.message.patch({

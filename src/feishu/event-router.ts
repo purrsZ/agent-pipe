@@ -77,6 +77,7 @@ export function createDispatcher(
           text,
           parentId: message.parent_id || undefined,
           rootId: message.root_id || undefined,
+          threadId: message.thread_id || undefined,
           isMentioned,
           mentions,
           attachments,

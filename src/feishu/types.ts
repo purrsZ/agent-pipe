@@ -17,6 +17,8 @@ export interface IncomingMessage {
   text: string;
   parentId?: string;
   rootId?: string;
+  /** 飞书原生话题 id（消息在话题中时由事件携带）。spike：用于把 probe 收进一个话题。 */
+  threadId?: string;
   isMentioned: boolean;
   mentions: MentionInfo[];
   attachments: Attachment[];

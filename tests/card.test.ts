@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   anchorAction,
   buildAnchorCard,
+  buildCancelledCard,
   buildErrorCard,
   buildReportCard,
   formatClock,
@@ -130,9 +131,26 @@ describe('buildErrorCard (M1b WI-7)', () => {
   });
 });
 
-describe('anchorAction (M1b WI-7)', () => {
-  it('terminal run_failed → reply error card + refresh anchor', () => {
-    expect(anchorAction('run_failed', true)).toEqual({ reply: true, update: true });
+describe('buildCancelledCard (M2)', () => {
+  it('renders 调查中断 · title under a grey header', () => {
+    const card = buildCancelledCard('看看 runner') as { header: { template: string } };
+    const json = JSON.stringify(card);
+    expect(json).toContain('调查中断');
+    expect(json).toContain('看看 runner');
+    expect(card.header.template).toBe('grey');
+  });
+
+  it('truncates an overlong title', () => {
+    const card = buildCancelledCard('x'.repeat(60)) as {
+      header: { title: { content: string } };
+    };
+    expect(card.header.title.content).toContain('…');
+  });
+});
+
+describe('anchorAction (M1b WI-7 → M2)', () => {
+  it('terminal run_failed → refresh anchor ONLY (M2: failure card is the streaming card terminal patch)', () => {
+    expect(anchorAction('run_failed', true)).toEqual({ reply: false, update: true });
   });
 
   it('other terminal (done) → skip — runDone owns the anchor (D6)', () => {

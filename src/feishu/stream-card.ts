@@ -35,7 +35,7 @@ export class StreamingCard {
   private readonly ticker: ReturnType<typeof setInterval>;
 
   constructor(
-    private sender: Sender,
+    private sender: Pick<Sender, 'updateCard'>,
     private messageId: string,
     private taskName: string,
     private agentKind: string,

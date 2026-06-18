@@ -32,6 +32,7 @@ function makeCtx(opts: {
   assignmentSession?: string | null;
   batch?: WorkItemEvent[];
   artifacts?: Record<string, string>;
+  source?: unknown;
 }): CtxRecord {
   const controller = new AbortController();
   const writes: Array<{ relPath: string; content: string }> = [];
@@ -41,6 +42,7 @@ function makeCtx(opts: {
     type: 'probe',
     title: '看看 src 里有几个 runner',
     repos: opts.workitemRepos ?? [],
+    source: opts.source ?? { kind: 'test' },
   });
   const assignment = makeAssignment('as-1', 'wi-1', {
     agentSessionId: opts.assignmentSession ?? null,
@@ -227,23 +229,67 @@ describe('agent-run handler (WI-2)', () => {
     expect(rec.writes.find((w) => w.relPath === 'assignments/as-1/report.md')).toBeUndefined();
   });
 
-  it('calls onReport with the work item id + report text on success (WI-6)', async () => {
-    const reports: Array<{ workitemId: string; report: string }> = [];
-    const { pool } = fakePool(() => ({ fullText: 'REPORT BODY', sessionId: 's' }) as TurnResult);
+  it('drives the progress sink onRunStart → onText/onToolUse → onRunEnd(success) with the report (M2, merges WI-6)', async () => {
+    const events: string[] = [];
+    const ends: Array<{ outcome: string; report?: string; error?: string }> = [];
+    const starts: Array<{ workitemId: string; assignmentId: string; title: string }> = [];
+    const { pool } = fakePool((_t, _text, callbacks) => {
+      callbacks?.onToolUse?.('tid', { name: 'Read' });
+      callbacks?.onText?.('tid', 'partial text');
+      return { fullText: 'REPORT BODY', sessionId: 's' } as TurnResult;
+    });
     const { store } = fakeStore();
     const rec = makeCtx({});
     const handler = createAgentRunHandler({
       pool,
       kernelStore: store,
       defaultCwd: tmpDir,
-      onReport: (info) => reports.push(info),
+      progress: {
+        onRunStart: (i) => {
+          starts.push({ workitemId: i.workitemId, assignmentId: i.assignmentId, title: i.title });
+          events.push('start');
+        },
+        onText: (i) => events.push(`text:${i.fullText}`),
+        onToolUse: (i) => events.push(`tool:${i.toolName}`),
+        onRunEnd: (i) => {
+          ends.push({ outcome: i.outcome, report: i.report, error: i.error });
+          events.push(`end:${i.outcome}`);
+        },
+      },
     });
     await handler.run(rec.ctx);
-    expect(reports).toEqual([{ workitemId: 'wi-1', report: 'REPORT BODY' }]);
+    expect(starts).toEqual([
+      { workitemId: 'wi-1', assignmentId: 'as-1', title: '看看 src 里有几个 runner' },
+    ]);
+    expect(events).toEqual(['start', 'tool:Read', 'text:partial text', 'end:success']);
+    expect(ends).toEqual([{ outcome: 'success', report: 'REPORT BODY', error: undefined }]);
   });
 
-  it('does not call onReport when the run errors (WI-6)', async () => {
-    const reports: unknown[] = [];
+  it('forwards source locators (chat/thread/anchor) on onRunStart for streaming card placement (M2)', async () => {
+    const starts: Array<{ chatId?: string; threadId?: string; anchorMsgId?: string }> = [];
+    const { pool } = fakePool(() => ({ fullText: 'r', sessionId: 's' }) as TurnResult);
+    const { store } = fakeStore();
+    const rec = makeCtx({
+      source: { kind: 'feishu', chatId: 'c-9', threadId: 'omt_1', anchorMsgId: 'om_a' },
+    });
+    const handler = createAgentRunHandler({
+      pool,
+      kernelStore: store,
+      defaultCwd: tmpDir,
+      progress: {
+        onRunStart: (i) =>
+          starts.push({ chatId: i.chatId, threadId: i.threadId, anchorMsgId: i.anchorMsgId }),
+        onText: () => {},
+        onToolUse: () => {},
+        onRunEnd: () => {},
+      },
+    });
+    await handler.run(rec.ctx);
+    expect(starts).toEqual([{ chatId: 'c-9', threadId: 'omt_1', anchorMsgId: 'om_a' }]);
+  });
+
+  it('ends with outcome=failed (carrying the error) when the run errors, then throws (M2)', async () => {
+    const ends: Array<{ outcome: string; error?: string }> = [];
     const { pool } = fakePool(() => ({ fullText: '', error: 'boom' }) as TurnResult);
     const { store } = fakeStore();
     const rec = makeCtx({});
@@ -251,14 +297,19 @@ describe('agent-run handler (WI-2)', () => {
       pool,
       kernelStore: store,
       defaultCwd: tmpDir,
-      onReport: () => reports.push(1),
+      progress: {
+        onRunStart: () => {},
+        onText: () => {},
+        onToolUse: () => {},
+        onRunEnd: (i) => ends.push({ outcome: i.outcome, error: i.error }),
+      },
     });
     await expect(handler.run(rec.ctx)).rejects.toThrow('boom');
-    expect(reports).toEqual([]);
+    expect(ends).toEqual([{ outcome: 'failed', error: 'boom' }]);
   });
 
-  it('does not call onReport when aborted mid-run (WI-6)', async () => {
-    const reports: unknown[] = [];
+  it('ends with outcome=aborted (no report) when aborted mid-run (M2)', async () => {
+    const ends: Array<{ outcome: string; report?: string }> = [];
     const rec = makeCtx({});
     const { pool } = fakePool(() => {
       rec.controller.abort();
@@ -269,9 +320,14 @@ describe('agent-run handler (WI-2)', () => {
       pool,
       kernelStore: store,
       defaultCwd: tmpDir,
-      onReport: () => reports.push(1),
+      progress: {
+        onRunStart: () => {},
+        onText: () => {},
+        onToolUse: () => {},
+        onRunEnd: (i) => ends.push({ outcome: i.outcome, report: i.report }),
+      },
     });
     await handler.run(rec.ctx);
-    expect(reports).toEqual([]);
+    expect(ends).toEqual([{ outcome: 'aborted', report: undefined }]);
   });
 });

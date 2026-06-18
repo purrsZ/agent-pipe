@@ -5,6 +5,44 @@ import type { Store } from '../../store.js';
 import type { EffectContext, EffectHandler } from '../../workitems/effects.js';
 import type { WorkItem, WorkItemEvent } from '../../workitems/types.js';
 
+/**
+ * M2 进度可见性：run-handler 在一轮 run 的生命周期里把过程与结论喂给这个中性 sink，桥侧据此
+ * 驱动一张实时流式卡（onRunStart 发卡 → onText/onToolUse 流式刷新 → onRunEnd 原地收尾成报告/
+ * 失败/中断卡）。纯数据、零 IM/Feishu 类型，handler 保持在 worktypes 层架构边界内。WI-6 的
+ * onReport 并入为 onRunEnd(outcome='success') 的特例。
+ */
+export interface RunProgressSink {
+  /**
+   * A run is about to start. 出站定位信息全部从 workitem.source 提取后随此事件下发，让流式卡发卡
+   * 不依赖任何外部反查（消灭 claim 登记晚于发卡的时序竞态）：
+   *   - threadId + anchorMsgId 同时存在 → 群聊话题，流式卡 reply 锚点卡进同一话题；
+   *   - 仅 anchorMsgId → p2p 降级，流式卡 reply 锚点卡（主流）；
+   *   - 都没有 → 极端兜底用 chatId 直发。
+   */
+  onRunStart(info: {
+    workitemId: string;
+    assignmentId: string;
+    title: string;
+    chatId?: string;
+    threadId?: string;
+    anchorMsgId?: string;
+  }): void;
+  /** Streamed assistant text so far (a full snapshot each tick, not a delta). */
+  onText(info: { assignmentId: string; fullText: string }): void;
+  /** A tool invocation just began. */
+  onToolUse(info: { assignmentId: string; toolName: string }): void;
+  /**
+   * The run reached a terminal outcome. success carries the report full-text (this is the
+   * merged WI-6 onReport); failed carries the error summary; aborted carries neither.
+   */
+  onRunEnd(info: {
+    assignmentId: string;
+    outcome: 'success' | 'failed' | 'aborted';
+    report?: string;
+    error?: string;
+  }): void;
+}
+
 export interface AgentRunDeps {
   pool: AgentPool;
   kernelStore: Store;
@@ -15,11 +53,12 @@ export interface AgentRunDeps {
     error?: (obj: unknown, msg?: string) => void;
   };
   /**
-   * M1b WI-6: notified with the report text after a SUCCESSFUL run so the bridge can post
-   * it back to the IM thread. Not called on abort or failure (success path only). The
-   * handler stays free of any IM/Feishu type — the assembler supplies the posting closure.
+   * M2: live progress sink for the run (replaces M1b's onReport, which was just the
+   * success-only special case of onRunEnd). Optional — when absent the handler behaves
+   * byte-identically to today (no streaming card, no terminal notification), so any test
+   * fixture that does not care about outbound progress needs zero changes.
    */
-  onReport?: (info: { workitemId: string; report: string }) => void;
+  progress?: RunProgressSink;
 }
 
 // M1b WI-2: the generic "real agent run" effect handler. It is NOT probe-specific —
@@ -77,13 +116,31 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
     model: null,
   });
 
-  // 3) Heartbeat bridge: real runner stream → container watchdog liveness.
+  // 2b) M2: announce the run up front so the bridge can post a live streaming card before the
+  // first token arrives. All outbound locators (chat / thread / anchor) ride from source, set
+  // by runProbe BEFORE createWorkItem — so they are available no matter when this run dispatches.
+  const loc = locatorFromSource(workitem.source);
+  deps.progress?.onRunStart({
+    workitemId: workitem.id,
+    assignmentId: assignment.id,
+    title: workitemTitle(workitem),
+    chatId: loc.chatId,
+    threadId: loc.threadId,
+    anchorMsgId: loc.anchorMsgId,
+  });
+
+  // 3) Heartbeat bridge: real runner stream → container watchdog liveness, plus M2 progress.
   const callbacks: ProgressCallbacks = {
     // WI-9: heartbeat on ANY stdout activity (onActivity), not just visible text/tool events.
     // A thinking/long turn that streams no assistant text still keeps the watchdog alive —
     // heartbeatTimeoutSec now means "stdout fully silent for N s" (= true wedge), decoupled
     // from how long the turn legitimately runs. wallclockCapSec stays the resource ceiling.
     onActivity: () => ctx.heartbeat(),
+    // M2: forward visible stream events to the progress sink (drives the live card). Neutral
+    // payload keeps this worktypes-layer handler free of any feishu type.
+    onText: (_id, full) => deps.progress?.onText({ assignmentId: assignment.id, fullText: full }),
+    onToolUse: (_id, tool) =>
+      deps.progress?.onToolUse({ assignmentId: assignment.id, toolName: tool.name }),
   };
 
   // 4) Permission: worktype readonly → agents-layer readonly weak profile (WI-B).
@@ -94,19 +151,31 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
 
   // 6) Run the real agent (passes through the WI-C global concurrency slot inside send()).
   const result = await deps.pool.send(task, prompt, callbacks, options);
-  if (ctx.signal.aborted) return; // aborted: effects.ts owns the conclusion (none emitted)
-  if (result.error) throw new Error(result.error); // → effects.ts emits run_failed
+  if (ctx.signal.aborted) {
+    // aborted: effects.ts owns the conclusion (none emitted). Still notify the sink so the
+    // streaming card patches itself into its 中断 terminal state instead of spinning forever.
+    deps.progress?.onRunEnd({ assignmentId: assignment.id, outcome: 'aborted' });
+    return;
+  }
+  if (result.error) {
+    // failed: tell the sink first (streaming card → error card), then throw so effects.ts
+    // emits run_failed. The post-commit observer no longer replies its own error card (M2:
+    // anchorAction run_failed → update-only), so there is exactly one failure card per run.
+    deps.progress?.onRunEnd({
+      assignmentId: assignment.id,
+      outcome: 'failed',
+      error: result.error,
+    });
+    throw new Error(result.error); // → effects.ts emits run_failed
+  }
 
   // 7) Outputs: session id (audit only in M1b) + report.md (validateRunReport gate).
   if (result.sessionId) ctx.setAgentSessionId(result.sessionId);
-  ctx.writeArtifact(
-    `assignments/${assignment.id}/report.md`,
-    result.fullText ?? '',
-    'agent-run report',
-  );
-  // WI-6: hand the report to the outbound bridge (success path only — abort returns early
-  // above and failure throws before reaching here).
-  deps.onReport?.({ workitemId: workitem.id, report: result.fullText ?? '' });
+  const report = result.fullText ?? '';
+  ctx.writeArtifact(`assignments/${assignment.id}/report.md`, report, 'agent-run report');
+  // M2 (merges WI-6): hand the report to the sink so the streaming card patches itself into
+  // the report card. success path only — abort returns early above, failure throws before here.
+  deps.progress?.onRunEnd({ assignmentId: assignment.id, outcome: 'success', report });
 }
 
 function lastRunCompletedReportPath(batch: WorkItemEvent[]): string | undefined {
@@ -154,6 +223,23 @@ function workitemTitle(workitem: WorkItem): string {
 function humanMessageText(ev: WorkItemEvent): string {
   const p = ev.payload;
   return isObject(p) && typeof p.text === 'string' ? p.text : '';
+}
+
+// M2: pull the streaming card's outbound locators out of the work item's opaque source (set by
+// runProbe). chatId / threadId / anchorMsgId together tell the sink exactly where (and whether
+// in a thread) to post the live card, with zero kernel/IM import in this worktypes-layer file.
+function locatorFromSource(source: unknown): {
+  chatId?: string;
+  threadId?: string;
+  anchorMsgId?: string;
+} {
+  if (!isObject(source)) return {};
+  const str = (v: unknown): string | undefined => (typeof v === 'string' ? v : undefined);
+  return {
+    chatId: str(source.chatId),
+    threadId: str(source.threadId),
+    anchorMsgId: str(source.anchorMsgId),
+  };
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {

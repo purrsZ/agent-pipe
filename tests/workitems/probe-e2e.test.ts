@@ -11,7 +11,10 @@ import {
   type WorkitemsContainer,
 } from '../../src/workitems/container.js';
 import type { Clock, WorkItem, WorkItemEvent } from '../../src/workitems/types.js';
-import { createAgentRunHandler } from '../../src/worktypes/agent-run/run-handler.js';
+import {
+  createAgentRunHandler,
+  type RunProgressSink,
+} from '../../src/worktypes/agent-run/run-handler.js';
 import { registerProbe } from '../../src/worktypes/probe/index.js';
 
 // Full-container integration: the real container (reducer → effects → dispatch loop) drives
@@ -70,9 +73,34 @@ function fakeKernelStore(): Store {
   } as unknown as Store;
 }
 
+// M2: the run-handler now drives a neutral RunProgressSink (replaces WI-6 onReport). This
+// collector reconstructs the old { workitemId, report } view by joining onRunStart's workitemId
+// with onRunEnd's outcome, so the journey assertions stay equivalent — and also captures
+// failures (onRunEnd(failed)) to prove the streaming card gets its terminal notification.
+function progressCollector(): {
+  sink: RunProgressSink;
+  reports: Array<{ workitemId: string; report: string }>;
+  failures: Array<{ workitemId: string; error: string }>;
+} {
+  const reports: Array<{ workitemId: string; report: string }> = [];
+  const failures: Array<{ workitemId: string; error: string }> = [];
+  const workitemByAssignment = new Map<string, string>();
+  const sink: RunProgressSink = {
+    onRunStart: (i) => workitemByAssignment.set(i.assignmentId, i.workitemId),
+    onText: () => {},
+    onToolUse: () => {},
+    onRunEnd: (i) => {
+      const workitemId = workitemByAssignment.get(i.assignmentId) ?? '?';
+      if (i.outcome === 'success') reports.push({ workitemId, report: i.report ?? '' });
+      else if (i.outcome === 'failed') failures.push({ workitemId, error: i.error ?? '' });
+    },
+  };
+  return { sink, reports, failures };
+}
+
 function harness(opts: {
   pool: AgentPool;
-  onReport: (info: { workitemId: string; report: string }) => void;
+  progress: RunProgressSink;
   onCommitted?: (workitemId: string, event: WorkItemEvent) => void;
 }): WorkitemsContainer {
   const container = createWorkitemsContainer({
@@ -97,7 +125,7 @@ function harness(opts: {
       kernelStore: fakeKernelStore(),
       defaultCwd: tmpDir,
       logger,
-      onReport: opts.onReport,
+      progress: opts.progress,
     }),
   );
   container.start();
@@ -136,8 +164,8 @@ describe('probe in-process e2e (WI-2/3/4/5/6)', () => {
       round += 1;
       return { fullText: `REPORT-${round}`, sessionId: `sess-${round}` } as TurnResult;
     });
-    const reports: Array<{ workitemId: string; report: string }> = [];
-    const container = harness({ pool, onReport: (info) => reports.push(info) });
+    const { sink, reports } = progressCollector();
+    const container = harness({ pool, progress: sink });
 
     const item = createProbe(container, '看看 src 里有几个 runner');
 
@@ -207,8 +235,8 @@ describe('probe in-process e2e (WI-2/3/4/5/6)', () => {
       }
       return { fullText: 'REPORT-2', sessionId: 'sess-2' } as TurnResult;
     });
-    const reports: Array<{ workitemId: string; report: string }> = [];
-    const container = harness({ pool, onReport: (info) => reports.push(info) });
+    const { sink, reports } = progressCollector();
+    const container = harness({ pool, progress: sink });
 
     const item = createProbe(container, 'probe path B');
 
@@ -236,18 +264,18 @@ describe('probe in-process e2e (WI-2/3/4/5/6)', () => {
     container.stop();
   });
 
-  it('surfaces terminal failure via onCommitted(run_failed) and never calls onReport (WI-7)', async () => {
+  it('surfaces terminal failure via onRunEnd(failed) + onCommitted(run_failed), never a success report (WI-7 → M2)', async () => {
     // probe maxRetries defaults to 1 → first run_failed redispatches, the second is terminal.
     // (This is the worktype's own retry budget, NOT the harness WORKITEMS_RETRY_BUDGET, which
     // is the reducer stall path and does not gate run_failed — plan P4.)
     const { pool, sends } = fakePool(
       () => ({ fullText: '', error: 'boom: spawn failed' }) as TurnResult,
     );
-    const reports: unknown[] = [];
+    const { sink, reports, failures } = progressCollector();
     const committed: Array<{ workitemId: string; kind: string }> = [];
     const container = harness({
       pool,
-      onReport: () => reports.push(1),
+      progress: sink,
       onCommitted: (workitemId, event) => committed.push({ workitemId, kind: event.kind }),
     });
 
@@ -261,7 +289,11 @@ describe('probe in-process e2e (WI-2/3/4/5/6)', () => {
     expect(committed.some((c) => c.kind === 'run_failed' && c.workitemId === item.id)).toBe(true);
     // bootstrapApply's workitem_created does NOT flow through onCommitted (plan §2.1 / #3).
     expect(committed.some((c) => c.kind === 'workitem_created')).toBe(false);
-    // success-only onReport never fired on the failure path (D3).
+    // M2: each failed round notified the streaming card (→ it patches into the error card),
+    // while the success report never fired on the failure path (D3).
+    expect(failures).toHaveLength(2);
+    expect(failures.every((f) => f.workitemId === item.id)).toBe(true);
+    expect(failures.every((f) => f.error.includes('boom: spawn failed'))).toBe(true);
     expect(reports).toEqual([]);
     container.stop();
   });

@@ -144,11 +144,35 @@ export function buildErrorCard(title: string, error: string): object {
 }
 
 /**
+ * M2 进度可见性：流式卡因 abort（容器 stall/close 触发 SIGINT）收尾时的中断态卡。Grey
+ * header「调查中断 · head」，与 buildReportCard / buildErrorCard 同构，统一一张流式卡三种
+ * 归宿（报告 / 失败 / 中断）的标题风格。Neutral naming keeps this kernel-layer file within
+ * the architecture guard.
+ */
+export function buildCancelledCard(title: string): object {
+  const head = title.length > 40 ? `${title.slice(0, 40)}…` : title;
+  return {
+    schema: '2.0',
+    header: {
+      template: 'grey',
+      title: { tag: 'plain_text', content: `调查中断 · ${head}` },
+    },
+    body: {
+      direction: 'vertical',
+      padding: '12px',
+      elements: [{ tag: 'markdown', content: '_已中断当前轮。_' }],
+    },
+  };
+}
+
+/**
  * M1b WI-7: maps a committed main event + terminal flag to the outbound card action(s).
  * Pure (takes raw kind + bool, no work-item types) so it's unit-testable in isolation and
  * lets the bridge wiring pass `isTerminalStatus(...)` instead of writing `status===`
  * (which the index guard forbids).
- *  - run_failed at a terminal state → error card AND refresh the anchor to its failed state.
+ *  - run_failed at a terminal state → refresh the anchor to its failed state ONLY. M2: the
+ *    failure card is now the streaming card's own onRunEnd(failed) terminal patch (one card
+ *    per run), so the observer no longer replies a separate error card (would double up).
  *  - any other terminal (i.e. done) → skip: runDone already refreshed the anchor on /done.
  *  - non-terminal progress          → refresh the anchor stage only.
  */
@@ -156,7 +180,7 @@ export function anchorAction(
   kind: string,
   isTerminal: boolean,
 ): { reply: boolean; update: boolean } {
-  if (kind === 'run_failed' && isTerminal) return { reply: true, update: true };
+  if (kind === 'run_failed' && isTerminal) return { reply: false, update: true };
   if (isTerminal) return { reply: false, update: false };
   return { reply: false, update: true };
 }

@@ -11,15 +11,14 @@ import { loadConfig, type Config } from './config.js';
 import {
   anchorAction,
   buildAnchorCard,
-  buildErrorCard,
   buildProcessingCard,
-  buildReportCard,
   buildResultCard,
   buildStatusCard,
 } from './feishu/card.js';
 import { createFeishuClients } from './feishu/client.js';
 import { startWsReconnectGuard } from './feishu/ws-health.js';
 import { createDispatcher } from './feishu/event-router.js';
+import { ProgressCards } from './feishu/progress-cards.js';
 import { Sender } from './feishu/sender.js';
 import { StreamingCard } from './feishu/stream-card.js';
 import type { IncomingMessage } from './feishu/types.js';
@@ -501,6 +500,31 @@ async function main() {
     opts: { repo?: string; description: string },
   ): Promise<void> {
     const repos = opts.repo ? [opts.repo] : [config.allowedCwdPrefixes[0] ?? process.cwd()];
+
+    // 1) 先发占位锚点卡，建话题（群聊 reply_in_thread）/普通回复（p2p），拿 anchorMsgId + threadId。
+    //    必须先于 createWorkItem：run 一派发就要从 source 读 thread/anchor 定位去发流式卡，所以
+    //    这些定位得在创建工作项之前就备好（彻底避开 claim 登记晚于发卡的时序竞态）。
+    const placeholder = buildAnchorCard({
+      id: '创建中…',
+      title: opts.description,
+      stage: 'probe:looking',
+      status: 'open',
+    });
+    let anchorMsgId: string | null;
+    let threadId: string | undefined;
+    if (msg.chatType === 'group') {
+      const res = await sender.replyCardInThread(msg.messageId, placeholder);
+      anchorMsgId = res?.messageId ?? null;
+      threadId = res?.threadId ?? undefined;
+    } else {
+      anchorMsgId = await sender.replyCard(msg.messageId, placeholder);
+    }
+    if (!anchorMsgId) {
+      await sender.reply(msg.messageId, '锚点卡发送失败，请重试 /probe。');
+      return;
+    }
+
+    // 2) createWorkItem：把 thread/anchor 定位写进 source，随 run 下发给 run-handler → ProgressCards。
     let item: WorkItem;
     try {
       item = workitems.api.createWorkItem({
@@ -511,37 +535,32 @@ async function main() {
           userId: msg.userId,
           chatId: msg.chatId,
           messageId: msg.messageId,
+          threadId,
+          anchorMsgId,
         },
         repos,
         context: {},
       }).item;
     } catch (err) {
-      if (err instanceof OpenLimitError) {
-        await sender.reply(msg.messageId, `${err.message}（先用 /done 关掉几个再来）`);
-        return;
-      }
-      logger.error({ err }, 'probe create failed');
-      await sender.reply(msg.messageId, `调查创建失败: ${(err as Error).message}`);
+      const why =
+        err instanceof OpenLimitError
+          ? `${err.message}（先用 /done 关掉几个再来）`
+          : `调查创建失败: ${(err as Error).message}`;
+      if (!(err instanceof OpenLimitError)) logger.error({ err }, 'probe create failed');
+      await sender.updateCard(anchorMsgId, buildStatusCard(opts.description, 'error', why));
       return;
     }
-    const anchorMsgId = await sender.replyCard(
-      msg.messageId,
-      buildAnchorCard({
-        id: item.id,
-        title: item.title,
-        stage: item.phase,
-        status: item.status,
-      }),
+
+    // 3) 同步建 claim（入站路由）：话题内追问带同一 thread_id（群聊）或回复根（p2p）即可匹配。
+    const claimKey = threadId ?? msg.rootId ?? msg.messageId;
+    store.claimThread(claimKey, 'managed', item.id, anchorMsgId);
+
+    // 4) 把占位锚点卡补全为真实 id / 状态。
+    await sender.updateCard(
+      anchorMsgId,
+      buildAnchorCard({ id: item.id, title: item.title, stage: item.phase, status: item.status }),
     );
-    if (!anchorMsgId) {
-      await sender.reply(msg.messageId, `锚点卡发送失败（调查已创建，id=${item.id}）。`);
-      return;
-    }
-    // WI-8: claim the thread on its TRUE root (the /probe message's thread root), NOT the
-    // anchor card's id — inbound follow-ups carry rootId = that thread root, so a claim keyed
-    // on the anchor card never matches (the real-bot串台 bug). anchorMsgId is stored apart for
-    // updateCard (anchor refresh / close).
-    store.claimThread(msg.rootId ?? msg.messageId, 'managed', item.id, anchorMsgId);
+    logger.info({ workitemId: item.id, threadId, anchorMsgId }, 'probe anchor posted');
   }
 
   async function runDone(msg: IncomingMessage, threadRoot: string): Promise<void> {
@@ -625,7 +644,8 @@ async function main() {
     // thread claimed by the managed (workitems) layer must not be swallowed by the bridge's
     // root→task / recent-task fallback — the follow-up is routed into the owning work
     // item's next round instead.
-    const threadRoot = msg.rootId ?? msg.parentId;
+    // 话题路由优先：话题里的追问带 thread_id（= 锚点卡创建话题时的 claim key）；回退到回复根。
+    const threadRoot = msg.threadId ?? msg.rootId ?? msg.parentId;
     if (threadRoot) {
       const claim = store.getThreadClaim(threadRoot);
       if (claim?.owner_kind === 'managed') {
@@ -784,30 +804,11 @@ async function main() {
 
 // M1b WI-6: extract the IM chat id from a work item's source for the report fallback path
 // (used when the anchor-card thread can't be reverse-looked-up).
-function chatIdFromSource(source: unknown): string | undefined {
-  if (source && typeof source === 'object' && 'chatId' in source) {
-    const v = (source as { chatId?: unknown }).chatId;
-    return typeof v === 'string' ? v : undefined;
-  }
-  return undefined;
-}
-
-// M1b WI-7: pull the failure message out of a run_failed event payload (effects.ts stores
-// it as `error`). Falls back to a generic string so the error card is never blank.
-function errorFromPayload(event: WorkItemEvent): string {
-  const p = event.payload;
-  if (p && typeof p === 'object' && 'error' in p) {
-    const v = (p as { error?: unknown }).error;
-    if (typeof v === 'string' && v.trim().length > 0) return v;
-  }
-  return '运行失败';
-}
-
 export function createWorkitemsRuntime(deps: {
   config: Pick<Config, 'workitemsDbPath' | 'workitemsDir' | 'dataDir'>;
   logger: Logger;
   pool: AgentPool;
-  sender: Pick<Sender, 'replyCard' | 'sendCard' | 'updateCard'>;
+  sender: Pick<Sender, 'replyCard' | 'sendCard' | 'updateCard' | 'replyCardInThread'>;
   kernelStore: Store;
   defaultCwd: string;
   createContainer?: typeof createWorkitemsContainer;
@@ -824,69 +825,41 @@ export function createWorkitemsRuntime(deps: {
     logger: deps.logger,
     onCommitted: (workitemId, event) => postStatus(workitemId, event),
   });
-  // M1b WI-6: outbound bridge — post a finished run's report back into the managed thread
-  // (reverse-lookup the anchor card via the claim; fall back to the source chat). Keeps the
-  // run handler free of any IM type; the posting closure lives here at the assembly root.
-  const postReport = (info: { workitemId: string; report: string }): void => {
-    void (async () => {
-      try {
-        const item = workitems.api.getWorkItem(info.workitemId);
-        const card = buildReportCard(item?.title ?? '调查', info.report);
-        const threadRoot = deps.kernelStore.getThreadRootByOwner(info.workitemId);
-        if (threadRoot) {
-          await deps.sender.replyCard(threadRoot, card);
-          return;
-        }
-        const chatId = chatIdFromSource(item?.source);
-        if (chatId) {
-          await deps.sender.sendCard(chatId, card);
-        } else {
-          deps.logger.warn({ workitemId: info.workitemId }, 'no thread/chat to post report');
-        }
-      } catch (err) {
-        deps.logger.error({ err, workitemId: info.workitemId }, 'post report failed');
-      }
-    })();
-  };
-  // M1b WI-7: outbound status bridge — subscribe to committed events and (per anchorAction)
-  // post a failure card and/or refresh the anchor card. Success report full-text stays with
-  // postReport (D3); done is left to runDone (D6); reply falls back to the source chat,
-  // update can't fall back (updateCard needs the original message id) so it just logs (P2).
+  // M2 进度可见性：ProgressCards 是 run-handler 中性 RunProgressSink 的 feishu 实现。每轮 run
+  // 一张实时流式卡（onRunStart 发卡 → onText/onToolUse 流式刷新 → onRunEnd 原地收尾成报告/失败/
+  // 中断卡），合并了 WI-6 的报告回贴（不再独立 replyCard，报告就是流式卡的终态）。出站定位全部
+  // 由 onRunStart 携带（run-handler 从 source 提取），本组件零 store 反查。
+  const progressCards = new ProgressCards({
+    sender: deps.sender,
+    logger: deps.logger,
+  });
+  // M1b WI-7 → M2: outbound status bridge — subscribe to committed events and refresh the
+  // anchor card per anchorAction. M2: the failure card is now the streaming card's own
+  // onRunEnd(failed) terminal patch (ProgressCards, one card per run), so this observer no
+  // longer replies its own error card — anchorAction collapses run_failed to update-only.
+  // The anchor refresh can't fall back (updateCard needs the original message id) so it logs.
   postStatus = (workitemId, event) => {
     void (async () => {
       try {
         const item = workitems.api.getWorkItem(workitemId);
         if (!item) return;
-        const { reply, update } = anchorAction(event.kind, isTerminalStatus(item.status));
-        if (!reply && !update) return;
-        const threadRoot = deps.kernelStore.getThreadRootByOwner(workitemId);
-        if (reply) {
-          const card = buildErrorCard(item.title, errorFromPayload(event));
-          if (threadRoot) {
-            await deps.sender.replyCard(threadRoot, card);
-          } else {
-            const chatId = chatIdFromSource(item.source);
-            if (chatId) await deps.sender.sendCard(chatId, card);
-            else deps.logger.warn({ workitemId }, 'no thread/chat to post failure');
-          }
-        }
-        if (update) {
-          // WI-8: anchor refresh targets the anchor card's own message id, not the thread
-          // root (which now keys routing / report replies).
-          const anchorMsgId = deps.kernelStore.getThreadAnchorByOwner(workitemId);
-          if (anchorMsgId) {
-            await deps.sender.updateCard(
-              anchorMsgId,
-              buildAnchorCard({
-                id: item.id,
-                title: item.title,
-                stage: item.phase,
-                status: item.status,
-              }),
-            );
-          } else {
-            deps.logger.warn({ workitemId }, 'no anchor to refresh');
-          }
+        const { update } = anchorAction(event.kind, isTerminalStatus(item.status));
+        if (!update) return;
+        // WI-8: anchor refresh targets the anchor card's own message id, not the thread
+        // root (which now keys routing / report replies).
+        const anchorMsgId = deps.kernelStore.getThreadAnchorByOwner(workitemId);
+        if (anchorMsgId) {
+          await deps.sender.updateCard(
+            anchorMsgId,
+            buildAnchorCard({
+              id: item.id,
+              title: item.title,
+              stage: item.phase,
+              status: item.status,
+            }),
+          );
+        } else {
+          deps.logger.warn({ workitemId }, 'no anchor to refresh');
         }
       } catch (err) {
         deps.logger.error({ err, workitemId }, 'post status failed');
@@ -902,7 +875,7 @@ export function createWorkitemsRuntime(deps: {
       kernelStore: deps.kernelStore,
       defaultCwd: deps.defaultCwd,
       logger: deps.logger,
-      onReport: postReport,
+      progress: progressCards,
     }),
   );
   workitems.start();

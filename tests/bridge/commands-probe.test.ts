@@ -71,6 +71,12 @@ describe('/probe + /done dispatch (M1b WI-4)', () => {
     expect(replies).toHaveLength(0);
   });
 
+  it('/done inside a feishu thread prefers thread_id (= claim key) over rootId', async () => {
+    const { handler, dones } = makeHandler();
+    await handler.dispatch(makeMsg('/done', { threadId: 'omt_x', rootId: 'r1' }));
+    expect(dones).toEqual(['omt_x']);
+  });
+
   it('/done falls back to parentId when rootId is absent', async () => {
     const { handler, dones } = makeHandler();
     await handler.dispatch(makeMsg('/done', { parentId: 'anchor-2' }));
