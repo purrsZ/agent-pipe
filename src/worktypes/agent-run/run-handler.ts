@@ -1,9 +1,33 @@
 import * as fs from 'node:fs';
 import type { AgentPool } from '../../agents/pool.js';
-import type { ProgressCallbacks } from '../../agents/types.js';
+import type { ProgressCallbacks, RunOptions } from '../../agents/types.js';
 import type { Store } from '../../store.js';
 import type { EffectContext, EffectHandler } from '../../workitems/effects.js';
-import type { WorkItem, WorkItemEvent } from '../../workitems/types.js';
+import type { Assignment, WorkItem, WorkItemEvent } from '../../workitems/types.js';
+
+/**
+ * Per-run strategy (worker-runtime §5.1). The generic run handler stays worktype-agnostic;
+ * a worktype injects how its runs differ — prompt, permission/options, cwd, workspace prep,
+ * and crash-resume policy. The default reproduces probe's readonly behaviour byte-for-byte;
+ * the requirement worker passes a write/worktree strategy. One 'run' handler serves all
+ * worktypes (the effect kind is always 'run'); strategyFor(workitem) picks per run.
+ */
+export interface RunStrategy {
+  composePrompt(args: {
+    title: string;
+    priorReport?: string;
+    followups: string[];
+    workitem: WorkItem;
+    assignment: Assignment;
+    batch: WorkItemEvent[];
+    readArtifact: (relPath: string) => string | undefined;
+  }): string;
+  runOptions(args: { workitem: WorkItem; assignment: Assignment; cwd: string }): RunOptions;
+  resolveCwd(args: { workitem: WorkItem; assignment: Assignment; defaultCwd: string }): string;
+  /** Create/ready the cwd before the run (probe: mkdir; requirement worker: worktree add). */
+  prepareWorkspace(args: { workitem: WorkItem; assignment: Assignment; cwd: string }): void;
+  canResume(payload: unknown, assignment: Assignment | undefined, workitem: WorkItem): boolean;
+}
 
 /**
  * M2 进度可见性：run-handler 在一轮 run 的生命周期里把过程与结论喂给这个中性 sink，桥侧据此
@@ -59,7 +83,23 @@ export interface AgentRunDeps {
    * fixture that does not care about outbound progress needs zero changes.
    */
   progress?: RunProgressSink;
+  /**
+   * Pick a per-run strategy by workitem (worktype). Omitted / returning undefined ⇒ the
+   * default readonly probe strategy (zero regression). The requirement worktype wires this
+   * to its write/worktree worker strategy.
+   */
+  strategyFor?: (workitem: WorkItem) => RunStrategy | undefined;
 }
+
+// Default strategy = the original readonly probe behaviour, byte-for-byte.
+const defaultRunStrategy: RunStrategy = {
+  composePrompt: ({ title, priorReport, followups }) =>
+    composeProbePrompt(title, priorReport, followups),
+  runOptions: () => ({ permission: { mode: 'readonly' } }),
+  resolveCwd: ({ workitem, defaultCwd }) => pickCwd(workitem, defaultCwd),
+  prepareWorkspace: ({ cwd }) => fs.mkdirSync(cwd, { recursive: true }),
+  canResume: () => false,
+};
 
 // M1b WI-2: the generic "real agent run" effect handler. It is NOT probe-specific —
 // any solo readonly worktype reuses it. The worktype's onEvent decides WHEN to dispatch
@@ -71,12 +111,13 @@ export function createAgentRunHandler(deps: AgentRunDeps): EffectHandler {
   return {
     kind: 'run',
     recovery: 'resume-or-redispatch',
-    // M1b: no onSession callback on the runner → the session id is not reliably written
-    // to the assignment before a crash, so a true --resume is not possible. Crash recovery
-    // therefore redispatches a fresh assignment (readonly probe is idempotent). §2.3.
-    canResume: () => false,
+    // Per-strategy crash policy: probe is readonly-idempotent (canResume=false → redispatch);
+    // the requirement worker is non-idempotent (write) so its strategy decides resume vs
+    // worktree-reset+redispatch (D-09/D-30). onSession (D-30) makes the session id reachable.
+    canResume: (payload, assignment, workitem) =>
+      assignment !== undefined &&
+      (deps.strategyFor?.(workitem) ?? defaultRunStrategy).canResume(payload, assignment, workitem),
     run: (ctx) => runAgent(ctx, deps),
-    // Formal only: recovery goes through redispatch (canResume=false), so this never runs.
     resume: (ctx) => runAgent(ctx, deps),
   };
 }
@@ -88,6 +129,7 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
 
   // 1) Self-contained prompt: original ask + prior round's report (continuity via
   //    artifact, not --resume) + this round's batched follow-up messages.
+  const strategy = deps.strategyFor?.(workitem) ?? defaultRunStrategy;
   const batch = ctx.eventsSince(ctx.batchFromSeq);
   const priorReportPath = lastRunCompletedReportPath(batch);
   const priorReport = priorReportPath ? ctx.readArtifact(priorReportPath) : undefined;
@@ -95,13 +137,21 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
     .filter((e) => e.kind === 'human_message')
     .map(humanMessageText)
     .filter((t): t is string => t.length > 0);
-  const prompt = composeProbePrompt(workitemTitle(workitem), priorReport, followups);
+  const prompt = strategy.composePrompt({
+    title: workitemTitle(workitem),
+    priorReport,
+    followups,
+    workitem,
+    assignment,
+    batch,
+    readArtifact: (rel) => ctx.readArtifact(rel),
+  });
   ctx.writeArtifact(`assignments/${assignment.id}/brief.md`, prompt, 'agent-run brief');
 
-  // 2) Managed shadow task (per-assignment id, fresh session). cwd decides which dir the
-  //    readonly agent browses.
-  const cwd = pickCwd(workitem, deps.defaultCwd);
-  fs.mkdirSync(cwd, { recursive: true });
+  // 2) Managed shadow task (per-assignment id, fresh session). The strategy resolves cwd
+  //    (probe: repos[0]; requirement worker: its worktree) and readies it (mkdir / worktree add).
+  const cwd = strategy.resolveCwd({ workitem, assignment, defaultCwd: deps.defaultCwd });
+  strategy.prepareWorkspace({ workitem, assignment, cwd });
   const task = deps.kernelStore.upsertTask({
     id: `managed:${assignment.id}`,
     display_name: workitemTitle(workitem).slice(0, 60) || assignment.id,
@@ -136,6 +186,9 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
     // heartbeatTimeoutSec now means "stdout fully silent for N s" (= true wedge), decoupled
     // from how long the turn legitimately runs. wallclockCapSec stays the resource ceiling.
     onActivity: () => ctx.heartbeat(),
+    // D-30: persist the session id the instant it appears so a crash before run-end can still
+    // resume (the precondition for the requirement worker's resume path).
+    onSession: (_id, sid) => ctx.setAgentSessionId(sid),
     // M2: forward visible stream events to the progress sink (drives the live card). Neutral
     // payload keeps this worktypes-layer handler free of any feishu type.
     onText: (_id, full) => deps.progress?.onText({ assignmentId: assignment.id, fullText: full }),
@@ -143,8 +196,9 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
       deps.progress?.onToolUse({ assignmentId: assignment.id, toolName: tool.name }),
   };
 
-  // 4) Permission: worktype readonly → agents-layer readonly weak profile (WI-B).
-  const options = { permission: { mode: 'readonly' as const } };
+  // 4) Permission/options come from the strategy: probe → readonly; requirement worker →
+  //    write + writableDirs=[worktree] (never full, R04.AC-6).
+  const options = strategy.runOptions({ workitem, assignment, cwd });
 
   // 5) Abort bridge: container abort (stall / close) → SIGINT the runner.
   ctx.signal.addEventListener('abort', () => deps.pool.abort(task.id), { once: true });
