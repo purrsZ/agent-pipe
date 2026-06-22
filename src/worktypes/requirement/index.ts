@@ -7,6 +7,7 @@ import type {
 } from '../../workitems/types.js';
 import { checkpointDecisionOf, crossesCheckpoint, raiseCheckpoint, ttlsOf } from './checkpoint.js';
 import { isRequirementDecisionStale } from './contract.js';
+import { fixRoundExceeded } from './integration.js';
 import { nextPhase, PHASE } from './phases.js';
 
 // requirement worktype — the 7-phase coordinator (D-08/D-15). Pure sync reducer: this file
@@ -62,8 +63,7 @@ export function requirementTransition(item: WorkItem, ev: WorkItemEvent): Transi
     case 'integration_check_passed':
       return requestAdvance(item, PHASE.integrate, PHASE.deliver, 'integration_passed');
     case 'integration_check_failed':
-      // Stage 4 owns the bounded fix loop; the skeleton re-runs the integration assessor.
-      return item.phase === PHASE.integrate ? { dispatch: [ownerSpec(item, 'integrate')] } : {};
+      return onIntegrationFailed(item, ev);
     case 'human_message':
       return onHumanMessage(item, ev);
     case 'close_requested':
@@ -95,12 +95,42 @@ function onRunCompleted(item: WorkItem, ev: WorkItemEvent): Transition {
       if (role === 'owner') return enterPhase(item, PHASE.integrate, 'workers_done', ev);
       return {};
     case PHASE.integrate:
-      return role === 'owner'
-        ? requestAdvance(item, PHASE.integrate, PHASE.deliver, 'integration_done')
-        : {};
+      // A fix worker finished → re-run the static integration对账 (idempotent effect). The
+      // integration verdict drives the phase, not a run conclusion.
+      return role === 'worker' ? { effects: [{ kind: 'integration_check' }] } : {};
     default:
       return {};
   }
+}
+
+// 集成验证 fix loop (R13.AC-4/AC-6, D-11): the failure's round (counted by the
+// integration_check handler, NOT assignment.retries) decides fix vs escalate.
+function onIntegrationFailed(item: WorkItem, ev: WorkItemEvent): Transition {
+  if (item.phase !== PHASE.integrate) return {};
+  const round = numberField(ev.payload, 'round') ?? 1;
+  if (fixRoundExceeded(round)) {
+    // 连续集成失败 → 契约/拆解可能有问题，升级 human wait（病历）。
+    return {
+      waits: [
+        {
+          kind: 'human',
+          reason: 'integration_unresolved',
+          deadlineTtlSec: CHECKPOINT_WAIT_TTL_SEC,
+        },
+      ],
+    };
+  }
+  const repos = stringArrayField(ev.payload, 'affectedRepos');
+  const targets = repos.length > 0 ? repos : item.repos.length > 0 ? item.repos : [''];
+  return {
+    dispatch: targets.map((repo) => ({
+      role: 'worker' as const,
+      repo: repo || undefined,
+      deadlineTtlSec: ttlsOf(item).deadlineTtlSec,
+      wallclockCapSec: ttlsOf(item).wallclockCapSec,
+      payload: { stage: 'fix', repo, round },
+    })),
+  };
 }
 
 // Phase-work done → either gate (raise the human wait, stay) or advance + run entry work.
@@ -145,8 +175,8 @@ function enterPhase(
     case PHASE.implement:
       return { ...base, dispatch: workerDispatches(item, ownerAssignmentIdOf(triggerEv)) };
     case PHASE.integrate:
-      // Stage 4 swaps this for the integration_check effect; the skeleton runs an owner assessor.
-      return { ...base, dispatch: [ownerSpec(item, 'integrate')] };
+      // 静态集成对账 effect（质检员）— emits integration_check_passed/failed, drives 灯③ / fix loop.
+      return { ...base, effects: [{ kind: 'integration_check' }] };
     case PHASE.deliver:
       // 灯④: rest in non-terminal — no auto MR/上线. close_requested drives terminal (D-14).
       return base;
@@ -156,11 +186,12 @@ function enterPhase(
 }
 
 function redoPhase(item: WorkItem): Transition {
-  // Re-run the current phase's work after a rejection. Phases that have a single owner run.
+  // Re-run the current phase's work after a rejection. design phases re-run the owner;
+  // 集成验证 re-runs the static对账 effect (灯③ 打回 → 回集成验证重核).
   if (item.phase === PHASE.understand) return { dispatch: [ownerSpec(item, 'understand')] };
   if (item.phase === PHASE.contract) return { dispatch: [ownerSpec(item, 'contract')] };
   if (item.phase === PHASE.design) return { dispatch: [ownerSpec(item, 'design')] };
-  if (item.phase === PHASE.integrate) return { dispatch: [ownerSpec(item, 'integrate')] };
+  if (item.phase === PHASE.integrate) return { effects: [{ kind: 'integration_check' }] };
   return {};
 }
 
@@ -239,4 +270,14 @@ function humanText(payload: unknown): string {
 
 function asObject(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {};
+}
+
+function numberField(payload: unknown, key: string): number | undefined {
+  const v = asObject(payload)[key];
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined;
+}
+
+function stringArrayField(payload: unknown, key: string): string[] {
+  const v = asObject(payload)[key];
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
 }

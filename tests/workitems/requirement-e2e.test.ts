@@ -9,6 +9,7 @@ import { EffectRuntime, type EffectContext } from '../../src/workitems/effects.j
 import { WorkTypeRegistry } from '../../src/workitems/registry.js';
 import { ReducerRuntime } from '../../src/workitems/reducer.js';
 import { WorkitemsStore } from '../../src/workitems/store.js';
+import { createIntegrationCheckHandler } from '../../src/worktypes/requirement/integration.js';
 import { PHASE } from '../../src/worktypes/requirement/phases.js';
 import { registerRequirement } from '../../src/worktypes/requirement/index.js';
 
@@ -72,6 +73,8 @@ function harness() {
       ctx.writeArtifact(`assignments/${aid}/report.md`, `ok ${aid}`, 'report');
     },
   });
+  // 集成验证 effect: with no frozen contract in this skeleton run it emits passed (no_contract).
+  effects.registerHandler(createIntegrationCheckHandler());
   const api = new WorkitemsApi({
     store,
     registry,
