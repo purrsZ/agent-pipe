@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>飞书 · 需求批阅台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;700;900&family=Noto+Sans+SC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="shared.css">
+<style>
+  /* ════ 飞书 mock：手机宽度分屏（主题五） ════
+     在纸张桌面背景上摆一台手机，手机里是飞书话题流 */
+  body{display:flex;flex-direction:column;align-items:center}
+  .feishu-lede{max-width:520px;text-align:center;margin:26px 18px 18px;position:relative;z-index:1}
+  .feishu-lede .kicker{justify-content:center}
+  .feishu-lede h2{font-family:var(--serif);font-size:23px;font-weight:900}
+  .feishu-lede p{font-size:13.5px;color:var(--ink-soft);margin-top:7px}
+  .feishu-lede .toolbar{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:14px}
+
+  /* 手机外壳 */
+  .phone{width:390px;max-width:94vw;height:760px;max-height:84vh;background:#0e1116;border-radius:38px;padding:11px;box-shadow:0 30px 70px -24px rgba(33,29,24,.6),inset 0 0 0 2px rgba(255,255,255,.06);position:relative;z-index:1;margin-bottom:60px}
+  .phone .notch{position:absolute;top:11px;left:50%;transform:translateX(-50%);width:128px;height:26px;background:#0e1116;border-radius:0 0 16px 16px;z-index:5}
+  .screen{width:100%;height:100%;background:#ece6da;border-radius:28px;overflow:hidden;display:flex;flex-direction:column}
+  /* 飞书话题顶栏 */
+  .fs-top{flex:none;background:#2b2620;color:#f3ece0;padding:30px 16px 11px;display:flex;align-items:center;gap:11px}
+  .fs-top .fs-back{font-size:20px;opacity:.7}
+  .fs-top .fs-title{flex:1}
+  .fs-top .fs-title b{font-family:var(--serif);font-size:15px;font-weight:700;display:block}
+  .fs-top .fs-title small{font-size:11px;opacity:.6}
+  .fs-top .fs-bell{position:relative;font-size:17px}
+  .fs-top .fs-bell .fb-dot{position:absolute;top:-4px;right:-5px;min-width:15px;height:15px;background:var(--cinnabar);border-radius:8px;font-size:10px;font-family:var(--mono);color:#fff;display:grid;place-items:center;font-weight:700;padding:0 3px}
+  .fs-top .fs-bell .fb-dot.zero{display:none}
+  /* 话题流 */
+  .fs-flow{flex:1;overflow-y:auto;padding:14px 13px 20px;display:flex;flex-direction:column;gap:13px}
+  .fs-flow::-webkit-scrollbar{width:0}
+  .fs-time{text-align:center;font-size:11px;color:#9c907c;font-family:var(--mono)}
+  /* 飞书卡片基础 */
+  .fcard{background:var(--card);border:1px solid var(--line);border-radius:13px;overflow:hidden;box-shadow:0 4px 14px -8px rgba(33,29,24,.3)}
+  .fcard .fh{padding:11px 14px 9px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--line)}
+  .fcard .fh .fhi{width:24px;height:24px;border-radius:6px;display:grid;place-items:center;font-size:13px;flex:none;color:#fff}
+  .fcard .fh b{font-family:var(--serif);font-size:14px;font-weight:700;flex:1}
+  .fcard .fh .ftag{font-size:10px;font-family:var(--mono);padding:1px 7px;border-radius:5px;background:var(--paper-2);color:var(--ink-soft)}
+  .fcard .fb{padding:12px 14px}
+  /* 锚点卡专属 */
+  .anchor-card .fh .fhi{background:var(--ink)}
+  .anchor-card .arail{display:flex;align-items:center;gap:5px;margin-bottom:11px}
+  .anchor-card .arail i{width:11px;height:11px;border-radius:50%;background:var(--ink-faint);flex:none}
+  .anchor-card .arail i.d{background:var(--ink)} .anchor-card .arail i.c{background:var(--cinnabar);box-shadow:0 0 0 3px var(--cinnabar-wash)}
+  .anchor-card .arail b{font-size:12px;color:var(--ink-soft);margin-left:4px}
+  .anchor-card .asec{font-size:12.5px;color:var(--ink-soft);padding:7px 0;border-top:1px dashed var(--line)}
+  .anchor-card .asec:first-of-type{border-top:none}
+  .anchor-card .asec .k{font-family:var(--mono);font-size:11px;color:var(--ink-faint);display:block}
+  .anchor-card .asec .mini-wk{display:flex;gap:7px;align-items:center;margin-top:3px;font-size:12px}
+  .anchor-card .asec .mini-wk .d{width:7px;height:7px;border-radius:50%;flex:none}
+  .anchor-card .fold-h{font-size:12px;color:var(--cinnabar);cursor:pointer;padding-top:7px;border-top:1px dashed var(--line);margin-top:4px}
+  .anchor-card .fold-b{display:none;font-size:12px;color:var(--ink-soft);padding-top:7px}
+  .anchor-card .fold-b.show{display:block}
+  /* 灯②交互卡（4 按钮） */
+  .light-card{border-color:var(--cinnabar)}
+  .light-card .fh{background:var(--cinnabar-wash)} .light-card .fh .fhi{background:var(--cinnabar)}
+  .light-card .lc-q{font-size:13.5px;color:var(--ink);margin-bottom:4px;font-weight:500}
+  .light-card .lc-d{font-size:12.5px;color:var(--ink-soft);margin-bottom:12px}
+  .light-card .lc-acts{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .light-card .lc-btn{font-family:var(--sans);font-size:13px;font-weight:500;padding:10px;border-radius:9px;border:1px solid var(--line-strong);background:var(--card);cursor:pointer;transition:.15s;text-align:center}
+  .light-card .lc-btn.primary{background:var(--cinnabar);color:#fff;border-color:var(--cinnabar)}
+  .light-card .lc-btn.primary:hover{background:var(--cinnabar-deep)}
+  .light-card .lc-btn:not(.primary):hover{border-color:var(--cinnabar);color:var(--cinnabar)}
+  .light-card .lc-btn.web{grid-column:1/-1;background:var(--ink);color:var(--paper);border:none}
+  .light-card .lc-done{font-size:13px;font-weight:500;color:var(--jade);display:flex;align-items:center;gap:7px}
+  /* 通知分级提示条 */
+  .notice-band{font-size:11px;font-family:var(--mono);color:var(--ink-faint);text-align:center;padding:2px 0}
+  .notice-band.web{color:var(--cinnabar)}
+  /* worker 流式卡（静默更新） */
+  .worker-card .fh .fhi{background:var(--gold)}
+  .worker-card.j .fh .fhi{background:var(--jade)}
+  .worker-card .wc-step{font-size:12.5px;color:var(--ink-soft);margin-bottom:7px}
+  .worker-card .wc-step .mono{font-family:var(--mono);font-size:12px}
+  .worker-card .prog{height:6px;background:var(--paper-2);border-radius:4px;overflow:hidden;border:1px solid var(--line)}
+  .worker-card .prog i{display:block;height:100%;background:var(--gold);transition:width .5s} .worker-card .prog i.full{background:var(--jade)}
+  .worker-card .wc-silent{font-size:10.5px;color:var(--ink-faint);font-family:var(--mono);margin-top:7px;display:flex;align-items:center;gap:5px}
+  .worker-card .wc-beat{font-size:11px;color:var(--jade);font-family:var(--mono);margin-top:4px}
+  /* 病历举手卡 */
+  .sick-card{border-color:var(--cinnabar)}
+  .sick-card .fh{background:var(--cinnabar-wash)} .sick-card .fh .fhi{background:var(--cinnabar)}
+  .sick-card .sk-cause{font-family:var(--mono);font-size:11.5px;color:var(--cinnabar-deep);background:var(--cinnabar-wash);border-radius:7px;padding:8px 10px;margin:8px 0}
+  /* @ 提示 */
+  .at-ping{background:var(--cinnabar);color:#fff;font-size:10px;font-family:var(--mono);padding:1px 7px;border-radius:5px;margin-left:6px}
+  /* 异步三态（飞书内联，复用 shared.css .async-state） */
+  .fcard .async-host{margin-top:4px}
+</style>
+</head>
+<body>
+
+<div class="feishu-lede page-rise">
+  <div class="kicker">飞书侧 · 主战场 mock</div>
+  <h2>飞书话题：需求批阅</h2>
+  <p>飞书是大多数拍板真正发生的地方。一需求一话题 + 锚点卡；轻拍板（灯①③④/小改）<b style="color:var(--jade)">飞书内闭环</b>，重操作（灯②慢拍）<b style="color:var(--cinnabar)">只通知 + 跳网页</b>。点灯卡按钮看异步三态。</p>
+  <div class="toolbar">
+    <button class="btn ghost" style="font-size:13px" onclick="ReqDesk.go('index.html')">← 回看板（网页）</button>
+    <button class="btn ghost" style="font-size:13px" onclick="pushSickCard()">▶ 模拟「要人卡」(@你+响铃)</button>
+    <button class="btn ghost" style="font-size:13px" onclick="tickWorker()">▶ 模拟流式静默更新</button>
+  </div>
+</div>
+
+<div class="phone">
+  <div class="notch"></div>
+  <div class="screen">
+    <!-- 飞书话题顶栏 -->
+    <div class="fs-top">
+      <span class="fs-back">‹</span>
+      <div class="fs-title"><b>优惠券改版 · 需求批阅</b><small>包工头 · 你 · 4 工人</small></div>
+      <span class="fs-bell" data-bell title="等你">🔔<span class="fb-dot bdg">0</span>
+        <div class="bell-pop" data-bell-pop style="top:32px;right:0;width:280px" onclick="event.stopPropagation()">
+          <div class="bp-head" style="font-size:13px">等你清单 <span class="ct">0 件</span></div>
+          <div class="bp-body"></div>
+        </div>
+      </span>
+    </div>
+
+    <!-- 话题流 -->
+    <div class="fs-flow" id="flow">
+      <div class="fs-time">今天 09:38</div>
+
+      <!-- ① 锚点卡（原地 update 同一张：4 灯 rail / 工人 1/4 / 台账折叠） -->
+      <div class="fcard anchor-card" id="anchorCard">
+        <div class="fh"><span class="fhi">案</span><b>优惠券改版 · 锚点</b><span class="ftag">置顶 · 原地更新</span></div>
+        <div class="fb">
+          <div class="arail">
+            <i class="d"></i><i class="d"></i><i class="c"></i><i></i><i></i><i></i>
+            <b id="anchorPhase">并行（第 3 步 / 6）</b>
+          </div>
+          <div class="asec"><span class="k">各端工人</span>
+            <div class="mini-wk"><span class="d" style="background:var(--jade)"></span>优惠服务 ✓ · <span style="color:var(--ink-faint)">3 个进行中</span> <b style="margin-left:auto;font-family:var(--mono)" id="anchorWk">1/4</b></div>
+          </div>
+          <div class="asec"><span class="k">最近一次要你</span>
+            <div style="margin-top:3px;color:var(--cinnabar)">券面额传分还是元（已定·分）</div>
+          </div>
+          <div class="fold-h" onclick="this.nextElementSibling.classList.toggle('show')">▾ 决策台账（点开看你拍过的板）</div>
+          <div class="fold-b">
+            · 定：券面额用「分」· 10:35<br>
+            · 准：通过详细设计 · 09:38<br>
+            · 机：自治对齐字段类型 · 10:30（可在网页退回）
+          </div>
+        </div>
+      </div>
+
+      <div class="fs-time">10:35 · 一次轻拍板（灯外·小取舍）</div>
+
+      <!-- ② 灯②交互卡 —— 但这是「轻取舍」可飞书闭环（4 按钮，异步三态） -->
+      <div class="notice-band">🔔 这条要你 · 已 @你 + 响铃</div>
+      <div class="fcard light-card" id="softCard">
+        <div class="fh"><span class="fhi">⚖</span><b>该你定一下<span class="at-ping">@你</span></b><span class="ftag">取舍·可飞书闭环</span></div>
+        <div class="fb">
+          <div class="lc-q">券面额接口里传「分」还是「元」？</div>
+          <div class="lc-d">优惠服务想给整数分（避免浮点），Web 想直接收能显示的元。两端等你定个口径，其余照常跑。</div>
+          <div class="lc-acts async-host" id="softActs">
+            <button class="lc-btn primary" onclick="softPick(this,'传分（整数）')">传「分」</button>
+            <button class="lc-btn" onclick="softPick(this,'传元（字符串）')">传「元」</button>
+            <button class="lc-btn" style="grid-column:1/-1" onclick="softLater(this)">让它们先各自试</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="fs-time">10:50 · 各端工人流式（静默·不响铃）</div>
+
+      <!-- ③ worker 流式卡（按工人分流·title 带仓名；静默更新不通知不置顶） -->
+      <div class="notice-band">流式更新 · 不通知 · 不置顶（防 4 工人刷屏）</div>
+      <div class="fcard worker-card" id="wkUser">
+        <div class="fh"><span class="fhi">工</span><b>用户服务 · user-svc</b><span class="ftag">流式</span></div>
+        <div class="fb">
+          <div class="wc-step">在写「领券资格校验」 · 步骤 <span class="mono" id="wkUserStep">4/6</span></div>
+          <div class="prog"><i id="wkUserBar" style="width:70%"></i></div>
+          <div class="wc-beat" id="wkUserBeat">● 2 分钟前还在动</div>
+          <div class="wc-silent"><span>🔇</span> 原地更新这张卡 · 不 @你 · 不响铃</div>
+        </div>
+      </div>
+
+      <div class="fcard worker-card j" id="wkCoupon">
+        <div class="fh"><span class="fhi">工</span><b>优惠服务 · coupon-svc</b><span class="ftag">流式</span></div>
+        <div class="fb">
+          <div class="wc-step">已完成 · 提交分支 <span class="mono">feat/coupon-2.0</span></div>
+          <div class="prog"><i class="full" style="width:100%"></i></div>
+          <div class="wc-silent"><span>🔇</span> 完成也只静默翻态 · 不轰炸</div>
+        </div>
+      </div>
+
+      <div class="fs-time">11:05 · 一次重操作（灯②慢拍）</div>
+
+      <!-- ④ 灯②慢拍 = 重操作：只通知 + 跳网页（飞书不闭环） -->
+      <div class="notice-band web">🔔 这条要你 · 重操作 · 已 @你（去网页批阅）</div>
+      <div class="fcard light-card" id="reviewPing">
+        <div class="fh"><span class="fhi">⚔</span><b>灯② · 审详细设计<span class="at-ping">@你</span></b><span class="ftag" style="background:var(--cinnabar);color:#fff">需跳网页</span></div>
+        <div class="fb">
+          <div class="lc-q">「商品收藏」详设要你慢拍挑刺 + 裁质疑</div>
+          <div class="lc-d">慢拍要逐块读详设、裁 4 条质疑、确认接口——<b>重操作不在飞书里做</b>，飞书只通知，点下面跳网页批阅台。</div>
+          <div class="lc-acts">
+            <button class="lc-btn web" onclick="ReqDesk.go('review.html?id=fav')">去网页批阅 →</button>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script src="shared.js"></script>
+<script>
+/* ════════════════════════════════════════════════════════
+   飞书 mock（主题五）
+   - 异步三态：点击→「已收到·处理中」转圈→成功翻已拍板态/失败重试（防重复点两端打架）
+   - 闭环 vs 通知分级：灯①③④/小改 = 飞书内闭环；灯②慢拍 = 只通知跳网页
+   - 流式卡静默更新：原地 update 同一张、不 @不响铃；只「要人卡」才 @ + 响铃
+   - 锚点卡被淹没解法：原地 update 同一张 + 要拍板重顶轻量灯卡
+   ════════════════════════════════════════════════════════ */
+
+/* 轻取舍：飞书内闭环（异步三态 + 成功翻已拍板态 + 消解 wait 同步铃铛） */
+function softPick(btn, choice) {
+  var acts = document.getElementById('softActs');
+  // 禁用其余按钮，防重复点
+  acts.querySelectorAll('.lc-btn').forEach((b) => { b.disabled = true; b.style.opacity = '.5'; });
+  ReqDesk.asyncAction(btn, {
+    pending: '已收到 · 处理中…',
+    ok: '已拍板：' + choice,
+    failText: '未成功',
+    delay: 1200,
+    onOk: () => {
+      // 翻成已拍板态（整张卡收尾）
+      var fb = document.getElementById('softCard').querySelector('.fb');
+      fb.innerHTML = '<div class="lc-done">✓ 已拍板：<b>' + choice + '</b> · 记进决策台账，工人照这口径继续</div>';
+      // 消解对应 wait（单位取舍），三处计数同步
+      ReqDesk.waits.resolve('w-coupon-unit');
+      // 锚点卡原地更新（不新发卡）
+      document.getElementById('anchorCard').querySelector('.asec:nth-of-type(2) div').style.color = 'var(--jade)';
+      ReqDesk.toast('飞书内闭环完成 · 锚点卡已原地更新');
+    }
+  });
+}
+function softLater(btn) {
+  var acts = document.getElementById('softActs');
+  acts.querySelectorAll('.lc-btn').forEach((b) => { b.disabled = true; b.style.opacity = '.5'; });
+  ReqDesk.asyncAction(btn, {
+    pending: '已收到 · 处理中…',
+    ok: '已转交 · 让两端先各自试',
+    delay: 900,
+    onOk: () => {
+      var fb = document.getElementById('softCard').querySelector('.fb');
+      fb.innerHTML = '<div class="lc-done" style="color:var(--ink-soft)">→ 已转交：两端先各自试，集成时再看（未消解·仍在你清单）</div>';
+    }
+  });
+}
+
+/* 流式静默更新：原地 update 同一张卡（推进步骤/进度条），不通知不置顶 */
+var wkUserPct = 70, wkUserStep = 4;
+function tickWorker() {
+  if (wkUserPct >= 100) { ReqDesk.toast('用户服务已完成 · 全程静默、未打扰你'); return; }
+  wkUserPct = Math.min(100, wkUserPct + 12);
+  wkUserStep = Math.min(6, wkUserStep + 1);
+  document.getElementById('wkUserBar').style.width = wkUserPct + '%';
+  document.getElementById('wkUserStep').textContent = wkUserStep + '/6';
+  document.getElementById('wkUserBeat').textContent = '● 刚刚还在动';
+  // 锚点卡也原地更新工人计数
+  if (wkUserPct >= 100) {
+    document.getElementById('wkUserBar').classList.add('full');
+    document.getElementById('anchorWk').textContent = '2/4';
+  }
+  // 注意：静默 —— 不发新卡、不 @、不响铃
+}
+
+/* 「要人卡」：工人卡死举手 → 这是唯一会 @你 + 响铃的流式场景 */
+var sickPushed = false;
+function pushSickCard() {
+  if (sickPushed) { ReqDesk.toast('已经举过手了 · 病历卡在话题流里'); return; }
+  sickPushed = true;
+  var flow = document.getElementById('flow');
+  var t = document.createElement('div'); t.className = 'fs-time'; t.textContent = '11:12 · 工人举手（要人·会响铃）';
+  flow.appendChild(t);
+  var band = document.createElement('div'); band.className = 'notice-band web'; band.innerHTML = '🔔🔔 要人卡 · 已 @你 + 响铃（流式里唯一会打扰你的）';
+  flow.appendChild(band);
+  var card = document.createElement('div');
+  card.className = 'fcard sick-card';
+  card.innerHTML =
+    '<div class="fh"><span class="fhi">⚑</span><b>App 工人举手<span class="at-ping">@你</span></b><span class="ftag" style="background:var(--cinnabar);color:#fff">病历</span></div>' +
+    '<div class="fb">' +
+    '<div class="lc-q" style="color:var(--cinnabar)">卡在「领券后余额刷新」· 已试 3 次仍不过</div>' +
+    '<div class="sk-cause">断言失败（红）：领券成功后余额未即时刷新（期望 1000 实得 null）</div>' +
+    '<div class="lc-d">断言红 = 代码逻辑确有问题，不是环境。挑个轻救场，或去网页看完整病历。</div>' +
+    '<div class="lc-acts async-host" id="sickActs">' +
+    '<button class="lc-btn primary" onclick="sickAct(this,\'补测试命令复现\')">补测试复现</button>' +
+    '<button class="lc-btn" onclick="sickAct(this,\'打回重拆这一步\')">打回重拆</button>' +
+    '<button class="lc-btn web" onclick="ReqDesk.go(\'workitem.html?id=coupon\')">去网页看完整病历 →</button>' +
+    '</div></div>';
+  flow.appendChild(card);
+  card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  ReqDesk.toast('🔔 要人卡已 @你 + 响铃');
+}
+function sickAct(btn, label) {
+  var acts = document.getElementById('sickActs');
+  acts.querySelectorAll('.lc-btn').forEach((b) => { b.disabled = true; b.style.opacity = '.5'; });
+  // 演示失败重试：补测试命令这条故意「首次失败、重试成功」，体现「失败·点此重试」
+  var willFail = label.indexOf('补测试') >= 0;
+  var attempt = 0;
+  ReqDesk.asyncAction(btn, {
+    pending: '已收到 · 处理中…',
+    ok: '已下发：' + label,
+    failText: '下发未成功',
+    // 自定义 run：用计数器让首次失败、重试（再点）成功
+    run: (done) => {
+      attempt++;
+      setTimeout(() => { done(!(willFail && attempt === 1)); }, 1100);
+    },
+    onOk: () => {
+      var fb = btn.closest('.fb');
+      fb.querySelector('.lc-q').innerHTML = '<span style="color:var(--jade)">✓ 已处理：' + label + '</span>';
+    }
+  });
+}
+</script>
+</body>
+</html>

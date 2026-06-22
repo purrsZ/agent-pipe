@@ -1,8 +1,34 @@
 # requirement worktype 实现 — 续作任务计划
 
-> 状态快照（本轮收尾）：按 D-26 开发序，**Stages 1–6 的可实现+可单测核心已落地并提交**。
-> 分支 `codex/workitems-m0`，`npm run typecheck` 干净，`vitest` 422 全绿，架构红线（solo 零回归 /
-> kernel 中性 / worktype 纯同步）守住。
+> 状态快照（T1–T5 收尾）：续作主线 **T1–T5 的沙箱可测部分已全部落地并提交**（5 笔，`1844761`→`2873e56`）。
+> 分支 `codex/workitems-m0`，`npm run typecheck` 干净，`vitest` 467 全绿（T5 收尾时），架构红线
+> （solo 零回归 / kernel 中性 / worktype 纯同步）守住。剩余清一色是「需真机的 live 编排」或
+> 「高风险容器改造」——见下方 **§ 下次 session 接力清单**。
+>
+> ⚠️ 并行在做：AskUserQuestion 表单卡升级（`docs/design/2026-06-22-askuserquestion-form-card.md`），
+> 改 `card.ts`/`event-router.ts`/`types.ts`/`index.ts`——与本线按 `value.kind` 分发隔离、互不冲突
+> （兼容性审查结论：兼容）。本线提交时**不要碰这 4 个文件的表单卡改动**。
+
+## 下次 session 接力清单（3 块未完成，按可做性排序）
+
+> 本次（T1–T5）把沙箱能测的都做完了。剩下的全部需要真机或属高风险，**开工前先和用户定范围**。
+
+### A. T5 两条 live agent run（需真机：agent 真跑 + 输出解析沙箱测不了）
+1. **冷启索引 run**（knowledge）：readonly 考古 agent 填 `map/conventions/runbook/pitfalls` + 写 manifest（`generatedAtCommit`=`KnowledgeStore.currentHeadOf(repo)`）。
+   - 已就绪：`src/knowledge/`（store/freshness/injection/**compose**）全套 + 已接进 worker prompt（`knowledgeFor`，`2873e56`）。
+   - 缺：触发口（命令 `/index <repo>` 或按需 freshness 触发）+ run handler（prompt 让 agent 产 4 档）+ **输出解析**（agent markdown → 4 档落 `KnowledgeStore.writeDoc` + `writeManifest`）。
+2. **spec-design run effect**（design-phase）：design 阶段 owner run 跑 spec-design 产 `contract/`+`design/`、收尾 emit `design_ready`。
+   - 已就绪：`design.ts` 的 `promoteToContract`/`sliceByRepo`/`reposFromContract`；worktype 已处理 `design_ready` 事件（`index.ts:onEvent` case）；worker 读 `contract/contract.json`（`worker-handler.ts:readContract`）。
+   - 缺：design 阶段的专用 run effect（现在走通用 ownerSpec run）+ **输出解析**（agent spec-design 产物 → `InternalApiEntry[]` → `promoteToContract` → 写 `contract/contract.json`）。
+
+### B. T4 over-cap 补派（R01.AC-9 / R02.AC-3/7）— 高风险，单列
+- 现状：`> maxWorkersPerItem`（默认 2）的仓 dispatch 被 wakePending **丢弃不补派**；reducer 已加显式 warn surface（`reducer.ts:insertDispatchOrWake`）。workaround：`WORKITEMS_MAX_WORKERS_PER_ITEM ≥ 单需求最大仓数`（双端 cap=2 即覆盖）。
+- 缺：`wakePending` 布尔 → **spec 队列**（data-model 改）+ `releaseWakePending` owner-workers 按 role 补派 + owner 批量唤醒窗口 `(lastOwnerRunEffectSeq, currentOwnerRunEffectSeq]`。
+- 风险：container-concurrency 域"最凶险"一块（口径错 → 超放/漏放）；需 noop 夹具先红再绿。**不要在沙箱盲做，先定方案**。
+
+### C. Stage 7 真机端到端手验（见文末 § Stage 7 清单）— 全部需真机
+
+---
 
 ## 已完成（提交清单）
 

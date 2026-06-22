@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>看板 · 需求批阅台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;700;900&family=Noto+Sans+SC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="shared.css">
+</head>
+<body>
+
+<!-- ════ 顶栏：whoami（上次登录 X 天前·新增 N 件等你）+ 铃铛（跨需求等你清单） ════ -->
+<header class="top">
+  <div class="top-in">
+    <div class="brand" data-home>
+      <div class="seal-mark">案</div>
+      <div><h1>需求批阅台</h1><div class="sub">A G E N T · P I P E</div></div>
+    </div>
+    <div class="top-spacer"></div>
+
+    <!-- whoami：身份 + 时间锚点（久未登录用绝对日期）+ 这期间新增几件等你 -->
+    <div class="whoami">
+      <div><b>李超</b> · 决策者</div>
+      <div>上次登录 <span class="abs">6/18 下午</span>（<span class="since">4 天前</span>）</div>
+      <div>这期间新增 <span class="since"><b data-wait-count>0</b> 件</span>等你</div>
+    </div>
+
+    <!-- 铃铛：跨需求「等你」总数，永远 = open-wait 队列长度 -->
+    <div class="bell" data-bell title="跨需求·等你清单">
+      🔔<span class="bdg">0</span>
+      <div class="bell-pop" data-bell-pop onclick="event.stopPropagation()">
+        <div class="bp-head">🔔 等你清单 <span class="ct">0 件</span></div>
+        <div class="bp-body"></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap page-rise">
+
+  <!-- 面包屑（看板是根，仅一层） -->
+  <nav class="crumbs" data-crumbs></nav>
+
+  <div class="kicker">我的全景</div>
+  <div class="desk-head" style="align-items:flex-end">
+    <div><h2 style="font-size:28px">我的需求</h2></div>
+    <!-- 跨需求决策总账入口（走查主题七） -->
+    <button class="btn ghost" style="margin-left:auto" onclick="ReqDesk.toast('打开·我的决策总账（按时间 / 需求 / 类型筛选）—— 第二阶段接 ledger 页')">📖 我的决策总账</button>
+  </div>
+  <p class="board-lede">日常你主要待在某个需求里盯它推进；这里是想切换、排优先级时扫一眼的入口。<b style="color:var(--cinnabar)">朱印「待批」</b>是关卡（不处理则停）；<b style="color:var(--amber-deep)">琥珀</b>是中途取舍（不急·其余照跑）。</p>
+
+  <!-- ════ 区一：等你处理（关卡级在前，唯一源排序） ════ -->
+  <div class="board-section">等你处理 <span class="bs-ct"><b data-wait-count data-wait-sev="gate">0</b> 件关卡 · <b data-wait-count data-wait-sev="soft">0</b> 处取舍</span></div>
+
+  <!-- 需求卡：商品收藏 —— 关卡级（灯②审设计待批，不处理则停） -->
+  <div class="reqcard gate" onclick="ReqDesk.go('workitem.html?id=fav')">
+    <div>
+      <div class="rc-title">商品收藏</div>
+      <div class="rc-sub">PRD「用户收藏夹 v1」· 2 服务 · Web · App</div>
+      <div class="rc-mini-rail">
+        <i class="d"></i><i class="c"></i><i></i><i></i><i></i><i></i>
+        <b>当前：审设计（第 2 步 / 共 6 步）</b>
+      </div>
+      <!-- 下一次需要你：阶段名 + 时机 -->
+      <div class="rc-next"><b>下一次需要你：审设计（现在·不批则停）</b></div>
+    </div>
+    <div class="rc-side">
+      <div class="status s-mine"><span class="ico"></span>等你审设计</div>
+      <button class="btn solid" style="font-size:13px;padding:7px 15px"
+              onclick="event.stopPropagation();ReqDesk.go('review.html?id=fav')">去批阅 →</button>
+    </div>
+    <div class="stamp">待批</div>
+  </div>
+
+  <!-- 需求卡：优惠券改版 —— 取舍级（并行中 2 处取舍，不急·其余照跑） -->
+  <div class="reqcard soft-wait" onclick="ReqDesk.go('workitem.html?id=coupon')">
+    <div>
+      <div class="rc-title">优惠券改版</div>
+      <div class="rc-sub">PRD「满减券 2.0」· 3 服务 · Web · App</div>
+      <div class="rc-mini-rail">
+        <i class="d"></i><i class="d"></i><i class="c"></i><i></i><i></i><i></i>
+        <b>当前：各端并行（第 3 步 / 共 6 步）· <span data-wait-count data-wait-req="coupon">0</span> 处等你拍</b>
+      </div>
+      <div class="rc-next soon"><b>下一次需要你：2 处中途取舍（不急·其余端照跑）；验收约 2 步后</b></div>
+    </div>
+    <div class="rc-side">
+      <div class="status s-soft"><span class="ico"></span>并行干 · 待取舍</div>
+      <button class="btn ghost" style="font-size:13px;padding:7px 15px"
+              onclick="event.stopPropagation();ReqDesk.go('workitem.html?id=coupon')">进工作台 →</button>
+    </div>
+    <div class="stamp soft">取舍</div>
+  </div>
+
+  <!-- ════ 区二：照常推进（暂不需要你） ════ -->
+  <div class="board-section">照常推进 <span class="bs-ct">暂不需要你</span></div>
+
+  <div class="reqcard" onclick="ReqDesk.go('workitem.html?id=search')">
+    <div>
+      <div class="rc-title">搜索联想优化</div>
+      <div class="rc-sub">PRD「搜索体验 v2」· 1 服务 · Web</div>
+      <div class="rc-mini-rail">
+        <i class="d"></i><i class="d"></i><i class="d"></i><i class="c"></i><i></i><i></i>
+        <b>当前：集成验证（第 4 步 / 共 6 步）</b>
+      </div>
+      <div class="rc-next later"><b>下一次需要你：验收（约 1 步后）；暂不需要</b></div>
+    </div>
+    <div class="rc-side">
+      <div class="status s-run"><span class="ico"></span>集成中</div>
+      <button class="btn ghost" style="font-size:13px;padding:7px 15px"
+              onclick="event.stopPropagation();ReqDesk.go('workitem.html?id=search')">看进度 →</button>
+    </div>
+  </div>
+
+  <!-- ════ 区三：排队中（可展开详情：排第几/谁占坑/何时轮到/提优先级） ════ -->
+  <div class="board-section">排队中 <span class="bs-ct">手头并行满 2 件 · 上限 2 件同时跑</span></div>
+
+  <div class="reqcard queued idle" onclick="this.classList.toggle('open')">
+    <div>
+      <div class="rc-title">评论举报</div>
+      <div class="rc-sub">PRD「内容安全」· 排队中 · 点开看排队详情</div>
+      <div class="rc-mini-rail">
+        <i></i><i></i><i></i><i></i><i></i><i></i>
+        <b>排第 1 位 · 还没开工</b>
+      </div>
+    </div>
+    <div class="rc-side">
+      <div class="status s-idle"><span class="ico"></span>排队中</div>
+    </div>
+
+    <!-- 排队详情：把 v1「并行上限 3」黑洞改人话 -->
+    <div class="queue-detail" onclick="event.stopPropagation()">
+      <div class="qd-grid">
+        <div class="qd-cell"><div class="k">排第几</div><div class="v">第 1 位（共 1 件在排）</div></div>
+        <div class="qd-cell"><div class="k">何时轮到</div><div class="v eta">约 40 分钟后</div></div>
+        <div class="qd-cell"><div class="k">同时能跑</div><div class="v">2 件（占 2 / 满 2）</div></div>
+      </div>
+      <div class="qd-occupants">
+        现在占着两个坑的是：<a onclick="ReqDesk.go('workitem.html?id=coupon')">优惠券改版</a> 与
+        <a onclick="ReqDesk.go('workitem.html?id=search')">搜索联想优化</a>。
+        任一件收尾，这件自动开工，会响铃通知你。
+      </div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+        <button class="btn solid" style="font-size:13px;padding:8px 16px"
+                onclick="ReqDesk.toast('已申请插队·提到队首；下一个坑空出即优先这件')">申请提优先级 →</button>
+        <span class="qd-hint">提优先级 = 让它抢下一个空出的坑，不会打断正在跑的两件。</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 底部说明 -->
+  <p class="qd-hint" style="margin-top:24px;text-align:center;opacity:.8">
+    计数说明：顶栏铃铛 / 各需求卡徽标 / 区块小计 都来自同一份「等你队列」，永远一致。
+    （加 <code style="font-family:var(--mono)">?reset</code> 重置演示数据）
+  </p>
+
+</div>
+
+<script src="shared.js"></script>
+<script>
+  // 看板面包屑：根级，仅当前页
+  ReqDesk.crumbs([{ label: '看板' }]);
+</script>
+</body>
+</html>

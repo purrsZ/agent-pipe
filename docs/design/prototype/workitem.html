@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>工作台 · 需求批阅台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;700;900&family=Noto+Sans+SC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="shared.css">
+<style>
+  /* 工作台专属：取消入口（克制样式，不与朱砂主操作抢眼） */
+  .cancel-entry{font-size:12.5px;color:var(--ink-faint);background:none;border:1px solid var(--line);border-radius:8px;padding:6px 13px;cursor:pointer;font-family:var(--sans);transition:.15s}
+  .cancel-entry:hover{border-color:var(--danger);color:var(--danger)}
+  /* 取消确认卡（覆盖层） */
+  .cancel-mask{position:fixed;inset:0;z-index:80;display:none;place-items:center;background:rgba(33,29,24,.32);backdrop-filter:blur(3px);padding:24px}
+  .cancel-mask.show{display:grid;animation:rise .2s both}
+  .cancel-card{max-width:520px;width:100%;background:var(--card);border:2px solid var(--danger);border-radius:15px;padding:24px 26px;box-shadow:0 24px 60px -20px rgba(33,29,24,.6)}
+  .cancel-card h3{font-family:var(--serif);font-size:19px;font-weight:900;color:var(--danger);display:flex;align-items:center;gap:9px}
+  .cancel-card .cc-lede{font-size:13.5px;color:var(--ink-soft);margin:8px 0 14px}
+  .cancel-list{list-style:none;border:1px solid var(--line);border-radius:11px;overflow:hidden;margin-bottom:16px}
+  .cancel-list li{display:flex;gap:11px;align-items:flex-start;padding:11px 15px;font-size:13.5px;border-top:1px solid var(--line);color:var(--ink-soft)}
+  .cancel-list li:first-child{border-top:none}
+  .cancel-list li .cl-ico{flex:none;font-size:15px;margin-top:1px}
+  .cancel-list li b{color:var(--ink);font-weight:500}
+  .cancel-list li .keep{color:var(--jade);font-weight:500}
+  .cancel-acts{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}
+  /* 自治可展开行（系统已自治 N 次） */
+  .auto-line{border-top:1px solid var(--line);padding:11px 0;cursor:pointer}
+  .auto-line:first-of-type{border-top:none}
+  .auto-h{display:flex;align-items:flex-start;gap:9px}
+  .auto-h .auto-v{flex:none;width:18px;text-align:center;color:var(--indigo);font-weight:700;font-size:13px}
+  .auto-t{flex:1;font-size:13.5px}
+  .auto-t b{color:var(--ink);font-weight:500}
+  .auto-time{font-size:11px;color:var(--ink-faint);font-family:var(--mono);flex:none}
+  .auto-body{display:none;padding:10px 0 4px 27px}
+  .auto-line.open .auto-body{display:block;animation:rise .22s both}
+  .diff{font-family:var(--mono);font-size:12px;border:1px solid var(--line);border-radius:8px;overflow:hidden;margin:8px 0}
+  .diff .dl{padding:4px 11px;display:flex;gap:8px}
+  .diff .dl.del{background:var(--cinnabar-wash);color:var(--cinnabar-deep)}
+  .diff .dl.add{background:var(--jade-wash);color:var(--jade)}
+  .diff .dl .sgn{flex:none;width:12px}
+  .auto-meta{font-size:12.5px;color:var(--ink-soft);margin:3px 0}
+  .auto-meta b{color:var(--ink)}
+</style>
+</head>
+<body>
+
+<!-- ════ 顶栏：whoami + 铃铛（与看板同结构，shared.js 自动绑定/同步） ════ -->
+<header class="top">
+  <div class="top-in">
+    <div class="brand" data-home>
+      <div class="seal-mark">案</div>
+      <div><h1>需求批阅台</h1><div class="sub">A G E N T · P I P E</div></div>
+    </div>
+    <div class="top-spacer"></div>
+    <div class="whoami">
+      <div><b>李超</b> · 决策者</div>
+      <div>上次登录 <span class="abs">6/18 下午</span>（<span class="since">4 天前</span>）</div>
+      <div>这期间新增 <span class="since"><b data-wait-count>0</b> 件</span>等你</div>
+    </div>
+    <div class="bell" data-bell title="跨需求·等你清单">
+      🔔<span class="bdg">0</span>
+      <div class="bell-pop" data-bell-pop onclick="event.stopPropagation()">
+        <div class="bp-head">🔔 等你清单 <span class="ct">0 件</span></div>
+        <div class="bp-body"></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap page-rise">
+
+  <!-- 面包屑（记来路：看板 / 本需求） -->
+  <nav class="crumbs" data-crumbs></nav>
+
+  <!-- 标题区（按 ?id 参数化，修 B5） -->
+  <div class="desk-head">
+    <div>
+      <div class="kicker">单需求工作台</div>
+      <h2 id="deskTitle">优惠券改版</h2>
+      <div class="meta" id="deskMeta">来源 PRD「满减券 2.0」<span class="tag-end">3 服务 · Web · App</span></div>
+    </div>
+    <div class="statepill run" id="deskState"><span class="ico"></span>各端并行干</div>
+  </div>
+
+  <!-- 流程 rail -->
+  <div class="rail">
+    <div class="stepper" id="stepper"></div>
+    <div class="steplabels" id="stepLabels"></div>
+  </div>
+
+  <!-- ════ 等你队列（统一 open-wait 队列在本需求内的视图） ════
+       该你拍·共 N 处，按急缓排序（关卡级在前），逐张消解；
+       含原 v1 藏在工人面板的「UI 待你调」——现在进队列 + 进计数（主题一） -->
+  <div class="wait-queue" id="waitQueue"></div>
+
+  <!-- 两栏 -->
+  <div class="desk-grid">
+    <!-- 左主：活动流 -->
+    <div class="panel">
+      <h3><span class="glyph">志</span> 活动流 <span class="ct">这个需求发生过什么</span></h3>
+      <div class="hint">最新在上。系统自己干的、工人交的、你拍的板、你的补充，都在这条线上。</div>
+      <div class="feed" id="feed"></div>
+    </div>
+
+    <!-- 右侧栏 -->
+    <div class="col-side">
+      <!-- 各端工人（进度可读 + 病历态） -->
+      <div class="panel">
+        <h3><span class="glyph">工</span> 各端工人 <span class="ct" id="wkCt">1/4 完成</span></h3>
+        <div id="workers"></div>
+
+        <!-- 系统已自治 N 次（可展开：改了哪条接口 / 前后 diff / 影响哪端 / 一键退回） -->
+        <div class="note" style="display:block">
+          <div style="display:flex;gap:9px"><span>⚙️</span><div><b>系统已自治 2 次：</b>反复修不好才会找你。点开看每次改了什么、可一键退回。</div></div>
+          <div style="margin-top:10px">
+            <div class="auto-line" onclick="this.classList.toggle('open')">
+              <div class="auto-h">
+                <span class="auto-v">①</span>
+                <span class="auto-t"><b>对齐券面额字段类型</b>：Web 当字符串、优惠服务给的是分</span>
+                <span class="auto-time">10:30</span>
+              </div>
+              <div class="auto-body">
+                <div class="auto-meta">改的接口：<b>GET /coupons/{id}</b> 响应字段 <code style="font-family:var(--mono)">amount</code></div>
+                <div class="diff">
+                  <div class="dl del"><span class="sgn">−</span>amount: string  // "10.00 元"</div>
+                  <div class="dl add"><span class="sgn">+</span>amount: integer // 1000（分）</div>
+                </div>
+                <div class="auto-meta">影响端：<b>Web</b>（已派返工对齐）· 其余端未受影响、照跑</div>
+                <div class="auto-meta" style="color:var(--ink-faint)">判定：纯增/对齐类小改 → 包工头自治即改 + 留痕，没惊动你。</div>
+                <button class="cancel-entry" style="margin-top:8px" onclick="event.stopPropagation();revertAuto(this,'对齐券面额字段类型')">↩ 退回这次自治改动</button>
+              </div>
+            </div>
+            <div class="auto-line" onclick="this.classList.toggle('open')">
+              <div class="auto-h">
+                <span class="auto-v">②</span>
+                <span class="auto-t"><b>补领券资格校验缺的可选入参</b>：加 <code style="font-family:var(--mono)">scene</code> 字段</span>
+                <span class="auto-time">10:48</span>
+              </div>
+              <div class="auto-body">
+                <div class="auto-meta">改的接口：<b>POST /coupons/claim</b> 入参新增可选 <code style="font-family:var(--mono)">scene?</code></div>
+                <div class="diff">
+                  <div class="dl add"><span class="sgn">+</span>scene?: string // 领券场景，可选、不破坏老调用</div>
+                </div>
+                <div class="auto-meta">影响端：<b>用户服务</b> · <b>App</b>（向后兼容、无需返工）</div>
+                <div class="auto-meta" style="color:var(--ink-faint)">判定：加可选项不动已有签名 → 小改（纯增）。</div>
+                <button class="cancel-entry" style="margin-top:8px" onclick="event.stopPropagation();revertAuto(this,'补领券资格校验可选入参')">↩ 退回这次自治改动</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 决策台账（你拍的板 + 「系统替我做的」分区） -->
+      <div class="panel">
+        <h3><span class="glyph">案</span> 决策台账 <span class="ct">点开看理由</span></h3>
+        <div id="ledger"></div>
+
+        <!-- 系统替我做的（靛蓝、与人拍的板并列、可退回） -->
+        <div class="led-divider">系统替我做的（自治·可退回）</div>
+        <div class="led" onclick="this.classList.toggle('open')">
+          <div class="led-h"><span class="led-v sys">机</span><span class="led-t">对齐券面额字段类型为「分」<span class="led-revert" onclick="event.stopPropagation();ReqDesk.toast('已退回这次自治改动 · 回到 string 口径，相关端将重新派返工')">退回</span></span><span class="led-time">10:30</span></div>
+          <div class="led-why">集成预检抓到 Web 与优惠服务口径不一致，自动统一为分（整数）。属小改、未惊动你；可退回。</div>
+        </div>
+        <div class="led" onclick="this.classList.toggle('open')">
+          <div class="led-h"><span class="led-v sys">机</span><span class="led-t">领券接口补可选入参 scene<span class="led-revert" onclick="event.stopPropagation();ReqDesk.toast('已退回这次自治改动')">退回</span></span><span class="led-time">10:48</span></div>
+          <div class="led-why">纯增可选字段、向后兼容，未触发返工。</div>
+        </div>
+      </div>
+
+      <!-- 产物 -->
+      <div class="panel">
+        <h3><span class="glyph">档</span> 产物 <span class="ct">随时翻</span></h3>
+        <div id="docs"></div>
+      </div>
+
+      <!-- 仓库 -->
+      <div class="panel">
+        <h3><span class="glyph">仓</span> 涉及仓库</h3>
+        <div id="repos"></div>
+      </div>
+
+      <!-- 取消需求入口（克制样式，修 B3） -->
+      <div style="text-align:center;padding:4px 0 10px">
+        <button class="cancel-entry" onclick="openCancel()">／ 取消这个需求</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 介入条（工作台专属；发送后活动流留回执，修主题七） -->
+<div class="intervene">
+  <div class="iv-in">
+    <span class="at">@包工头</span>
+    <input id="ivInput" placeholder="随时补充、纠偏、问一句……（不打断正在跑的工人）">
+    <button class="iv-send" onclick="send()">说</button>
+  </div>
+</div>
+
+<!-- 取消确认卡（防误触 · 当场列明后果，修 B3 / §5.8） -->
+<div class="cancel-mask" id="cancelMask">
+  <div class="cancel-card">
+    <h3>⚠ 取消「<span id="cancelName">优惠券改版</span>」？</h3>
+    <p class="cc-lede">这是改盘操作。下面是会发生什么 —— 半成品是资产，分支与代码都<b style="color:var(--jade)">保留</b>，不删。</p>
+    <ul class="cancel-list">
+      <li><span class="cl-ico">⏹</span><div>当场中止 <b id="cancelN">3</b> 个在跑工人（用户服务 / Web / App）。</div></li>
+      <li><span class="cl-ico">🌿</span><div>feature 分支 <b>feat/coupon-2.0</b> <span class="keep">全部保留</span>，已写的代码不丢。</div></li>
+      <li><span class="cl-ico">🧹</span><div>回收各工人的 worktree（工作副本），<span class="keep">不删 git 仓</span>。</div></li>
+      <li><span class="cl-ico">📓</span><div>包工头写一份<b>收尾 journal</b>：半成品停在哪个分支、做到哪、怎么接着捡起来。</div></li>
+    </ul>
+    <div class="cancel-acts">
+      <button class="btn ghost" onclick="closeCancel()">先不取消</button>
+      <button class="btn" style="background:var(--danger);color:#fff" onclick="confirmCancel()">确认取消 · 保留分支</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="shared.js"></script>
+<script>
+/* ════════════════════════════════════════════════════════
+   单需求工作台 —— 按 ?id 参数化（修 B5 串台）
+   三个演示需求：coupon（默认·并行中有取舍）/ fav（等你审设计）/ search（集成中·暂不需要）
+   ════════════════════════════════════════════════════════ */
+var REQ = ReqDesk.reqId() || 'coupon';
+
+// 每个需求的整套数据（标题/阶段/工人/活动流/台账/产物/仓库）
+var DATA = {
+  coupon: {
+    title: '优惠券改版', meta: '来源 PRD「满减券 2.0」', tag: '3 服务 · Web · App',
+    state: { cls: 'run', txt: '各端并行干' },
+    cancelN: 3,
+    steps: [
+      { k: '对齐', s: 'done' }, { k: '审设计', s: 'done' }, { k: '并行', s: 'cur' },
+      { k: '集成', s: '' }, { k: '验收', s: '' }, { k: '提交', s: '' }
+    ],
+    wkCt: '1/4 完成',
+    workers: [
+      { name: '优惠服务', repo: 'coupon-svc', st: 'done' },
+      { name: '用户服务', repo: 'user-svc', st: 'run', pct: 70, act: '在写「领券资格校验」', beat: '2 分钟前还在动', live: true, step: '4/6' },
+      { name: 'Web', repo: 'web-shop', st: 'run', pct: 40, act: '搭优惠券列表页骨架', beat: '刚刚还在动', live: true, step: '3/7', uiwait: true },
+      { name: 'App', repo: 'app-rn', st: 'sick', tried: 3,
+        cause: '断言失败：领券成功后余额未即时刷新（期望 1000 实得 null）',
+        causeType: 'assert', beat: '8 分钟前最后一次动', step: '2/6' }
+    ],
+    feed: [
+      { cls: 'sys', time: '10:48', label: 'fl-sys', soft: true, html: '领券接口缺可选字段 <span class="mono">scene</span>，已自治补上（纯增·向后兼容）——没惊动你。' },
+      { cls: 'sys', time: '10:30', label: 'fl-sys', soft: true, html: '集成预检发现 Web 把面额当字符串、优惠服务给的是分，已自治对齐为「分」——没惊动你。' },
+      { cls: 'wait', time: '10:12', label: 'fl-wait', html: 'App 工人卡在「领券后余额刷新」，已试 3 次仍断言红，举手等你看病历（见右侧工人面板）。' },
+      { cls: 'ok', time: '10:05', label: 'fl-ok', soft: true, html: '优惠服务工人完成，提交分支 <span class="mono">feat/coupon-2.0</span>。' },
+      { cls: '', time: '09:40', label: 'fl-step', soft: true, html: '发令枪响，4 个工人照对接合同开始并行。' },
+      { cls: 'you', time: '09:38', label: 'fl-you', html: '你通过了详细设计，盖「准」。' }
+    ],
+    ledger: [
+      { v: 'you', vt: '定', t: '券面额统一用「分」存储与传输', time: '10:35', why: '集成口径分歧，定分（整数）避免浮点；Web 自行转元显示。' },
+      { v: 'acc', vt: '准', t: '通过详细设计', time: '今早 09:38', why: '5 条质疑裁完、4 接口确认后放行。' },
+      { v: 'rej', vt: '驳', t: '驳回「券码加缓存」', time: '今早', why: 'v1 先求简单一致；量级已压住，缓存留后续。' }
+    ],
+    docs: [
+      { t: '设计大纲', type: 'overview', time: '今早', open: "ReqDesk.toast('打开：设计大纲')" },
+      { t: '对接合同', type: 'contract', time: '昨天', open: "ReqDesk.go('review.html?id=coupon')" },
+      { t: 'PRD「满减券 2.0」', type: '飞书', time: '原文', open: "ReqDesk.toast('打开 PRD 原文')" },
+      { t: '交付报告', type: '待生成', time: '—', muted: true }
+    ],
+    repos: ['coupon-svc', 'user-svc', 'web-shop', 'app-rn']
+  },
+  fav: {
+    title: '商品收藏', meta: '来源 PRD「用户收藏夹 v1」', tag: '2 服务 · Web · App',
+    state: { cls: 'wait', txt: '等你审设计' },
+    cancelN: 0,
+    steps: [
+      { k: '对齐', s: 'done' }, { k: '审设计', s: 'cur' }, { k: '并行', s: '' },
+      { k: '集成', s: '' }, { k: '验收', s: '' }, { k: '提交', s: '' }
+    ],
+    wkCt: '未开工',
+    workers: [
+      { name: '（未派工）', repo: '审设计通过后发令', st: 'idle', act: '快拍冻结接口即发令并行' }
+    ],
+    feed: [
+      { cls: 'wait', time: '刚刚', label: 'fl-wait', html: '设计已就绪，灯②等你审：快拍定方向 + 钉接口合同。不批则整件停在这。' },
+      { cls: 'ok', time: '昨天 18:20', label: 'fl-ok', soft: true, html: '唱反调 AI 提了 4 条质疑，已附设计者回应，待你慢拍逐条裁。' },
+      { cls: 'you', time: '昨天 16:40', label: 'fl-you', html: '你确认了需求理解，进入设计。' }
+    ],
+    ledger: [
+      { v: 'acc', vt: '准', t: '确认需求理解', time: '昨天 16:40', why: '收藏 / 取消 / 列表三件事，4 端协同，范围对齐。' }
+    ],
+    docs: [
+      { t: '设计大纲', type: 'overview', time: '今早', open: "ReqDesk.go('review.html?id=fav')" },
+      { t: '对接合同', type: 'contract', time: '今早', open: "ReqDesk.go('review.html?id=fav')" },
+      { t: 'PRD「收藏夹 v1」', type: '飞书', time: '原文', open: "ReqDesk.toast('打开 PRD 原文')" }
+    ],
+    repos: ['user-svc', 'product-svc', 'web-shop', 'app-rn']
+  },
+  search: {
+    title: '搜索联想优化', meta: '来源 PRD「搜索体验 v2」', tag: '1 服务 · Web',
+    state: { cls: 'run', txt: '集成验证中' },
+    cancelN: 1,
+    steps: [
+      { k: '对齐', s: 'done' }, { k: '审设计', s: 'done' }, { k: '并行', s: 'done' },
+      { k: '集成', s: 'cur' }, { k: '验收', s: '' }, { k: '提交', s: '' }
+    ],
+    wkCt: '1/1 完成 · 集成中',
+    workers: [
+      { name: '搜索服务', repo: 'search-svc', st: 'run', pct: 90, act: '集成验证：联想接口对端联调', beat: '1 分钟前还在动', live: true, step: '6/7' }
+    ],
+    feed: [
+      { cls: '', time: '11:02', label: 'fl-step', soft: true, html: '进入集成验证，对联想接口做真联调，暂不需要你。' },
+      { cls: 'ok', time: '10:40', label: 'fl-ok', soft: true, html: '搜索服务工人完成，提交分支 <span class="mono">feat/search-v2</span>。' },
+      { cls: 'you', time: '昨天', label: 'fl-you', html: '你通过了详细设计，盖「准」。' }
+    ],
+    ledger: [
+      { v: 'acc', vt: '准', t: '通过详细设计', time: '昨天', why: '联想词来源 + 防抖口径确认后放行。' }
+    ],
+    docs: [
+      { t: '设计大纲', type: 'overview', time: '前天', open: "ReqDesk.toast('打开：设计大纲')" },
+      { t: '对接合同', type: 'contract', time: '前天', open: "ReqDesk.go('review.html?id=search')" }
+    ],
+    repos: ['search-svc']
+  }
+};
+
+var D = DATA[REQ] || DATA.coupon;
+
+/* ── 标题 / meta / 状态 ── */
+document.title = D.title + ' · 工作台 · 需求批阅台';
+document.getElementById('deskTitle').textContent = D.title;
+document.getElementById('deskMeta').innerHTML = D.meta + '<span class="tag-end">' + D.tag + '</span>';
+var sp = document.getElementById('deskState');
+sp.className = 'statepill ' + D.state.cls;
+sp.innerHTML = '<span class="ico"></span>' + D.state.txt;
+
+/* ── 面包屑（记来路：看板 / 本需求） ── */
+ReqDesk.crumbs([{ label: '看板', href: 'index.html' }, { label: D.title }]);
+
+/* ── 流程 rail ── */
+(function renderRail() {
+  var stepper = document.getElementById('stepper');
+  var labels = document.getElementById('stepLabels');
+  D.steps.forEach((st, i) => {
+    var last = i === D.steps.length - 1;
+    var step = document.createElement('div');
+    step.className = 'step ' + st.s;
+    step.innerHTML = '<div class="dot" title="' + st.k + '"></div>' + (last ? '' : '<div class="bar"></div>');
+    step.querySelector('.dot').onclick = () => { ReqDesk.toast(st.k + (st.s === 'cur' ? '：当前阶段' : st.s === 'done' ? '：已完成' : '：还没到')); };
+    stepper.appendChild(step);
+    var lb = document.createElement('span');
+    lb.className = st.s; lb.textContent = st.k; labels.appendChild(lb);
+  });
+})();
+
+/* ── 工人面板（进度可读 + 病历态） ── */
+document.getElementById('wkCt').textContent = D.wkCt;
+(function renderWorkers() {
+  var host = document.getElementById('workers');
+  D.workers.forEach((w) => {
+    var row = document.createElement('div');
+    if (w.st === 'done') {
+      row.className = 'wkrow';
+      row.innerHTML =
+        '<div class="wk-name"><span class="tick">✓</span>' + w.name + ' <small>' + w.repo + '</small></div>' +
+        '<div class="wk-stat"><b>完成</b></div>' +
+        '<div class="wk-beat"><span class="live">●</span> 已交付 · 产出：<a href="javascript:;" onclick="ReqDesk.toast(\'打开分支 feat/* 的提交\')" style="color:var(--jade)">查看提交 →</a></div>' +
+        '<div class="prog"><i class="full" style="width:100%"></i></div>';
+    } else if (w.st === 'idle') {
+      row.className = 'wkrow';
+      row.innerHTML =
+        '<div class="wk-name" style="color:var(--ink-faint)">' + w.name + ' <small>' + w.repo + '</small></div>' +
+        '<div class="wk-stat" style="color:var(--ink-faint)">待派</div>' +
+        '<div class="wk-act">' + (w.act || '') + '</div>';
+    } else if (w.st === 'sick') {
+      // 病历态：工人举手（R20 / §5.8）—— 卡哪 / 已试 N 次 / 根因（断言红 vs 测试跑不起来）+ 轻救场
+      row.className = 'wkrow sick';
+      var causeLabel = w.causeType === 'assert' ? '断言失败（红）' : '测试跑不起来';
+      row.innerHTML =
+        '<div class="wk-name">⚑ ' + w.name + ' <small>' + w.repo + '</small> <span class="sick-badge">举手</span></div>' +
+        '<div class="wk-stat" style="color:var(--cinnabar)">卡住 · 已试 ' + w.tried + ' 次</div>' +
+        '<div class="wk-beat"><span class="stale">●</span> ' + w.beat + ' · 步骤 ' + w.step + '</div>' +
+        '<div class="chart">' +
+        '<div class="ch-row"><b>卡在哪：</b>' + w.act + (w.act ? '' : '领券后余额刷新这一步') + '</div>' +
+        '<div class="ch-row"><b>已试：</b>' + w.tried + ' 次自治重试，仍不过</div>' +
+        '<div class="ch-row"><b>根因（' + causeLabel + '）：</b></div>' +
+        '<div class="ch-cause">' + w.cause + '</div>' +
+        '<div class="ch-row" style="color:var(--ink-faint)">' +
+        (w.causeType === 'assert'
+          ? '断言红 = 代码逻辑确有问题（值对不上），不是环境问题。建议补一条针对性测试命令复现，或打回让包工头重拆这一步。'
+          : '测试根本起不来 = 环境/依赖缺，不该再烧重试。建议跳过该端自测、人工接管。') +
+        '</div>' +
+        '<div class="ch-acts">' +
+        '<button class="btn ghost" style="font-size:13px;padding:7px 14px" onclick="event.stopPropagation();ReqDesk.toast(\'已下发针对性测试命令复现，工人重试这一步\')">补测试命令复现</button>' +
+        '<button class="btn ghost" style="font-size:13px;padding:7px 14px" onclick="event.stopPropagation();ReqDesk.toast(\'已标记该端跳过自测、转人工接管\')">跳过该端自测</button>' +
+        '<button class="btn" style="font-size:13px;padding:7px 14px;background:var(--cinnabar);color:#fff" onclick="event.stopPropagation();ReqDesk.toast(\'已打回 · 包工头回去重拆这一步\')">打回重拆</button>' +
+        '</div>' +
+        '</div>';
+      row.onclick = () => { row.classList.toggle('open'); };
+    } else {
+      // 运行中：百分比 + 最近活动时间（活体探测 onActivity）+ 步骤 x/N
+      var stale = !w.live;
+      row.className = 'wkrow' + (stale ? ' stale' : '');
+      var actLine = w.uiwait
+        ? w.act + ' · <span style="color:var(--amber-deep)">UI 待你调（已进上方等你队列）</span>'
+        : w.act;
+      row.innerHTML =
+        '<div class="wk-name"><span class="spin"></span>' + w.name + ' <small>' + w.repo + '</small></div>' +
+        '<div class="wk-stat">' + w.pct + '%</div>' +
+        '<div class="wk-act">' + actLine + '</div>' +
+        '<div class="wk-beat"><span class="' + (w.live ? 'live' : 'stale') + '">●</span> ' + w.beat + ' · 步骤 ' + w.step + '</div>' +
+        '<div class="prog"><i class="' + (stale ? 'stale' : '') + '" style="width:' + w.pct + '%"></i></div>';
+    }
+    host.appendChild(row);
+  });
+})();
+
+/* ── 活动流 ── */
+(function renderFeed() {
+  var host = document.getElementById('feed');
+  D.feed.forEach((f) => {
+    var el = document.createElement('div');
+    el.className = 'fitem ' + f.cls;
+    el.innerHTML =
+      '<div class="fmeta"><span class="ftime">' + f.time + '</span><span class="flabel ' + f.label + '">' +
+      ({ 'fl-wait': '等你', 'fl-sys': '自治', 'fl-ok': '进展', 'fl-you': '你', 'fl-step': '开工', 'fl-pending': '待生效' }[f.label] || '') +
+      '</span></div>' +
+      '<div class="ftext' + (f.soft ? ' soft' : '') + '">' + f.html + '</div>';
+    host.appendChild(el);
+  });
+})();
+
+/* ── 决策台账（人拍的板） ── */
+(function renderLedger() {
+  var host = document.getElementById('ledger');
+  D.ledger.forEach((l) => {
+    var el = document.createElement('div');
+    el.className = 'led';
+    el.onclick = () => { el.classList.toggle('open'); };
+    el.innerHTML =
+      '<div class="led-h"><span class="led-v ' + l.v + '">' + l.vt + '</span><span class="led-t">' + l.t + '</span><span class="led-time">' + l.time + '</span></div>' +
+      '<div class="led-why">' + l.why + '</div>';
+    host.appendChild(el);
+  });
+})();
+
+/* ── 产物 ── */
+(function renderDocs() {
+  var host = document.getElementById('docs');
+  D.docs.forEach((d) => {
+    var el = document.createElement('div');
+    el.className = 'doc-row' + (d.muted ? ' muted' : '');
+    if (!d.muted) el.setAttribute('onclick', d.open);
+    el.innerHTML = '<span class="doc-t">' + d.t + '</span><span class="doc-type">' + d.type + '</span><span class="doc-time">' + d.time + '</span>';
+    host.appendChild(el);
+  });
+})();
+
+/* ── 仓库 ── */
+(function renderRepos() {
+  var host = document.getElementById('repos');
+  var br = REQ === 'fav' ? 'feat/favorites-v1' : REQ === 'search' ? 'feat/search-v2' : 'feat/coupon-2.0';
+  D.repos.forEach((r) => {
+    var el = document.createElement('div');
+    el.className = 'repo-row';
+    el.innerHTML = '<span class="rn">' + r + '</span><span class="br">' + br + '</span>';
+    host.appendChild(el);
+  });
+})();
+
+/* ════════════════════════════════════════════════════════
+   等你队列 —— 渲染本需求内全部 open-wait 项（唯一源），按急缓排序
+   逐张消解；含「UI 待你调」（原 v1 漏掉的，现进队列 + 进计数）
+   ════════════════════════════════════════════════════════ */
+function renderWaitQueue() {
+  var host = document.getElementById('waitQueue');
+  var list = ReqDesk.waits.sorted(REQ);
+  var gate = ReqDesk.waits.gateCount(REQ), soft = ReqDesk.waits.softCount(REQ);
+
+  var headCt = list.length
+    ? '<span class="wq-ct">该你拍 · 共 ' + list.length + ' 处' +
+      (gate ? '（' + gate + ' 关卡不处理则停' + (soft ? ' · ' + soft + ' 取舍不急' : '') + '）' : '（' + soft + ' 取舍·不急）') + '</span>'
+    : '<span class="wq-ct allclear">✓ 这件目前没有等你的，照常并行中</span>';
+
+  var html = '<div class="wq-head"><h3>等你处理</h3>' + headCt + '</div>';
+
+  if (!list.length) {
+    html += '<div class="wq-empty"><b>都清了。</b>有新的取舍/关卡会顶到这里，并响铃通知你。</div>';
+    host.innerHTML = html;
+    return;
+  }
+
+  html += '<div class="wq-stack">';
+  list.forEach((w) => {
+    // 大改卡：演示用——如果是 coupon 且队列里特意加了 bigchange 项，走大改卡 UI
+    if (w.kind === '大改') { html += bigChangeCard(w); return; }
+    var sev = w.sev; // 'gate' | 'soft'
+    var sevTag = sev === 'gate'
+      ? '<span class="sev-tag gate">关卡 · 不处理则停</span>'
+      : '<span class="sev-tag soft">不急 · 其余照跑</span>';
+    var ico = w.kind.indexOf('UI') >= 0 ? '🎨' : sev === 'gate' ? '⚔' : '⚖';
+    html +=
+      '<div class="focus ' + sev + '" id="wq-' + w.id + '">' +
+      '<div class="fi">' + ico + '</div>' +
+      '<div class="fc">' +
+      '<div class="ft">' + w.title + ' ' + sevTag + '</div>' +
+      '<div class="fd">' + w.summary + '</div>' +
+      '<div class="fact async-host">' +
+      '<button class="btn ' + (sev === 'gate' ? 'solid' : 'amber') + '" onclick="resolveWait(this,\'' + w.id + '\',\'' + sev + '\')">' + w.cta + ' →</button>' +
+      (w.kind.indexOf('UI') >= 0
+        ? '<button class="btn ghost" onclick="ReqDesk.toast(\'已转交：让工人先按默认视觉继续，你随后再调\')">让它先按默认继续</button>'
+        : sev === 'soft'
+          ? '<button class="btn ghost" onclick="ReqDesk.toast(\'已转交：两端先各自试，集成时再看\')">让它们先各自试</button>'
+          : '') +
+      '</div></div></div>';
+  });
+  html += '</div>';
+  host.innerHTML = html;
+}
+
+/* 拍板一个取舍/UI 项 → 异步三态 → 成功后从唯一源 resolve（三处计数同步消减） */
+function resolveWait(btn, id, sev) {
+  ReqDesk.asyncAction(btn, {
+    pending: '已收到 · 处理中…',
+    ok: '已拍板 · 记进台账',
+    failText: '未成功',
+    onOk: () => {
+      ReqDesk.waits.resolve(id);   // 唯一源移除 → 看板/铃铛/队列自动同步
+      renderWaitQueue();           // 本页队列重渲染（消解这张、顶上下一张）
+    }
+  });
+}
+
+/* 退回一次自治改动（自治可展开行里的按钮） */
+function revertAuto(btn, name) {
+  ReqDesk.toast('已退回「' + name + '」这次自治改动 · 相关端将重新对齐');
+}
+
+/* ════════ 大改卡（破坏性 · 会触发返工，修 B4） ════════
+   演示：URL 带 #big 或 ?big 时，往队列塞一条 kind='大改' 的关卡项 */
+function bigChangeCard(w) {
+  return '' +
+    '<div class="bigchange" id="wq-' + w.id + '">' +
+    '<span class="bc-flag">破坏性变更 · 会触发返工</span>' +
+    '<div class="bc-title">' + w.title + ' <span class="sev-tag gate">关卡 · 不处理则停</span></div>' +
+    '<dl class="bc-meta">' +
+    '<dt>谁发现</dt><dd>集成验证工人真联调时，App 端解析失败</dd>' +
+    '<dt>为何破坏</dt><dd>把券接口 <b>amount</b> 从 <b>integer（分）</b> 改成 <b>object（含币种）</b>——<b>改了已有字段的类型与结构</b>，不是纯增</dd>' +
+    '<dt>影响哪端</dt><dd><b>Web</b> 与 <b>App</b> 的金额解析/展示</dd>' +
+    '<dt>哪些活返工</dt><dd class="rework">Web 列表页金额渲染、App 金额组件 —— 约 2 个工人需返工；优惠/用户服务照跑不动</dd>' +
+    '</dl>' +
+    '<div class="bc-acts">' +
+    '<button class="bc-act danger" onclick="bigChoose(\'' + w.id + '\',\'准改\')"><b>准这次大改</b><span class="conseq">回灯②重确认合同 → Web / App 两端返工，其余端照跑不停</span></button>' +
+    '<button class="bc-act" onclick="bigChoose(\'' + w.id + '\',\'不改\')"><b>不改 · 维持原合同</b><span class="conseq">提出方撤回该变更，按原 integer（分）继续，无返工</span></button>' +
+    '<button class="bc-act" onclick="bigChoose(\'' + w.id + '\',\'再想\')"><b>再想想</b><span class="conseq">相关 2 端暂停等你，其余端继续；不催</span></button>' +
+    '</div>' +
+    '</div>';
+}
+function bigChoose(id, choice) {
+  if (choice === '再想') { ReqDesk.toast('已记下「再想想」· Web/App 暂停等你，其余端继续'); return; }
+  var msg = choice === '准改'
+    ? '已准大改 · 回灯②重确认合同，Web/App 派返工，其余端照跑'
+    : '已维持原合同 · 提出方撤回，无返工';
+  ReqDesk.waits.resolve(id);
+  ReqDesk.toast(msg);
+  renderWaitQueue();
+}
+
+/* 演示入口：?big 时往队列加一条大改卡（仅 coupon） */
+if (/[?&]big/.test(location.search) && REQ === 'coupon') {
+  ReqDesk.waits.add({
+    id: 'w-coupon-big', reqId: 'coupon', reqTitle: '优惠券改版',
+    sev: 'gate', kind: '大改',
+    title: '券接口金额字段改结构（integer→object）',
+    summary: '破坏性变更，会触发 Web/App 返工',
+    href: 'workitem.html?id=coupon', cta: '去裁决'
+  });
+}
+
+renderWaitQueue();
+ReqDesk.waits.onChange(renderWaitQueue); // 别处变更也同步本队列
+
+/* ════ 介入条：发送后活动流留回执（修主题七） ════ */
+function send() {
+  var i = document.getElementById('ivInput');
+  var v = i.value.trim();
+  if (!v) { i.focus(); return; }
+  var feed = document.getElementById('feed');
+  var el = document.createElement('div');
+  el.className = 'fitem you';
+  el.innerHTML =
+    '<div class="fmeta"><span class="ftime">刚刚</span><span class="flabel fl-pending">待生效</span></div>' +
+    '<div class="ftext">你 · 补充「' + (v.length > 24 ? v.slice(0, 24) + '…' : v) + '」' +
+    '<span class="soft" style="display:block;font-size:12.5px;margin-top:2px">待包工头下次唤醒采纳 · 不打断当前工人</span></div>';
+  feed.insertBefore(el, feed.firstChild);
+  i.value = '';
+  ReqDesk.toast('已带话给包工头 · 见活动流回执');
+}
+document.getElementById('ivInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+
+/* ════ 取消确认卡（修 B3 / §5.8） ════ */
+document.getElementById('cancelName').textContent = D.title;
+document.getElementById('cancelN').textContent = D.cancelN;
+function openCancel() { document.getElementById('cancelMask').classList.add('show'); }
+function closeCancel() { document.getElementById('cancelMask').classList.remove('show'); }
+function confirmCancel() {
+  closeCancel();
+  ReqDesk.toast('已取消「' + D.title + '」· 工人已中止、分支保留、收尾 journal 已写');
+  // 演示：消解本需求所有等你项，状态置灰
+  ReqDesk.waits.all(REQ).forEach((w) => { ReqDesk.waits.resolve(w.id); });
+  var sp = document.getElementById('deskState');
+  sp.className = 'statepill'; sp.style.color = 'var(--ink-faint)'; sp.style.borderColor = 'var(--line)';
+  sp.innerHTML = '已取消 · 分支保留';
+}
+document.getElementById('cancelMask').addEventListener('click', function (e) {
+  if (e.target === this) closeCancel();
+});
+</script>
+</body>
+</html>

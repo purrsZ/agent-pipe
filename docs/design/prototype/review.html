@@ -1,0 +1,703 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>审设计 · 需求批阅台</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;700;900&family=Noto+Sans+SC:wght@300;400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<link rel="stylesheet" href="shared.css">
+<style>
+  /* 两拍真拆两步：步骤切换条 */
+  .beat-nav{display:flex;gap:0;border:1px solid var(--line-strong);border-radius:11px;overflow:hidden;margin:18px 0 22px}
+  .beat-nav .bn{flex:1;padding:13px 16px;font-size:13.5px;color:var(--ink-faint);background:var(--card);cursor:default;position:relative}
+  .beat-nav .bn b{font-family:var(--serif);font-size:14.5px;display:block;color:var(--ink-soft);font-weight:700}
+  .beat-nav .bn.on{background:var(--cinnabar-wash);color:var(--ink-soft)}
+  .beat-nav .bn.on b{color:var(--cinnabar)}
+  .beat-nav .bn.done b::after{content:' ✓';color:var(--jade)}
+  .beat-nav .bn.locked{opacity:.55}
+  .beat-nav .bn.locked::after{content:'🔒 确认接口后解锁';position:absolute;right:14px;top:50%;transform:translateY(-50%);font-size:11px;color:var(--ink-faint)}
+  .beat-nav .bn .bn-step{font-family:var(--mono);font-size:11px;color:var(--ink-faint)}
+  /* 接口分组折叠（按仓） */
+  .api-group{border:1px solid var(--line);border-radius:11px;margin-bottom:12px;overflow:hidden}
+  .api-group .ag-head{display:flex;align-items:center;gap:10px;padding:12px 16px;cursor:pointer;background:var(--paper-2)}
+  .api-group .ag-head:hover{background:var(--card-2)}
+  .api-group .ag-name{font-family:var(--mono);font-size:13.5px;font-weight:500}
+  .api-group .ag-prog{margin-left:auto;font-family:var(--mono);font-size:12px;color:var(--ink-faint)}
+  .api-group .ag-prog.full{color:var(--jade)}
+  .api-group .ag-fold{font-size:12px;color:var(--ink-faint);transition:.2s}
+  .api-group.open .ag-fold{transform:rotate(90deg)}
+  .api-group .ag-batch{font-size:12.5px;color:var(--cinnabar);background:none;border:none;cursor:pointer;font-family:var(--sans);text-decoration:underline;padding:0}
+  .api-group .ag-body{display:none;padding:4px 16px 10px}
+  .api-group.open .ag-body{display:block;animation:rise .2s both}
+  .api .sig .lock-tag{font-size:11px;color:var(--cinnabar);font-family:var(--sans);border:1px solid var(--cinnabar);border-radius:5px;padding:0 6px;margin-left:8px;font-weight:500}
+  /* 接口区整体批量条 */
+  .api-batchbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:4px 0 16px}
+  .api-batchbar .abb-prog{font-family:var(--mono);font-size:13px;color:var(--cinnabar);font-weight:500}
+  .api-batchbar .abb-prog.full{color:var(--jade)}
+  /* 质疑批量条 */
+  .chal-batchbar{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+  .chal-batchbar .cbb-prog{font-family:var(--mono);font-size:13px;color:var(--cinnabar);font-weight:500}
+  .chal-batchbar .cbb-prog.full{color:var(--jade)}
+  .chal .lock-tag{font-size:11px;color:var(--cinnabar);border:1px solid var(--cinnabar);border-radius:5px;padding:0 6px;margin-left:8px;font-weight:500}
+  /* 改判 = 与裁决同级按钮 */
+  .rbtn.rejudge{border-color:var(--gold);color:var(--gold)}
+  .rbtn.rejudge:hover{background:var(--gold-wash)}
+  /* 最近操作回执 */
+  .op-echo{font-size:12px;color:var(--ink-faint);margin-top:8px;min-height:16px}
+  .op-echo b{color:var(--ink-soft)}
+  /* 缺口高亮（点灰按钮滚到第一个未完成项） */
+  .gap-flash{animation:gapflash 1.3s ease}
+  @keyframes gapflash{0%,100%{box-shadow:0 0 0 0 rgba(196,61,49,0)}30%{box-shadow:0 0 0 4px var(--cinnabar-wash);border-color:var(--cinnabar)}}
+  .vb-status .anchor{color:var(--cinnabar);text-decoration:underline;cursor:pointer}
+  /* 缺口锁定态：视觉同 disabled，但仍可点（点了走缺口指引，修主题四「双条件耦合卡壳」） */
+  .btn-app.locked{background:var(--ink-faint);box-shadow:none;letter-spacing:1px;cursor:pointer}
+  .btn-app.locked:hover{background:var(--ink-soft)}
+  .vb-substat{font-size:12px;color:var(--ink-faint);font-family:var(--mono);margin-top:3px}
+  .vb-substat b{color:var(--cinnabar)} .vb-substat b.ok{color:var(--jade)}
+  /* 发令二次确认 / 打回二次确认（小卡） */
+  .mini-confirm{position:fixed;inset:0;z-index:85;display:none;place-items:center;background:rgba(33,29,24,.3);backdrop-filter:blur(2px);padding:24px}
+  .mini-confirm.show{display:grid;animation:rise .18s both}
+  .mc-card{max-width:440px;width:100%;background:var(--card);border:1.5px solid var(--cinnabar);border-radius:14px;padding:22px 24px;box-shadow:0 22px 56px -20px rgba(33,29,24,.6)}
+  .mc-card.danger{border-color:var(--cinnabar)}
+  .mc-card h3{font-family:var(--serif);font-size:18px;font-weight:900;display:flex;align-items:center;gap:8px}
+  .mc-card p{font-size:13.5px;color:var(--ink-soft);margin:9px 0 4px}
+  .mc-card .mc-strong{font-size:14px;color:var(--ink);background:var(--cinnabar-wash);border-radius:9px;padding:11px 14px;margin:12px 0}
+  .mc-card .mc-strong b{color:var(--cinnabar)}
+  .mc-acts{display:flex;gap:10px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap}
+  .reject-cnt{font-size:12.5px;color:var(--cinnabar);font-family:var(--mono)}
+</style>
+</head>
+<body>
+
+<header class="top">
+  <div class="top-in">
+    <div class="brand" data-home>
+      <div class="seal-mark">案</div>
+      <div><h1>需求批阅台</h1><div class="sub">A G E N T · P I P E</div></div>
+    </div>
+    <div class="top-spacer"></div>
+    <div class="whoami">
+      <div><b>李超</b> · 决策者</div>
+      <div>上次登录 <span class="abs">6/18 下午</span>（<span class="since">4 天前</span>）</div>
+      <div>这期间新增 <span class="since"><b data-wait-count>0</b> 件</span>等你</div>
+    </div>
+    <div class="bell" data-bell title="跨需求·等你清单">
+      🔔<span class="bdg">0</span>
+      <div class="bell-pop" data-bell-pop onclick="event.stopPropagation()">
+        <div class="bp-head">🔔 等你清单 <span class="ct">0 件</span></div>
+        <div class="bp-body"></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap page-rise">
+  <nav class="crumbs" data-crumbs></nav>
+
+  <div class="review-head">
+    <div><div class="kicker">灯② · 审详细设计</div><h2 id="rvTitle">商品收藏</h2></div>
+    <div class="phase-chip" id="phaseChip">你在「快拍 · 定方向」</div>
+  </div>
+
+  <!-- 两拍真拆两步：快拍（大纲+接口）→ 慢拍（详设+质疑）。慢拍上锁，确认接口才解锁 -->
+  <div class="beat-nav">
+    <div class="bn on" id="bnFast"><b>快拍 · 定方向</b><span class="bn-step">看大纲 + 钉接口合同 → 冻结发令</span></div>
+    <div class="bn locked" id="bnSlow"><b>慢拍 · 挑刺</b><span class="bn-step">各端详设逐块 + 唱反调质疑 → 通过</span></div>
+  </div>
+
+  <!-- ════════ 快拍步骤 ════════ -->
+  <section id="stepFast">
+    <div class="tabs">
+      <button class="tab active" onclick="docTab(this,'pane-outline')">大纲 <span class="mini">一屏看懂</span></button>
+      <button class="tab" onclick="docTab(this,'pane-contract')">接口合同 <span class="mini">钉死它各端才敢并行</span></button>
+    </div>
+
+    <!-- 大纲 -->
+    <div class="docpane active doc" id="pane-outline">
+      <h4>一句话背景</h4><p class="you" id="ovBg">用户想把喜欢的商品收起来，下次直接找到。</p>
+      <h4>改完啥样</h4><p class="you" id="ovAfter">商品页多个收藏按钮，点了进「我的收藏」；列表里能取消。</p>
+      <h4>范围</h4>
+      <div class="scope" id="ovScope">
+        <div class="do"><b>做</b>收藏 / 取消 / 收藏列表（分页、按时间倒序）</div>
+        <div class="dont"><b>不做</b>收藏夹分组、降价提醒（留后续需求）</div>
+      </div>
+      <h4>怎么拆（按端并行）</h4>
+      <div class="split" id="ovSplit">
+        <span class="chip"><b>用户服务</b> 存收藏关系 + 列表接口</span>
+        <span class="chip"><b>商品服务</b> 批量取商品信息</span>
+        <span class="chip"><b>Web</b> 按钮 + 列表页</span>
+        <span class="chip"><b>App</b> 按钮 + 列表页</span>
+      </div>
+      <h4>关键取舍（最该你看）</h4>
+      <ol class="tradeoff" id="ovTradeoff">
+        <li>收藏关系存「用户服务」，不存商品服务——按"谁拥有这份数据"划。</li>
+        <li>列表里的商品名/图<b>实时</b>从商品服务取，不冗余存——怕商品改名/下架后对不上。</li>
+        <li>收藏上限 1000，后端硬兜底，前端先拦提示。</li>
+      </ol>
+      <div class="note" style="display:flex"><span>💡</span><div>快拍只需把<b style="color:var(--cinnabar)">方向</b>与<b style="color:var(--cinnabar)">接口合同</b>钉死即可发令并行；逐块详设的挑刺留到慢拍，别在这步被要求裁质疑。</div></div>
+    </div>
+
+    <!-- 接口合同（批量确认 + 按仓分组折叠 + 进度；有质疑牵连的强制单独二次确认） -->
+    <div class="docpane doc" id="pane-contract">
+      <div class="contract">
+        <span class="gun">⟶ 对接合同 · 钉死它各端才敢并行</span>
+        <h3 style="margin-top:8px;font-family:var(--serif);font-size:17.5px">接口清单 <span style="font-size:13px;font-weight:400;color:var(--ink-faint)">逐条扫一眼，确认够用、没漏</span></h3>
+
+        <!-- 整体批量条 -->
+        <div class="api-batchbar" style="margin-top:14px">
+          <span class="abb-prog" id="abbProg">接口 0 / 4 ✓</span>
+          <button class="btn ghost" style="font-size:13px;padding:7px 14px" onclick="ckAll(true)">全部确认</button>
+          <button class="btn ghost" style="font-size:13px;padding:7px 14px" onclick="ckAll(false)">全部取消</button>
+          <span class="hint" style="margin:0">⚠ 带质疑牵连的接口（标 <span style="color:var(--cinnabar)">复核</span>）需单独二次确认，批量不含它。</span>
+        </div>
+
+        <!-- 按仓分组渲染 -->
+        <div id="apiGroups"></div>
+      </div>
+    </div>
+
+    <!-- 快拍发令条：只看接口全勾即解锁「确认接口·冻结发令」 -->
+    <div class="verdict-bar">
+      <div class="vb-status" id="fastStatus">
+        快拍只看接口：<b id="fastLeft">4</b> 个接口待确认
+        <div class="vb-substat" id="fastSub">接口 <b id="fastCk">0</b>/4 ✓</div>
+      </div>
+      <button class="btn-rej" onclick="openReject('fast')">先打回</button>
+      <button class="btn-app locked" id="freezeBtn" onclick="askFreeze()">确认接口 · 冻结发令</button>
+    </div>
+  </section>
+
+  <!-- ════════ 慢拍步骤（确认接口后解锁） ════════ -->
+  <section id="stepSlow" style="display:none">
+    <div class="tabs">
+      <button class="tab active" onclick="docTab(this,'pane-detail')">详览 <span class="mini">逐块行为</span></button>
+      <button class="tab" onclick="docTab(this,'pane-chal')">唱反调质疑 <span class="mini">逐条裁</span></button>
+    </div>
+
+    <!-- 详览（md 渲染，复用 v1） -->
+    <div class="docpane active doc" id="pane-detail">
+      <p style="font-size:13px;color:var(--ink-faint);margin-bottom:14px">这份「详览」本身就是一份 <b style="font-family:var(--mono)">design-detail.md</b>——工作台<b>直接渲染</b>给你读，不用切去本地打开。点右边切换看底层 markdown。</p>
+      <div class="md-toggle"><button class="on" onclick="mdView(this,'render')">👁 渲染</button><button onclick="mdView(this,'source')">📄 源码 .md</button></div>
+      <div class="md-render" id="mdRender"></div>
+      <pre class="md-source" id="mdSource"></pre>
+    </div>
+
+    <!-- 质疑（批量驳回 + 阻塞级强制单独裁 + 改判↺同级 + 回执） -->
+    <div class="docpane doc" id="pane-chal">
+      <div class="panel" style="border-color:var(--line-strong)">
+        <div class="adv-head"><div class="robot">⚔</div><div><h3 style="margin:0;font-family:var(--serif);font-size:17.5px">唱反调 AI 的质疑</h3><div class="hint" style="margin:0">独立的另一个 AI 专门挑刺（默认反对）。逐条裁决，裁完才能放行。</div></div><span class="counter" id="counter">待裁决 4 / 4</span></div>
+
+        <!-- 质疑批量条：阻塞级强制单独裁，批量只覆盖非阻塞 -->
+        <div class="chal-batchbar">
+          <span class="cbb-prog" id="cbbProg">质疑 0 / 4 ✓</span>
+          <button class="btn ghost" style="font-size:13px;padding:7px 14px" onclick="rejAllNonBlocking()">把剩余非阻塞质疑全部驳回（已覆盖）</button>
+          <span class="hint" style="margin:0">⚠ 阻塞级质疑（标 <span style="color:var(--cinnabar)">阻塞</span>）必须单独裁，批量不含。</span>
+        </div>
+        <div class="op-echo" id="chalEcho"></div>
+
+        <div id="chalList"></div>
+      </div>
+    </div>
+
+    <!-- 慢拍通过条：质疑全裁 + 接口已勾（已在快拍勾过）→ 解锁「通过·发令」 -->
+    <div class="verdict-bar">
+      <div class="vb-status" id="slowStatus">
+        还有 <b id="slowLeft">4</b> 条质疑没裁决
+        <div class="vb-substat" id="slowSub">质疑 <b id="slowCk">0</b>/4 ✓ · 接口 <b class="ok">已冻结</b></div>
+      </div>
+      <button class="btn-rej" onclick="openReject('slow')">打回</button>
+      <button class="btn-app locked" id="approveBtn" onclick="askApprove()">通 过 · 发令并行</button>
+    </div>
+  </section>
+
+  <!-- 打回卡（理由必填 + 本灯第 N 次 + 提交后 10s 撤销，修 B2） -->
+  <div class="reject-box" id="rejectBox">
+    <div class="panel" style="margin:0;border-color:var(--cinnabar)">
+      <h3 style="color:var(--cinnabar);font-family:var(--serif);font-size:17.5px">打回 · 说一句哪不对 <span class="reject-cnt" id="rejectCnt"></span></h3>
+      <div class="hint">理由<b style="color:var(--cinnabar)">必填</b>，会写进决策台账，包工头据此回去改，不重走整套。</div>
+      <textarea id="rejectText" placeholder="例：收藏关系建议放独立的收藏服务，别压进用户服务……"></textarea>
+      <div id="escalateHint" class="note" style="display:none;margin-top:12px"><span>⚠</span><div id="escalateText"></div></div>
+      <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
+        <button class="btn-app" style="background:var(--cinnabar)" onclick="submitReject()">确认打回</button>
+        <button class="btn-rej" onclick="closeReject()">取消</button>
+        <span class="hint" style="margin:0" id="rejectReqHint">理由不能为空</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 二次确认小卡（发令 / 打回） -->
+<div class="mini-confirm" id="miniConfirm">
+  <div class="mc-card" id="mcCard"></div>
+</div>
+
+<script src="shared.js"></script>
+<script>
+/* ════════════════════════════════════════════════════════
+   审设计页 —— 按 ?id 参数化（修 B5 串台）
+   两拍真拆两步（主题三）：快拍只接口、慢拍才详设质疑
+   ════════════════════════════════════════════════════════ */
+var REQ = ReqDesk.reqId() || 'fav';
+
+/* 各需求的合同 / 质疑 / 详设 数据（参数化，防串台） */
+var REVIEW = {
+  fav: {
+    title: '商品收藏',
+    waitId: 'w-fav-light2',
+    outline: null, // 用页面默认大纲（即商品收藏）
+    apiGroups: [
+      { repo: 'user-svc', name: '用户服务', apis: [
+        { verb: 'post', sig: '/favorites', desc: '收藏一个商品 · 入参 productId · 失败→未登录 / 已收藏(幂等)', linked: false },
+        { verb: 'del', sig: '/favorites/{productId}', desc: '取消收藏 · 幂等', linked: false },
+        { verb: 'get', sig: '/favorites?page=&size=20', desc: '我的收藏列表 · 倒序 · 只返回 productId + 收藏时间', linked: true }
+      ]},
+      { repo: 'product-svc', name: '商品服务', apis: [
+        { verb: 'get', sig: '/products/batch?ids=', desc: '批量取商品名/图/状态 · 一次最多 50 个 · 含「已下架」标记', linked: true }
+      ]}
+    ],
+    chals: [
+      { blocking: false, q: '收藏列表里商品<b>已下架</b>怎么显示？大纲只说"实时取"，没说下架态。', resp: '下架商品标灰 + 角标「已下架」，仍可取消（已补进详览·能力二）。' },
+      { blocking: true, q: '批量接口一次最多取多少？没限制收藏几百个一打开就<b>打爆商品服务</b>。', resp: '批量上限 50；列表分页 20，天然 ≤ 50（已写进对接合同）。' },
+      { blocking: false, q: '上限 1000 拦在前端还是后端？只拦前端会被绕过。', resp: '后端硬兜底（权威），前端先拦只为体验。两端都做。' },
+      { blocking: false, q: '「实时取商品信息」每次开列表都打商品服务，<b>真的不缓存</b>？', resp: 'v1 先不缓存，求一致、简单；批量 50＋分页已压住量级。缓存留后续。' }
+    ],
+    detailMd: '# 商品收藏 · 设计详览\n\n> 评审重点（最该挑刺 3 处）：①下架商品在列表里怎么显示 ②收藏上限的兜底层 ③列表商品信息「实时取 vs 缓存」\n\n## 背景与目标\n\n用户希望把中意的商品收起来，下次直接找到。本次交付**收藏 / 取消 / 收藏列表**三件事，跨 **用户服务 · 商品服务 · Web · App** 四端协同。\n\n## 改动影响面（文件级）\n\n| 端 | 仓库 | 改动 |\n| --- | --- | --- |\n| 用户服务 | user-svc | 新增收藏表 + 4 个接口 |\n| 商品服务 | product-svc | 新增批量查询接口 1 个 |\n| Web | web-shop | 商品页收藏按钮 + 收藏列表页 |\n| App | app-rn | 同 Web，移动端适配 |\n\n## 分块详细行为\n\n### 收藏 / 取消\n\n- 未登录点收藏 → 引导登录，登录后**自动补上**这次收藏\n- 重复收藏**幂等**：返回「已收藏」，不报错\n- 达 1000 上限 → 提示「收藏夹满了」\n\n### 我的收藏列表\n\n- 分页一页 20 条，按**收藏时间倒序**\n- 已下架商品：**标灰 + 角标「已下架」**，仍可取消\n- 商品名 / 图**实时**从商品服务取（不冗余存）\n\n## 关键决策\n\n1. **收藏关系存用户服务** —— 按「谁拥有这份数据」划\n2. **商品信息实时取、不冗余** —— 怕商品改名 / 下架后两边对不上\n3. **上限 1000 后端兜底** —— 前端先拦只为体验\n\n## 验收要点\n\n- [ ] 未登录收藏 → 登录后自动补上\n- [ ] 收藏列表下架商品标灰可取消\n- [ ] 批量接口上限 50、列表分页 20 安全'
+  },
+  coupon: {
+    title: '优惠券改版',
+    waitId: null,
+    outline: {
+      bg: '商家想做满减券，用户领了券下单自动抵扣。',
+      after: '商品页/购物车能领券、用券；「我的优惠券」看券状态。',
+      scope: { do: '领券 / 用券 / 我的优惠券列表（按到期排序）', dont: '券叠加规则、分享裂变券（留后续）' },
+      split: ['<b>优惠服务</b> 券模板 + 领用 + 核销', '<b>用户服务</b> 领券资格校验', '<b>Web</b> 领券入口 + 列表', '<b>App</b> 同 Web'],
+      tradeoff: ['券面额统一用「分」存储传输——避免浮点，前端自行转元显示。', '领券幂等：同一用户同券只领一张，重复领返回已有。', '核销在下单事务内做，防超用。']
+    },
+    apiGroups: [
+      { repo: 'coupon-svc', name: '优惠服务', apis: [
+        { verb: 'post', sig: '/coupons/claim', desc: '领券 · 入参 templateId · 幂等', linked: false },
+        { verb: 'get', sig: '/coupons/mine?status=', desc: '我的券列表 · 按到期排序', linked: false },
+        { verb: 'post', sig: '/coupons/redeem', desc: '核销 · 下单事务内调 · amount 单位分', linked: true }
+      ]},
+      { repo: 'user-svc', name: '用户服务', apis: [
+        { verb: 'get', sig: '/users/{id}/coupon-eligible', desc: '领券资格校验 · 含场景 scene', linked: false }
+      ]}
+    ],
+    chals: [
+      { blocking: false, q: '券面额传<b>分还是元</b>？前后端口径不一会算错钱。', resp: '统一传分（整数），Web 自行转元显示，已写进合同。' },
+      { blocking: true, q: '核销不在下单事务内会<b>超用</b>（并发领同张券下两单）。', resp: '核销在下单事务内做，行锁兜底，已写进详设。' },
+      { blocking: false, q: '过期券还能不能在列表看到？', resp: '能，按 status 过滤；默认展示可用+即将过期。' },
+      { blocking: false, q: '领券资格校验失败的文案谁定？', resp: '优惠服务返回 code，前端映射文案。' }
+    ],
+    detailMd: '# 优惠券改版 · 设计详览\n\n> 评审重点：①面额单位 ②核销并发超用 ③领券幂等\n\n## 背景\n\n满减券 2.0，覆盖 **领券 / 用券 / 我的优惠券** 三件事。\n\n## 改动影响面\n\n| 端 | 仓库 | 改动 |\n| --- | --- | --- |\n| 优惠服务 | coupon-svc | 券模板/领用/核销 |\n| 用户服务 | user-svc | 领券资格校验 |\n| Web | web-shop | 领券入口 + 列表 |\n| App | app-rn | 同 Web |\n\n## 关键决策\n\n1. **面额统一用分** —— 避免浮点\n2. **核销在下单事务内** —— 防超用\n3. **领券幂等** —— 重复领返回已有'
+  },
+  search: {
+    title: '搜索联想优化',
+    waitId: null,
+    outline: {
+      bg: '搜索框输入时给联想词，少打字、点得快。',
+      after: '输入即出下拉联想，键盘上下选，回车直达。',
+      scope: { do: '联想词召回 + 排序 + 防抖', dont: '语音搜索、图片搜索（留后续）' },
+      split: ['<b>搜索服务</b> 联想接口 + 词库', '<b>Web</b> 下拉交互 + 防抖'],
+      tradeoff: ['联想词来源：热搜词 + 历史 + 商品名前缀混排。', '前端防抖 200ms，避免每键一请求。', '空输入展示热搜兜底。']
+    },
+    apiGroups: [
+      { repo: 'search-svc', name: '搜索服务', apis: [
+        { verb: 'get', sig: '/suggest?q=&limit=10', desc: '联想词 · 前缀匹配 + 热度排序', linked: false },
+        { verb: 'get', sig: '/hotwords', desc: '空输入兜底热搜词', linked: false }
+      ]}
+    ],
+    chals: [
+      { blocking: false, q: '联想接口 QPS 会不会被每键请求<b>打爆</b>？', resp: '前端防抖 200ms + 服务端限流，已评估。' },
+      { blocking: false, q: '词库多久更新一次？', resp: 'T+1 离线更新 + 热搜实时榜，已写进详设。' }
+    ],
+    detailMd: '# 搜索联想优化 · 设计详览\n\n## 背景\n\n搜索框输入即联想，提升点击效率。\n\n## 关键决策\n\n1. **防抖 200ms** —— 避免每键一请求\n2. **词库 T+1 + 热搜实时** —— 兼顾新鲜与成本'
+  }
+};
+
+var R = REVIEW[REQ] || REVIEW.fav;
+
+document.title = '审设计 · ' + R.title + ' · 需求批阅台';
+document.getElementById('rvTitle').textContent = R.title;
+ReqDesk.crumbs([
+  { label: '看板', href: 'index.html' },
+  { label: R.title, href: 'workitem.html?id=' + REQ },
+  { label: '审设计 · 对接合同' }
+]);
+
+/* 若需求自带 outline（非 fav），覆盖大纲默认文案（fav 用页面里写死的商品收藏大纲） */
+if (R.outline) {
+  var o = R.outline;
+  document.getElementById('ovBg').textContent = o.bg;
+  document.getElementById('ovAfter').textContent = o.after;
+  document.getElementById('ovScope').innerHTML =
+    '<div class="do"><b>做</b>' + o.scope.do + '</div><div class="dont"><b>不做</b>' + o.scope.dont + '</div>';
+  document.getElementById('ovSplit').innerHTML = o.split.map((s) => '<span class="chip">' + s + '</span>').join('');
+  document.getElementById('ovTradeoff').innerHTML = o.tradeoff.map((t) => '<li>' + t + '</li>').join('');
+}
+
+/* ════════ 渲染接口分组（按仓折叠 + 进度 + 批量；linked=有质疑牵连，强制单独二次确认） ════════ */
+var TOTAL_API = 0;
+(function renderApiGroups() {
+  var host = document.getElementById('apiGroups');
+  R.apiGroups.forEach((g, gi) => {
+    var open = gi === 0; // 默认展开第一组
+    var rows = g.apis.map((a, ai) => {
+      TOTAL_API++;
+      var lockTag = a.linked ? '<span class="lock-tag">复核</span>' : '';
+      return '<div class="api" data-linked="' + (a.linked ? '1' : '0') + '">' +
+        '<span class="verb ' + a.verb + '">' + a.verb.toUpperCase() + '</span>' +
+        '<div><div class="sig">' + a.sig + lockTag + '</div><div class="desc">' + a.desc + '</div>' +
+        '<div class="prov">提供方 <b>' + g.name + '</b></div></div>' +
+        '<div class="ck" onclick="ckOne(this)"></div></div>';
+    }).join('');
+    var grp = document.createElement('div');
+    grp.className = 'api-group' + (open ? ' open' : '');
+    grp.innerHTML =
+      '<div class="ag-head" onclick="this.closest(\'.api-group\').classList.toggle(\'open\')">' +
+      '<span class="ag-fold">▶</span><span class="ag-name">' + g.repo + ' · ' + g.name + '</span>' +
+      '<span class="ag-prog" data-grp>0 / ' + g.apis.length + '</span>' +
+      '<button class="ag-batch" onclick="event.stopPropagation();ckGroup(this)">本仓全部确认</button>' +
+      '</div><div class="ag-body">' + rows + '</div>';
+    host.appendChild(grp);
+  });
+  document.getElementById('fastLeft').textContent = TOTAL_API;
+  document.getElementById('abbProg').textContent = '接口 0 / ' + TOTAL_API + ' ✓';
+  document.getElementById('fastSub').innerHTML = '接口 <b id="fastCk">0</b>/' + TOTAL_API + ' ✓';
+  refreshFast();
+})();
+
+function ckOne(el) {
+  // 带质疑牵连（复核）的接口：勾选前强制单独二次确认
+  var api = el.closest('.api');
+  if (api.getAttribute('data-linked') === '1' && !el.classList.contains('on')) {
+    miniConfirm({
+      title: '⚠ 这条接口有质疑牵连',
+      bodyHtml: '<p>这条接口 <b>' + api.querySelector('.sig').childNodes[0].textContent.trim() +
+        '</b> 与慢拍里一条<b>阻塞级质疑</b>相关。确认它 = 你认可当前签名足够、不必等质疑裁完再改。</p>' +
+        '<div class="mc-strong">仍要单独确认这一条吗？</div>',
+      okText: '确认这一条',
+      onOk: () => { el.classList.add('on'); refreshFast(); refreshGroups(); }
+    });
+    return;
+  }
+  el.classList.toggle('on'); refreshFast(); refreshGroups();
+}
+function ckGroup(btn) {
+  // 本仓全部确认：跳过 linked（复核）的，提示单独确认
+  var grp = btn.closest('.api-group');
+  var skipped = 0;
+  grp.querySelectorAll('.api').forEach((api) => {
+    if (api.getAttribute('data-linked') === '1') { skipped++; return; }
+    api.querySelector('.ck').classList.add('on');
+  });
+  refreshFast(); refreshGroups();
+  ReqDesk.toast(skipped ? ('本仓已确认 · ' + skipped + ' 条复核项需单独确认') : '本仓接口已全部确认');
+}
+function ckAll(on) {
+  document.querySelectorAll('.api').forEach((api) => {
+    if (on && api.getAttribute('data-linked') === '1') return; // 批量不含复核项
+    api.querySelector('.ck').classList.toggle('on', on);
+  });
+  refreshFast(); refreshGroups();
+  if (on) {
+    var linked = document.querySelectorAll('.api[data-linked="1"]').length;
+    if (linked) ReqDesk.toast('已批量确认 · ' + linked + ' 条复核项请单独点确认');
+  }
+}
+function refreshGroups() {
+  document.querySelectorAll('.api-group').forEach((grp) => {
+    var apis = grp.querySelectorAll('.api'), on = grp.querySelectorAll('.api .ck.on').length;
+    var p = grp.querySelector('[data-grp]');
+    p.textContent = on + ' / ' + apis.length;
+    p.classList.toggle('full', on === apis.length);
+  });
+}
+function refreshFast() {
+  var cks = document.querySelectorAll('.api .ck').length;
+  var on = document.querySelectorAll('.api .ck.on').length;
+  var left = cks - on;
+  var ckEl = document.getElementById('fastCk'); if (ckEl) ckEl.textContent = on;
+  document.getElementById('abbProg').textContent = '接口 ' + on + ' / ' + cks + ' ✓';
+  document.getElementById('abbProg').classList.toggle('full', on === cks);
+  var st = document.getElementById('fastStatus');
+  var btn = document.getElementById('freezeBtn');
+  if (left === 0) {
+    btn.classList.remove('locked');
+    st.innerHTML = '✓ ' + cks + ' 个接口全部确认 —— 可以冻结合同 · 发令并行<div class="vb-substat">接口 <b class="ok">' + cks + '</b>/' + cks + ' ✓</div>';
+    st.classList.add('ready');
+  } else {
+    btn.classList.add('locked');
+    st.classList.remove('ready');
+    st.innerHTML = '快拍只看接口：<b>' + left + '</b> 个接口待确认<div class="vb-substat">接口 <b>' + on + '</b>/' + cks + ' ✓</div>';
+  }
+}
+
+/* ════════ 缺口指引：按钮保持可点（.locked 视觉同灰）；锁定时点它滚到第一个未完成项
+   —— 修主题四「双条件耦合卡壳」：用 disabled 会让点击无反应、找不到缺口在哪 ════════ */
+var GAP_FINDERS = {};
+function wireGapGuide(btnId, finder) { GAP_FINDERS[btnId] = finder; }
+function gapGuide(btn) {
+  var finder = GAP_FINDERS[btn.id];
+  if (!finder) return;
+  var gap = finder();
+  if (gap) {
+    gap.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    gap.classList.remove('gap-flash'); void gap.offsetWidth; gap.classList.add('gap-flash');
+    ReqDesk.toast('还差这一处 · 已滚动并高亮');
+  }
+}
+wireGapGuide('freezeBtn', () => {
+  // 切到接口 tab，找第一个未勾的接口
+  document.querySelector('.tab[onclick*="pane-contract"]').click();
+  var firstGroup = null;
+  var first = Array.prototype.find.call(document.querySelectorAll('.api'), (api) => !api.querySelector('.ck').classList.contains('on'));
+  if (first) { var g = first.closest('.api-group'); if (g) g.classList.add('open'); }
+  return first;
+});
+
+/* ════════ 快拍：冻结发令（轻二次确认，修主题四发令枪无二次确认） ════════ */
+function askFreeze() {
+  var btn = document.getElementById('freezeBtn');
+  if (btn.classList.contains('locked')) { gapGuide(btn); return; } // 锁定 → 缺口指引
+  miniConfirm({
+    title: '⚔ 冻结合同 · 发令并行',
+    bodyHtml: '<p>确认接口后，对接合同将<b>冻结</b>，并发令各端工人<b>并行</b>开工。</p>' +
+      '<div class="mc-strong">将冻结 <b>' + TOTAL_API + '</b> 条接口、发令 <b>' + R.apiGroups.length + '</b> 个仓的工人并行。确认？</div>' +
+      '<p style="color:var(--ink-faint);font-size:12.5px">冻结后慢拍解锁，可继续逐块挑刺、裁质疑。</p>',
+    okText: '冻结并发令',
+    onOk: () => {
+      ReqDesk.stamp('令', () => {
+        document.getElementById('bnFast').classList.remove('on');
+        document.getElementById('bnFast').classList.add('done');
+        document.getElementById('bnSlow').classList.remove('locked');
+        document.getElementById('bnSlow').classList.add('on');
+        document.getElementById('phaseChip').textContent = '你在「慢拍 · 挑刺」';
+        document.getElementById('stepFast').style.display = 'none';
+        document.getElementById('stepSlow').style.display = 'block';
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        ReqDesk.toast('合同已冻结 · 各端工人开始并行；现在慢拍逐块挑刺');
+      });
+    }
+  });
+}
+
+/* ════════ 慢拍：质疑（批量驳回 + 阻塞强制单独裁 + 改判↺ + 回执） ════════ */
+var TOTAL_CHAL = 0;
+(function renderChals() {
+  var host = document.getElementById('chalList');
+  R.chals.forEach((c, i) => {
+    TOTAL_CHAL++;
+    var blockTag = c.blocking ? '<span class="lock-tag">阻塞</span>' : '';
+    var el = document.createElement('div');
+    el.className = 'chal';
+    el.setAttribute('data-blocking', c.blocking ? '1' : '0');
+    el.innerHTML =
+      '<div class="q"><span class="qn">疑·' + (i + 1) + '</span><span>' + c.q + blockTag + '</span></div>' +
+      '<div class="resp"><b>设计者回应</b>' + c.resp + '</div>' +
+      '<div class="rule-row">' +
+      '<button class="rbtn acc" onclick="rule(this,\'acc\')">接受质疑</button>' +
+      '<button class="rbtn rej" onclick="rule(this,\'rej\')">驳回（已覆盖）</button>' +
+      '<span class="verdict v-acc">✓ 已接受 · 回补设计 <button class="rbtn rejudge" style="padding:3px 11px;margin-left:6px" onclick="rejudge(this)">改判 ↺</button></span>' +
+      '<span class="verdict v-rej">— 已驳回 <button class="rbtn rejudge" style="padding:3px 11px;margin-left:6px" onclick="rejudge(this)">改判 ↺</button></span>' +
+      '</div>';
+    host.appendChild(el);
+  });
+  document.getElementById('slowLeft').textContent = TOTAL_CHAL;
+  document.getElementById('cbbProg').textContent = '质疑 0 / ' + TOTAL_CHAL + ' ✓';
+  document.getElementById('counter').textContent = '待裁决 ' + TOTAL_CHAL + ' / ' + TOTAL_CHAL;
+  document.getElementById('slowSub').innerHTML = '质疑 <b id="slowCk">0</b>/' + TOTAL_CHAL + ' ✓ · 接口 <b class="ok">已冻结</b>';
+})();
+
+function rule(btn, v) {
+  var c = btn.closest('.chal');
+  c.classList.remove('acc', 'rej'); c.classList.add('judged', v);
+  echo('已' + (v === 'acc' ? '接受' : '驳回') + '「疑·' + (idxOf(c) + 1) + '」');
+  refreshSlow();
+}
+function rejudge(btn) {
+  var c = btn.closest('.chal');
+  c.classList.remove('judged', 'acc', 'rej');
+  echo('已改判「疑·' + (idxOf(c) + 1) + '」· 回到待裁决');
+  refreshSlow();
+}
+function rejAllNonBlocking() {
+  var n = 0;
+  document.querySelectorAll('.chal').forEach((c) => {
+    if (c.getAttribute('data-blocking') === '1') return;     // 阻塞级强制单独裁
+    if (c.classList.contains('judged')) return;
+    c.classList.remove('acc'); c.classList.add('judged', 'rej'); n++;
+  });
+  var blockLeft = document.querySelectorAll('.chal[data-blocking="1"]:not(.judged)').length;
+  echo('已批量驳回 ' + n + ' 条非阻塞质疑' + (blockLeft ? ' · 还剩 ' + blockLeft + ' 条阻塞级需单独裁' : ''));
+  refreshSlow();
+  if (blockLeft) ReqDesk.toast('已批量驳回 · ' + blockLeft + ' 条阻塞级请单独裁');
+}
+function idxOf(c) { return Array.prototype.indexOf.call(document.querySelectorAll('.chal'), c); }
+function echo(msg) {
+  var e = document.getElementById('chalEcho');
+  e.innerHTML = '最近操作：<b>' + msg + '</b>（可在对应质疑上「改判 ↺」）';
+}
+function refreshSlow() {
+  var total = document.querySelectorAll('.chal').length;
+  var judged = document.querySelectorAll('.chal.judged').length;
+  var left = total - judged;
+  document.getElementById('counter').textContent = left ? ('待裁决 ' + left + ' / ' + total) : '✓ 全部裁决完';
+  document.getElementById('counter').style.color = left ? 'var(--cinnabar)' : 'var(--jade)';
+  document.getElementById('cbbProg').textContent = '质疑 ' + judged + ' / ' + total + ' ✓';
+  document.getElementById('cbbProg').classList.toggle('full', left === 0);
+  var st = document.getElementById('slowStatus');
+  var btn = document.getElementById('approveBtn');
+  if (left === 0) {
+    btn.classList.remove('locked'); st.classList.add('ready');
+    st.innerHTML = '✓ 质疑裁决完、接口已冻结 —— 可以通过 · 发令并行<div class="vb-substat">质疑 <b class="ok">' + total + '</b>/' + total + ' ✓ · 接口 <b class="ok">已冻结</b></div>';
+  } else {
+    btn.classList.add('locked'); st.classList.remove('ready');
+    st.innerHTML = '还有 <b>' + left + '</b> 条质疑没裁决<div class="vb-substat">质疑 <b>' + judged + '</b>/' + total + ' ✓ · 接口 <b class="ok">已冻结</b></div>';
+  }
+}
+wireGapGuide('approveBtn', () => {
+  document.querySelector('.tab[onclick*="pane-chal"]').click();
+  return Array.prototype.find.call(document.querySelectorAll('.chal'), (c) => !c.classList.contains('judged'));
+});
+
+/* ════════ 慢拍：通过 = 发令（轻二次确认，盖准印） ════════ */
+function askApprove() {
+  var btn = document.getElementById('approveBtn');
+  if (btn.classList.contains('locked')) { gapGuide(btn); return; } // 锁定 → 缺口指引
+  miniConfirm({
+    title: '准 · 通过详细设计',
+    bodyHtml: '<p>质疑已裁完、接口已冻结。通过 = 灯②放行，进入并行。</p>' +
+      '<div class="mc-strong">将盖「准」印放行 <b>' + R.title + '</b>。确认？</div>',
+    okText: '盖「准」· 放行',
+    onOk: () => {
+      ReqDesk.stamp('准', () => {
+        if (R.waitId) ReqDesk.waits.resolve(R.waitId); // 消解灯②等你（三处计数同步）
+        ReqDesk.toast('已通过 · 发令枪响，各端工人开始并行');
+        setTimeout(() => { ReqDesk.go('workitem.html?id=' + REQ); }, 400);
+      });
+    }
+  });
+}
+
+/* ════════ 打回（理由必填 + 本灯第 N 次 + 10s 撤销浮条，修 B2） ════════ */
+var REJECT_KEY = 'reqdesk.rejects.' + REQ;
+function rejectCount() { return parseInt(sessionStorage.getItem(REJECT_KEY) || '0', 10); }
+function bumpReject() { var n = rejectCount() + 1; sessionStorage.setItem(REJECT_KEY, n); return n; }
+
+var rejectFrom = 'fast';
+function openReject(from) {
+  rejectFrom = from;
+  var box = document.getElementById('rejectBox');
+  box.classList.add('show');
+  var nth = rejectCount();
+  document.getElementById('rejectCnt').textContent = nth ? '（本灯已打回 ' + nth + ' 次）' : '';
+  // 连拒 2 次 → 升级对话提示
+  var esc = document.getElementById('escalateHint');
+  if (nth >= 2) {
+    esc.style.display = 'flex';
+    document.getElementById('escalateText').innerHTML = '本灯已打回 <b>' + nth + '</b> 次，<b>再拒 1 次将转对话深聊</b>（不再来回打回，直接和包工头把分歧聊透）。';
+  } else { esc.style.display = 'none'; }
+  box.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  document.getElementById('rejectText').focus();
+}
+function closeReject() { document.getElementById('rejectBox').classList.remove('show'); }
+function submitReject() {
+  var ta = document.getElementById('rejectText');
+  var reason = ta.value.trim();
+  if (!reason) { // 理由必填
+    ta.style.borderColor = 'var(--cinnabar)';
+    document.getElementById('rejectReqHint').innerHTML = '<b style="color:var(--cinnabar)">理由必填 · 不能空着打回</b>';
+    ta.focus();
+    return;
+  }
+  // 二次确认带后果（本灯第 N 次）
+  var willBe = rejectCount() + 1;
+  miniConfirm({
+    title: '⚠ 确认打回？',
+    bodyHtml: '<p>打回会让设计回到上一步重改' + (rejectFrom === 'slow' ? '（含已冻结合同需重确认）' : '') + '。</p>' +
+      '<div class="mc-strong">这是本灯第 <b>' + willBe + '</b> 次打回。' +
+      (willBe >= 3 ? '<br>已达升级阈值：<b>将转对话深聊</b>。' : '') + '</div>' +
+      '<p style="color:var(--ink-faint);font-size:12.5px">理由：' + escapeHtmlLocal(reason).slice(0, 60) + (reason.length > 60 ? '…' : '') + '</p>',
+    okText: '确认打回',
+    onOk: () => {
+      closeReject();
+      // 提交后 10s 撤销浮条（倒计时走完才真落地）
+      ReqDesk.undoBar({
+        msg: '已打回「<b>' + R.title + '</b>」设计 · 第 ' + willBe + ' 次',
+        seconds: 10,
+        onUndo: () => { ReqDesk.toast('已撤销打回 · 设计未回退'); },
+        onExpire: () => {
+          var nth = bumpReject();
+          ReqDesk.toast('打回已生效 · 包工头收到理由，回去改这一处' + (nth >= 3 ? ' · 已转对话深聊' : ''));
+          ta.value = '';
+        }
+      });
+    }
+  });
+}
+
+/* ════════ md 渲染 / tab / 二次确认小卡 ════════ */
+document.getElementById('mdSource').textContent = R.detailMd;
+document.getElementById('mdRender').innerHTML = (window.marked ? marked.parse(R.detailMd) : '<p style="color:var(--cinnabar)">（marked 未加载，检查网络）</p>');
+function mdView(btn, mode) {
+  btn.parentElement.querySelectorAll('button').forEach((b) => { b.classList.remove('on'); });
+  btn.classList.add('on');
+  document.getElementById('mdRender').classList.toggle('hide', mode !== 'render');
+  document.getElementById('mdSource').classList.toggle('show', mode === 'source');
+}
+function docTab(btn, pane) {
+  btn.parentElement.querySelectorAll('.tab').forEach((t) => { t.classList.remove('active'); });
+  btn.classList.add('active');
+  // 同 section 内切换
+  var sec = btn.closest('section');
+  sec.querySelectorAll('.docpane').forEach((p) => { p.classList.remove('active'); });
+  document.getElementById(pane).classList.add('active');
+}
+function miniConfirm(opts) {
+  var mask = document.getElementById('miniConfirm');
+  var card = document.getElementById('mcCard');
+  card.innerHTML =
+    '<h3>' + opts.title + '</h3>' + opts.bodyHtml +
+    '<div class="mc-acts">' +
+    '<button class="btn ghost" id="mcCancel">再想想</button>' +
+    '<button class="btn solid" id="mcOk">' + (opts.okText || '确认') + '</button>' +
+    '</div>';
+  mask.classList.add('show');
+  document.getElementById('mcCancel').onclick = () => { mask.classList.remove('show'); };
+  document.getElementById('mcOk').onclick = () => { mask.classList.remove('show'); if (opts.onOk) opts.onOk(); };
+}
+document.getElementById('miniConfirm').addEventListener('click', function (e) {
+  if (e.target === this) this.classList.remove('show');
+});
+function escapeHtmlLocal(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/* ════════ 合同已变重弹（§5.6 拍板前校验决定过期）：?stale 演示 ════════ */
+if (/[?&]stale/.test(location.search)) {
+  setTimeout(() => {
+    // 把一条已勾接口标红、待重确认
+    document.querySelector('.tab[onclick*="pane-contract"]').click();
+    var api = document.querySelector('.api');
+    if (api) {
+      var ck = api.querySelector('.ck'); ck.classList.remove('on');
+      api.querySelector('.sig').insertAdjacentHTML('beforeend', '<span class="lock-tag" style="background:var(--cinnabar);color:#fff;border:none">合同已变·待重确认</span>');
+      api.classList.add('gap-flash');
+      refreshFast(); refreshGroups();
+    }
+    miniConfirm({
+      title: '⚠ 合同已变 · 请重新确认',
+      bodyHtml: '<p>你慢拍裁质疑期间，一次自治小改触动了对接合同（标红那条）。</p>' +
+        '<div class="mc-strong">为防你基于旧版本拍板，已<b>拒绝通过</b>并要求重新确认变动的接口。</div>',
+      okText: '去重新确认',
+      onOk: () => { document.querySelector('.api.gap-flash') && document.querySelector('.api.gap-flash').scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+    });
+  }, 600);
+}
+</script>
+</body>
+</html>
