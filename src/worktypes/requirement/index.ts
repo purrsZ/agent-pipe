@@ -89,15 +89,22 @@ function onRunCompleted(item: WorkItem, ev: WorkItemEvent): Transition {
     case PHASE.split:
       return role === 'owner' ? enterPhase(item, PHASE.implement, 'split_done', ev) : {};
     case PHASE.implement:
-      // worker finished → wake the owner to assess the batch (Stage 4: owner snapshot decides
-      // if every repo is in). owner finished → the batch is judged complete, advance.
-      if (role === 'worker') return { dispatch: [ownerSpec(item, 'assess')] };
+      // T4 owner-snapshot fan-in: only the LAST worker (no siblings still running — the
+      // container injects `runningWorkers`, see reducer.enrichEventForType) wakes the owner to
+      // assess the batch; earlier workers rest. The single owner assess then advances, so the
+      // batch is never judged complete while a repo is still in flight. owner finished → advance.
+      if (role === 'worker') {
+        return runningWorkersOf(ev.payload) === 0 ? { dispatch: [ownerSpec(item, 'assess')] } : {};
+      }
       if (role === 'owner') return enterPhase(item, PHASE.integrate, 'workers_done', ev);
       return {};
     case PHASE.integrate:
-      // A fix worker finished → re-run the static integration对账 (idempotent effect). The
-      // integration verdict drives the phase, not a run conclusion.
-      return role === 'worker' ? { effects: [{ kind: 'integration_check' }] } : {};
+      // A fix worker finished → re-run the static integration对账 (idempotent effect), but only
+      // once the whole fix batch is in (runningWorkers===0) so a re-check never races a repo
+      // still being fixed. The integration verdict drives the phase, not a run conclusion.
+      return role === 'worker' && runningWorkersOf(ev.payload) === 0
+        ? { effects: [{ kind: 'integration_check' }] }
+        : {};
     default:
       return {};
   }
@@ -250,6 +257,14 @@ function stageKey(phase: string): string {
 function roleOf(payload: unknown): string | undefined {
   const o = asObject(payload);
   return typeof o.role === 'string' ? o.role : undefined;
+}
+
+// In-flight sibling-worker count the container injects onto an owner-workers run conclusion
+// (reducer.enrichEventForType, T4). Absent ⇒ 0: a hand-built event in a pure unit test, or a
+// single-worker batch, both mean "no siblings left" → treat this conclusion as the last.
+function runningWorkersOf(payload: unknown): number {
+  const v = asObject(payload).runningWorkers;
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0;
 }
 
 function ownerAssignmentIdOf(ev: WorkItemEvent | undefined): string | undefined {

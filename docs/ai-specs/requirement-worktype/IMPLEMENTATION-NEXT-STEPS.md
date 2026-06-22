@@ -20,9 +20,12 @@
 | `fe1f7ef` | S6 anchorAction 不漂移断言（R24.AC-7） |
 | `7f2c868` | index 接线：strategyFor（write worker）+ integration_check handler 注册 |
 | `1844761` | **T1** `/req` 触发闭包 + 命令接线（仿 runProbe）：commands onRequirement/handleRequirement（重复 --repo 多端）+ index runRequirement；commands-req 测试 + index-wiring 断言 |
-| _本笔_ | **T2** 工作台 HTTP server 起停：index 接 createWorkbenchAdapter+createWorkbenchServer；新增 `src/workbench/auth.ts`（createTokenAuth 本人鉴权，Bearer/cookie 常量时比对）；config workbench 块（enabled/host/port/token/operator）；releaseResources 收尾关停；auth 单测+真服务端到端+config 测试 |
+| `7dc62d2` | **T2** 工作台 HTTP server 起停：index 接 createWorkbenchAdapter+createWorkbenchServer；新增 `src/workbench/auth.ts`（createTokenAuth 本人鉴权，Bearer/cookie 常量时比对）；config workbench 块（enabled/host/port/token/operator）；releaseResources 收尾关停；auth 单测+真服务端到端+config 测试 |
+| `9048d82` | **T3** 需求灯卡：buildAnchorCard noun 去"调查"化 + buildCheckpointCard/AnsweredCard（通过/打回 callback）；`lights.ts`(灯标签/4灯rail)；index surfaceCheckpoints 推灯卡 + handleCheckpointAction 走 workbenchAdapter.actions.resolve 单写路径；lights/card/wiring 测试 |
+| _本笔_ | **T4** owner 多 worker 聚合：reducer enrichEventForType 注入中性 runningWorkers → worktype "最后一个 worker 才唤醒 owner / owner 完成进 integrate"；over-cap warn surface；worktype 单测 + e2e 慢仓 hold + 三仓告警。⚠️ 补派/批量窗口(R01.AC-9)推迟 |
 
 > 注：`docs/ai-specs/requirement-worktype/` 等设计文档仍未跟踪，按需 `git add docs/`。
+> ⚠️ `src/feishu/event-router.ts` 有用户并行的 AskUserQuestion 调试改动（TEMP debug + messageId 取 context），未纳入 T1–T3 提交，留用户处理。
 
 ## 续作任务（建议顺序）
 
@@ -39,16 +42,20 @@
 - 生命周期：server 交给 `createReleaseResources` 先关（停收请求）再拆 store/pool；shutdown + crashGuard 共用。
 - ⚠️ 浏览器写需先有 `wb_token` cookie（server 不发 cookie，无 /auth 路由）——真机由内网穿透代理注入或手动设 cookie；Stage 7 走查。
 
-### T3. 飞书灯卡（`src/feishu/card.ts`，kernel 中性）  ←（下一笔）
-- 标题去"调查"化：`buildAnchorCard` 的 `调查 ·` 前缀参数化，或新建 requirement 专用构造器（4 灯 rail / 各端工人 / 决策台账，用 `stage/status` 中性字段）。
-- 灯交互卡：button `value` 带 `{workitemId, checkpoint, decision}`（feishu 只塞不解释）。
-- card.action 消费侧 adapter（workitems 层）：解释 value → 按 checkpoint 找 open wait → `resolveWait(waitId,{operator,reason,decision})`。kernel 分发侧 `card.action.trigger` 已就绪（S2，`parseCardAction`）。
+### ~~T3. 飞书灯卡~~ ✅ 已完成（`9048d82`）
+- 去"调查"化：`buildAnchorCard` 加 `noun` 参数（默认"调查"）；index `anchorNoun(item.type)` 在 runRequirement/runDone/postStatus 三处按类型传"需求"。
+- 灯交互卡：`buildCheckpointCard`（橙卡，通过/打回 callback，value `{kind:'ckpt', itemId, waitId, boundary, approved}`）+ `buildCheckpointAnsweredCard`（已通过/已打回/已处理）。灯标签/4 灯 rail 在 `lights.ts`（worktypes 纯）渲染后传入中性卡。
+- 推送：index `postStatus.surfaceCheckpoints` 每个 committed 事件后查 `listOpenWaits` 找新 human checkpoint wait（reducer 先持久化 wait 再 onCommitted，无死锁），推灯卡回贴锚点；in-memory dedup（重启可能重发）。
+- 消费：`handleCardAction` 按 `value.kind` 分流 → `handleCheckpointAction` → `workbenchAdapter.actions.resolve`（与看板同一 resolveWait 单写路径，card 带精确 waitId 免查找）→ 终态 patch。`workbenchAdapter` 已提出 enabled-IIFE，板关停仍可消费。
+- ⚠️ 灯卡终态 patch 需 `action.messageId`（用户并行的 event-router 修复让 WS 卡片回调能取到 messageId；缺它则跳过 patch，resolve 仍生效）。
 
-### T4. owner 快照批量唤醒精化（多 worker 聚合）
-- 当前骨架：单 worker 跑通；多 worker 的"全部完成→进集成验证"靠 owner 快照聚合（container-concurrency 批量唤醒窗口 `(lastOwnerRunEffectSeq, currentOwnerRunEffectSeq]` + releaseWakePending owner-workers 补派）。
-- owner run handler 收尾时据快照判该批是否齐、是否再派/进 phase（worker-runtime 域）。
+### ~~T4. owner 快照批量唤醒（多 worker 聚合）~~ ✅ 已完成（owner fan-in；补派/批量窗口部分推迟）
+- 实现路径（避开纯 worktype 不能数 worker 的约束）：reducer `enrichEventForType` 在 apply 内（强一致、closeRunConclusion 之后）把中性 `runningWorkers`（DB status=running∧role=worker）注入给 **onEvent 看的事件副本**——提交/观察事件不变，solo 零回归。
+- worktype gate：`PHASE.implement` worker 完成仅当 `runningWorkers===0`（最后一个）才唤醒 owner assess，其余静默等；owner 完成即进 `集成验证`。`PHASE.integrate` 同理——fix 批全部完成才重核 integration_check。`runningWorkersOf` 缺省 0（单 worker / 纯单测向后兼容）。
+- 测试：worktype 单测（runningWorkers>0 静默 / ===0 唤醒 / 缺省兼容 / integrate 批门）+ e2e（慢 repo-b 卡住 `并行实现` 不提前推进 → 双 worker 齐了才进 灯③；三仓 over-cap 告警）。460 测试绿。
+- ⚠️ **仍开口（R01.AC-9 / R02.AC-3/7）**：>`maxWorkersPerItem`(默认 2) 的仓会被 wakePending **丢弃不补派**——reducer 已加显式 warn surface，workaround：`WORKITEMS_MAX_WORKERS_PER_ITEM ≥ 单需求最大仓数`。完整"批量唤醒窗口 + releaseWakePending 按 role 补派"是 container-concurrency 域剩余的高风险改造（需 wakePending 布尔→spec 队列的 data-model 改），单列后续。
 
-### T5. 设计/知识 agent run（S5 live 半）
+### T5. 设计/知识 agent run（S5 live 半）  ←（下一笔）
 - spec-design run effect handler（design-phase）：调起跑 spec-design 的 managed run，产物落 `contract/`+`design/`，收尾 emit `design_ready`；升格用 `design.ts` 的 `promoteToContract`。
 - 冷启索引 run（knowledge）：readonly 考古 run 填 `map/conventions/runbook/pitfalls`，写 manifest（`generatedAtCommit`）；选择性注入接 `composeWorkerPrompt` 的 `knowledge` 参数。
 

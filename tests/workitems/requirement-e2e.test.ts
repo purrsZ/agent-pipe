@@ -13,10 +13,10 @@ import { createIntegrationCheckHandler } from '../../src/worktypes/requirement/i
 import { PHASE } from '../../src/worktypes/requirement/phases.js';
 import { registerRequirement } from '../../src/worktypes/requirement/index.js';
 
-// Stage 3 "skeleton runs end to end": drive the full 7-phase lifecycle through the real
-// container (single-flight gate, checkpoint waits, worker fan-out) with a generic auto-
-// completing run handler standing in for real agents. One repo ⇒ one worker (multi-worker
-// batch aggregation is Stage 4).
+// Drive the full 7-phase lifecycle through the real container (single-flight gate, checkpoint
+// waits, worker fan-out) with a generic auto-completing run handler standing in for real agents.
+// One repo ⇒ one worker; T4 adds the multi-worker owner fan-in ("advance only once all workers
+// are in") and surfaces the >maxWorkersPerItem over-cap gap.
 
 let tmpDir: string;
 let seq = 0;
@@ -40,7 +40,7 @@ afterEach(async () => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-function harness() {
+function harness(opts: { workerDelayMs?: Record<string, number> } = {}) {
   seq += 1;
   const store = new WorkitemsStore(path.join(tmpDir, `wi-${seq}.sqlite`), clock);
   const registry = new WorkTypeRegistry();
@@ -69,6 +69,11 @@ function harness() {
     canResume: () => false,
     run: async (ctx: EffectContext) => {
       const aid = ctx.assignment?.id ?? 'x';
+      // Optional per-repo worker delay so a test can pin one worker still-running while a
+      // sibling finishes (T4 owner fan-in: the batch must wait for the slow repo).
+      const repo = ctx.assignment?.repo;
+      const delay = repo ? (opts.workerDelayMs?.[repo] ?? 0) : 0;
+      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
       ctx.heartbeat();
       ctx.writeArtifact(`assignments/${aid}/report.md`, `ok ${aid}`, 'report');
     },
@@ -170,5 +175,82 @@ describe('requirement skeleton end-to-end', () => {
       const open = store.listOpenWaits(item.id).filter((w) => w.reason.startsWith('checkpoint:'));
       expect(open.length).toBe(1);
     });
+  });
+
+  // Resolve 灯①/灯②快/灯②慢 (contract/design/split) so the item lands in 并行实现 and fans out
+  // a worker per repo. Stops before the worker batch so a test can observe the fan-in.
+  async function walkToImplement(
+    store: WorkitemsStore,
+    api: WorkitemsApi,
+    itemId: string,
+  ): Promise<void> {
+    for (const boundary of [PHASE.contract, PHASE.design, PHASE.split]) {
+      await waitFor(() =>
+        expect(store.listOpenWaits(itemId).some((w) => w.reason === `checkpoint:${boundary}`)).toBe(
+          true,
+        ),
+      );
+      const wait = store.listOpenWaits(itemId).find((w) => w.reason === `checkpoint:${boundary}`)!;
+      api.resolveWait(wait.id, { operator: 'lichao', reason: 'ok', decision: { approved: true } });
+    }
+    // Wait until the worker batch is fanned out. Don't assert phase===implement: with instant
+    // workers the phase races straight past 并行实现, so the durable precondition is "workers
+    // dispatched" (a slow-repo test then pins the phase via its own delay).
+    await waitFor(() =>
+      expect(store.listAssignments(itemId).some((a) => a.role === 'worker')).toBe(true),
+    );
+  }
+
+  it('T4: 并行实现 does not advance until ALL workers are in — a slow second repo holds it', async () => {
+    const { store, api } = harness({ workerDelayMs: { 'repo-b': 300 } });
+    const item = api.createWorkItem({
+      type: 'requirement',
+      title: '双端需求',
+      source: {},
+      repos: ['repo-a', 'repo-b'],
+    }).item;
+
+    await walkToImplement(store, api, item.id);
+
+    // repo-a finishes fast while repo-b is still running.
+    await waitFor(() => {
+      const ws = store.listAssignments(item.id).filter((a) => a.role === 'worker');
+      expect(ws.find((a) => a.repo === 'repo-a')?.status).toBe('done');
+      expect(ws.find((a) => a.repo === 'repo-b')?.status).toBe('running');
+    });
+    // T4 fan-in: one finished repo must NOT advance the batch — still in 并行实现, no 灯③ yet.
+    expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.implement);
+    expect(
+      store.listOpenWaits(item.id).some((w) => w.reason === `checkpoint:${PHASE.deliver}`),
+    ).toBe(false);
+
+    // once repo-b is in too, the owner assesses the full batch → 集成验证 → 灯③ appears.
+    await waitFor(() =>
+      expect(
+        store.listOpenWaits(item.id).some((w) => w.reason === `checkpoint:${PHASE.deliver}`),
+      ).toBe(true),
+    );
+    const workers = store.listAssignments(item.id).filter((a) => a.role === 'worker');
+    expect(workers).toHaveLength(2);
+    expect(workers.map((w) => w.repo).sort()).toEqual(['repo-a', 'repo-b']);
+  });
+
+  it('T4: an over-cap repo (repos > maxWorkersPerItem) is surfaced with a warning (R01.AC-9 gap)', async () => {
+    const { store, api } = harness(); // cap = 2
+    const item = api.createWorkItem({
+      type: 'requirement',
+      title: '三端需求',
+      source: {},
+      repos: ['repo-a', 'repo-b', 'repo-c'],
+    }).item;
+
+    await walkToImplement(store, api, item.id);
+
+    // entering 并行实现 fans out 3 workers; cap=2 parks the third and logs it loudly.
+    await waitFor(() =>
+      expect(logger.warn.mock.calls.some((c) => String(c[1] ?? '').includes('over cap'))).toBe(
+        true,
+      ),
+    );
   });
 });

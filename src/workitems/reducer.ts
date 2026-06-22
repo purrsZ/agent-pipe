@@ -222,7 +222,7 @@ export class ReducerRuntime {
       }
       const transition = mergeTransitions(
         this.containerTransition(event, now, postCommit),
-        type.onEvent(item, event),
+        type.onEvent(item, this.enrichEventForType(item, event)),
       );
       this.applyTransitionWrites(item, seq, transition);
       if (isRunConclusion(pending.kind) && item.wakePending) {
@@ -604,6 +604,16 @@ export class ReducerRuntime {
       return;
     }
     if (this.shouldWakePending(item, spec)) {
+      // An over-cap worker dispatch in owner-workers is parked on the wakePending flag, which
+      // owner-workers releaseWakePending does NOT re-dispatch yet (补派 / R01.AC-9 still open).
+      // Surface it loudly so a >maxWorkersPerItem-repo requirement doesn't silently drop a repo —
+      // the workaround is to raise WORKITEMS_MAX_WORKERS_PER_ITEM ≥ repos-per-requirement.
+      if (this.topologyOf(item) === 'owner-workers' && spec.role === 'worker') {
+        this.deps.logger?.warn?.(
+          { workitemId: item.id, repo: spec.repo ?? null, cap: this.deps.cfg.maxWorkersPerItem },
+          'owner-workers worker dispatch over cap → parked (补派 unimplemented, R01.AC-9); raise WORKITEMS_MAX_WORKERS_PER_ITEM',
+        );
+      }
       this.deps.store.updateWorkItem(item.id, { wakePending: true, updatedAt: now });
       return;
     }
@@ -682,6 +692,24 @@ export class ReducerRuntime {
 
   private topologyOf(item: WorkItem): 'solo' | 'owner-workers' {
     return this.deps.registry.get(item.type)?.topology(item) ?? 'solo';
+  }
+
+  // Owner snapshot fan-in (T4): a pure worktype can't count its own in-flight workers, so for
+  // owner-workers items the container hands the run-conclusion event a strongly-consistent
+  // `runningWorkers` count (DB status=running AND role=worker, read AFTER closeRunConclusion
+  // marked the finishing assignment done — so a worker's own conclusion sees the OTHER workers).
+  // The worktype uses it to fan a batch in ("last worker done → wake the owner / re-check"). This
+  // is a transient enrichment for onEvent only — the committed + observed `event` stays clean, so
+  // persistence is byte-identical and solo (probe/noop) is untouched. Neutral count, no business
+  // interpretation (no phase compare), holding the container red-line.
+  private enrichEventForType(item: WorkItem, event: WorkItemEvent): WorkItemEvent {
+    if (this.topologyOf(item) !== 'owner-workers') return event;
+    if (event.kind !== 'run_completed' && event.kind !== 'run_failed') return event;
+    const runningWorkers = this.deps.store.countRunningWorkers(item.id);
+    return {
+      ...event,
+      payload: { ...(isObject(event.payload) ? event.payload : {}), runningWorkers },
+    };
   }
 
   private releaseWakePending(item: WorkItem, seq: number, now: number): void {

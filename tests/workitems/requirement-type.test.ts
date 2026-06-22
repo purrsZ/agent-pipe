@@ -72,14 +72,39 @@ describe('requirement lifecycle transitions', () => {
     expect(out.dispatch?.map((d) => d.repo).sort()).toEqual(['repo-a', 'repo-b']);
   });
 
-  it('worker done in 并行实现 wakes an owner to assess; owner done advances to 集成验证', () => {
+  it('last worker (runningWorkers===0) wakes an owner to assess; owner done advances to 集成验证', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a'] });
-    const onWorker = t.onEvent(item, ev('run_completed', { role: 'worker' }));
+    // single repo / last worker: the container injects runningWorkers:0 (absent ⇒ 0 too).
+    const onWorker = t.onEvent(item, ev('run_completed', { role: 'worker', runningWorkers: 0 }));
     expect(onWorker.phase).toBeUndefined();
     expect(onWorker.dispatch?.[0]).toMatchObject({ role: 'owner' });
 
     const onOwner = t.onEvent(item, ev('run_completed', { role: 'owner' }));
     expect(onOwner.phase).toEqual({ to: PHASE.integrate, reason: 'workers_done' });
+  });
+
+  it('T4: a non-last worker (runningWorkers>0) rests — no owner assess until the batch is in', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a', 'repo-b'] });
+    // a sibling worker is still running → do nothing, wait for it.
+    const early = t.onEvent(item, ev('run_completed', { role: 'worker', runningWorkers: 1 }));
+    expect(early).toEqual({});
+    // the last worker (no siblings left) wakes the owner exactly once.
+    const last = t.onEvent(item, ev('run_completed', { role: 'worker', runningWorkers: 0 }));
+    expect(last.dispatch?.[0]).toMatchObject({ role: 'owner' });
+  });
+
+  it('T4: a worker conclusion with no runningWorkers field is treated as the last (back-compat)', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a'] });
+    const out = t.onEvent(item, ev('run_completed', { role: 'worker' }));
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner' });
+  });
+
+  it('T4: in 集成验证 a fix worker re-checks integration only once the whole fix batch is in', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.integrate });
+    expect(t.onEvent(item, ev('run_completed', { role: 'worker', runningWorkers: 1 }))).toEqual({});
+    expect(
+      t.onEvent(item, ev('run_completed', { role: 'worker', runningWorkers: 0 })).effects?.[0],
+    ).toMatchObject({ kind: 'integration_check' });
   });
 
   it('灯③ — integration_check_passed in 集成验证 raises the delivery checkpoint', () => {
