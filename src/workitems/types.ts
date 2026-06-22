@@ -115,6 +115,10 @@ export interface AssignmentSpec {
   retries?: number;
   brief?: string;
   payload?: unknown;
+  // Enables the Owner→Worker parent chain (D-19). The reducer writes it into
+  // assignment.parent_id (replacing the historical hard-coded null) so batch
+  // attribution / cascade abort can read it back. Optional: solo dispatches omit it.
+  parentAssignmentId?: string;
 }
 
 export interface WaitSpec {

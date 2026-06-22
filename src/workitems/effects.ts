@@ -63,19 +63,20 @@ export class EffectRuntime {
   }
 
   poke(workitemId: string): void {
-    if (!this.intakeOpen || this.inflight.has(workitemId)) return;
-    // drainOne is fire-and-forget; a synchronous throw (store/handler error) or a
+    if (!this.intakeOpen) return;
+    // drainPending is fire-and-forget; a synchronous throw (store/handler error) or a
     // rejected promise would otherwise surface as an unhandledRejection and crash
     // the process. Swallow to the log — the effect stays inflight/pending and is
-    // retried on the next poke or restart.
-    this.drainOne(workitemId).catch((err) => {
+    // retried on the next poke or restart. Per-assignment de-dup lives in drainPending,
+    // so the old `inflight.has(workitemId)` guard is gone (it blocked concurrency).
+    this.drainPending(workitemId).catch((err) => {
       this.deps.logger?.error?.({ err, workitemId }, 'effect drain failed');
     });
   }
 
   recoverRunning(effectId: number): void {
     const effect = this.deps.store.getEffect(effectId);
-    if (effect?.status !== 'running' || this.inflight.has(effect.workitemId)) return;
+    if (effect?.status !== 'running' || this.inflight.has(this.inflightKey(effect))) return;
     if (this.isTerminalWorkitem(effect.workitemId)) {
       this.abort(effectId, 'workitem_terminal');
       return;
@@ -91,7 +92,7 @@ export class EffectRuntime {
 
   recoverRun(effectId: number): void {
     const effect = this.deps.store.getEffect(effectId);
-    if (effect?.status !== 'running' || this.inflight.has(effect.workitemId)) return;
+    if (effect?.status !== 'running' || this.inflight.has(this.inflightKey(effect))) return;
     if (this.isTerminalWorkitem(effect.workitemId)) {
       this.abort(effectId, 'workitem_terminal');
       return;
@@ -164,19 +165,34 @@ export class EffectRuntime {
     }
   }
 
-  private async drainOne(workitemId: string): Promise<void> {
-    if (!this.intakeOpen || this.inflight.has(workitemId)) return;
+  private async drainPending(workitemId: string): Promise<void> {
+    if (!this.intakeOpen) return;
     // Never run a handler for a terminal workitem — a leftover pending effect on a
     // done/failed item must not resurrect a zombie run (v4 #4). It stays parked;
     // terminal-ization (reducer) abandons such effects rather than executing them.
     if (this.isTerminalWorkitem(workitemId)) return;
 
     const inflightRows = this.deps.store.listInflightEffects(workitemId);
-    if (inflightRows.some((effect) => effect.status === 'running')) return;
 
-    const pending = inflightRows.find((effect) => effect.status === 'pending');
-    if (!pending) return;
+    if (this.topologyOf(workitemId) !== 'owner-workers') {
+      // Solo (probe/noop): byte-for-byte original behaviour — at most one effect in
+      // flight per workitem (the reducer single-flight gate guarantees ≤1 pending run).
+      if (inflightRows.some((effect) => effect.status === 'running')) return;
+      const pending = inflightRows.find((effect) => effect.status === 'pending');
+      if (pending) this.startPending(pending, workitemId);
+      return;
+    }
 
+    // owner-workers: start every pending effect whose assignment isn't already in
+    // flight (per-assignment concurrency). The reducer single-flight gate already
+    // capped how many were dispatched, so the effect layer never re-caps here.
+    for (const pending of inflightRows.filter((effect) => effect.status === 'pending')) {
+      if (this.inflight.has(this.inflightKey(pending))) continue;
+      this.startPending(pending, workitemId);
+    }
+  }
+
+  private startPending(pending: Effect, workitemId: string): void {
     const handler = this.handlers.get(pending.kind);
     if (!handler) {
       this.deps.store.setEffectStatus(pending.id, 'aborted');
@@ -187,10 +203,25 @@ export class EffectRuntime {
       this.poke(workitemId);
       return;
     }
-
     this.deps.store.setEffectStatus(pending.id, 'running');
     const effect = this.deps.store.getEffect(pending.id) ?? pending;
-    await this.executeEffect(effect, handler);
+    // Fire-and-forget so concurrent worker effects do not serialise. executeEffect
+    // registers itself in `inflight` synchronously before its first await, so the
+    // drain loop's per-assignment de-dup sees it on the next iteration.
+    void this.executeEffect(effect, handler);
+  }
+
+  private inflightKey(effect: Effect): string {
+    if (isObject(effect.payload) && typeof effect.payload.assignmentId === 'string') {
+      return effect.payload.assignmentId;
+    }
+    return `effect:${effect.id}`;
+  }
+
+  private topologyOf(workitemId: string): 'solo' | 'owner-workers' {
+    const item = this.deps.store.getWorkItem(workitemId);
+    if (!item) return 'solo';
+    return this.deps.registry.get(item.type)?.topology(item) ?? 'solo';
   }
 
   private async executeEffect(
@@ -201,7 +232,11 @@ export class EffectRuntime {
     const workitemId = effect.workitemId;
     const assignment = assignmentForEffect(this.deps.store, effect);
     const controller = new AbortController();
-    this.inflight.set(workitemId, { effectId: effect.id, controller });
+    // Keyed per-assignment (not per-workitem) so N workers on one workitem run
+    // concurrently and abort independently (R01.AC-2/5, D-10). Effects without an
+    // assignment fall back to a per-effect key so they never collide.
+    const key = this.inflightKey(effect);
+    this.inflight.set(key, { effectId: effect.id, controller });
 
     try {
       await invoke(this.contextFor(effect, assignment, controller));
@@ -226,7 +261,7 @@ export class EffectRuntime {
         this.deps.store.setEffectStatus(effect.id, 'aborted');
       }
     } finally {
-      this.inflight.delete(workitemId);
+      this.inflight.delete(key);
       // The assignment is terminal by now (conclusion emitted above, or aborted), so
       // its heartbeat entry is dead weight — drop it to keep the beats map bounded
       // across long-lived bridges and retry chains (v4 #14).
@@ -325,6 +360,10 @@ export class EffectRuntime {
         effectId: effect.id,
         basedOnSeq: effect.seq,
         assignmentRetries: assignment?.retries ?? 0,
+        // Surface role/repo so a pure worktype onEvent can route by them (owner vs
+        // worker conclusions differ) without reaching into the store.
+        ...(assignment?.role === undefined ? {} : { role: assignment.role }),
+        ...(assignment?.repo == null ? {} : { repo: assignment.repo }),
         ...(err === undefined ? {} : { error: errorMessage(err) }),
         ...(reportPath === undefined ? {} : { reportPath }),
       },

@@ -74,6 +74,14 @@ describe('workitems config', () => {
     expect(cfg.watchdogIntervalMs).toBe(1000);
     expect(cfg.heartbeatTimeoutSec).toBe(60);
     expect(cfg.retryBudget).toBe(1);
+    expect(cfg.maxWorkersPerItem).toBe(2);
+  });
+
+  it('overrides maxWorkersPerItem from env', () => {
+    expect(loadWorkitemsConfig({ WORKITEMS_MAX_WORKERS_PER_ITEM: '4' }).maxWorkersPerItem).toBe(4);
+    expect(() => loadWorkitemsConfig({ WORKITEMS_MAX_WORKERS_PER_ITEM: '0' })).toThrow(
+      /WORKITEMS_MAX_WORKERS_PER_ITEM/,
+    );
   });
 
   it('rejects non-positive numeric tuning values', () => {

@@ -553,6 +553,9 @@ export class ReducerRuntime {
           wallclockCapSec: assignment.wallclockCapSec,
           replacesAssignmentId: assignment.id,
           retries: assignment.retries + 1,
+          // Keep the Owner→Worker chain intact across a stall/abort redispatch so the
+          // replacement is still attributable to its owner (D-19).
+          parentAssignmentId: assignment.parentId ?? undefined,
         },
       ],
     };
@@ -600,11 +603,7 @@ export class ReducerRuntime {
       this.deps.logger?.warn?.({ workitemId: item.id }, 'skipped dispatch on terminal workitem');
       return;
     }
-    if (
-      !spec.replacesAssignmentId &&
-      this.isRunClass('run') &&
-      this.hasInflightRunEffect(item.id)
-    ) {
+    if (this.shouldWakePending(item, spec)) {
       this.deps.store.updateWorkItem(item.id, { wakePending: true, updatedAt: now });
       return;
     }
@@ -613,7 +612,7 @@ export class ReducerRuntime {
     const assignment: Assignment = {
       id: assignmentId,
       workitemId: item.id,
-      parentId: null,
+      parentId: spec.parentAssignmentId ?? null,
       repo: spec.repo ?? null,
       role: spec.role,
       status: 'running',
@@ -642,8 +641,58 @@ export class ReducerRuntime {
     this.pokeNeeded = true;
   }
 
+  // Single-flight / concurrency gate, split by topology. Solo (probe/noop) keeps the
+  // original three-way AND byte-for-byte (R01.AC-7 zero-regression). owner-workers
+  // routes by role: owner single-flight, worker concurrency cap (internal-apis §2.3).
+  private shouldWakePending(
+    item: WorkItem,
+    spec: NonNullable<Transition['dispatch']>[number],
+  ): boolean {
+    if (this.topologyOf(item) === 'owner-workers') {
+      return this.shouldWakeForOwnerWorkers(item, spec);
+    }
+    return (
+      !spec.replacesAssignmentId && this.isRunClass('run') && this.hasInflightRunEffect(item.id)
+    );
+  }
+
+  private shouldWakeForOwnerWorkers(
+    item: WorkItem,
+    spec: NonNullable<Transition['dispatch']>[number],
+  ): boolean {
+    if (!this.isRunClass('run')) return false;
+    if (spec.role === 'owner') {
+      // Owner single-flight — block when another owner run is already in flight. Counts
+      // DB assignments by status, not effects, so a superseded predecessor (redispatch)
+      // is excluded and a replacement owner is never blocked by its own forebear.
+      return this.deps.store.countRunningByRole(item.id, 'owner') >= 1;
+    }
+    if (spec.role === 'worker') {
+      // Worker concurrency cap. The count is strongly consistent within the apply tx,
+      // so a batch dispatch auto-accumulates (each released worker is inserted 'running'
+      // before the next is judged — no stale-snapshot over-release, R01.AC-8). A worker
+      // replacement bypasses single-flight but is still subject to the cap; since
+      // redispatch supersedes the predecessor first, the cap is not tripped (R01.AC-6).
+      return this.deps.store.countRunningWorkers(item.id) >= this.deps.cfg.maxWorkersPerItem;
+    }
+    // A solo-role dispatch inside an owner-workers item (e.g. the default fallback):
+    // keep single-flight so it never stomps a running owner/worker.
+    return !spec.replacesAssignmentId && this.hasInflightRunEffect(item.id);
+  }
+
+  private topologyOf(item: WorkItem): 'solo' | 'owner-workers' {
+    return this.deps.registry.get(item.type)?.topology(item) ?? 'solo';
+  }
+
   private releaseWakePending(item: WorkItem, seq: number, now: number): void {
     this.deps.store.updateWorkItem(item.id, { wakePending: false, updatedAt: now });
+    if (this.topologyOf(item) === 'owner-workers') {
+      // In owner-workers, re-dispatch of a queued worker is driven by the worktype's
+      // onEvent (which carries the role/repo/parent context that a bare default solo
+      // run would lose). Just clear the flag — the conclusion that reached here already
+      // ran onEvent, which dispatches the next worker if its plan calls for one.
+      return;
+    }
     if (this.hasInflightRunEffect(item.id)) return;
     this.insertDispatchOrWake(item, seq, this.defaultDispatchSpec(), now);
   }

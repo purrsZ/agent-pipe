@@ -37,7 +37,17 @@ export class WorkitemsApi {
     return this.deps.store.listEvents(id);
   }
 
-  resolveWait(waitId: string, input: { operator: string; reason: string }): ResolveWaitResult {
+  resolveWait(
+    waitId: string,
+    input: {
+      operator: string;
+      reason: string;
+      // Checkpoint p板 (D-03): one action resolves the wait AND carries the decision.
+      // The decision rides the wait_resolved payload through to the worktype's onEvent,
+      // which advances/rolls back phase. No parallel inject method is added.
+      decision?: { approved: boolean; payload?: unknown };
+    },
+  ): ResolveWaitResult {
     const wait = this.requireWait(waitId);
     if (wait.kind === 'timer') {
       throw new TimerNotResolvableError(waitId);
@@ -48,7 +58,12 @@ export class WorkitemsApi {
 
     this.deps.reducer.enqueue(wait.workitemId, {
       kind: 'wait_resolved',
-      payload: { waitId, operator: input.operator, reason: input.reason },
+      payload: {
+        waitId,
+        operator: input.operator,
+        reason: input.reason,
+        ...(input.decision === undefined ? {} : { decision: input.decision }),
+      },
     });
     return { resolved: true };
   }

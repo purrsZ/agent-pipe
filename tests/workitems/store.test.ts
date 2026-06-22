@@ -100,7 +100,7 @@ describe('WorkitemsStore migration', () => {
 
     const db = new Database(dbPath);
     expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(
-      2,
+      3,
     );
     expect(
       db
@@ -109,6 +109,21 @@ describe('WorkitemsStore migration', () => {
         )
         .get(),
     ).toMatchObject({ name: 'idx_assignments_running' });
+    // v3 requirement increment: role-aware running index + parent-chain index.
+    expect(
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_assignments_running_role'",
+        )
+        .get(),
+    ).toMatchObject({ name: 'idx_assignments_running_role' });
+    expect(
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_assignments_parent'",
+        )
+        .get(),
+    ).toMatchObject({ name: 'idx_assignments_parent' });
     expect((db.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode).toBe(
       'wal',
     );

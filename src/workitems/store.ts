@@ -341,6 +341,22 @@ export class WorkitemsStore {
         PRAGMA user_version = 2;
       `);
     }
+    if (version < 3) {
+      // requirement worktype structural increment (R24.AC-4). No new columns — role,
+      // parent_id, agent_session_id all exist from v1; the new kinds write workitem_events
+      // (no CHECK). Only indexes:
+      //  - idx_assignments_running_role: countRunningByRole drives the owner-workers
+      //    single-flight gate (owner) and the worker concurrency cap (worker).
+      //  - idx_assignments_parent: parent-chain reverse lookup (batch attribution /
+      //    cascade abort) without a full table SCAN.
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_assignments_running_role
+          ON workitem_assignments(workitem_id, role) WHERE status = 'running';
+        CREATE INDEX IF NOT EXISTS idx_assignments_parent
+          ON workitem_assignments(parent_id) WHERE parent_id IS NOT NULL;
+        PRAGMA user_version = 3;
+      `);
+    }
   }
 
   insertWorkItem(row: WorkItem): void {
@@ -460,6 +476,32 @@ export class WorkitemsStore {
     return this.db
       .prepare('SELECT * FROM workitem_assignments WHERE workitem_id = ? ORDER BY created_at, id')
       .all(workitemId)
+      .map((row) => toAssignment(row as DbAssignment));
+  }
+
+  // Strongly-consistent in-flight counts for the owner-workers single-flight gate
+  // (R01.AC-4 / internal-apis §2.2). Counts DB rows by status+role inside the apply
+  // tx — never the effect-layer inflight Map (post-commit, would over-release on the
+  // same frame). Within one transaction each just-inserted 'running' assignment is
+  // visible to the next count, so a batch dispatch auto-accumulates without a separate
+  // in-memory counter.
+  countRunningByRole(workitemId: string, role: Assignment['role']): number {
+    const row = this.stmt(
+      "SELECT COUNT(*) AS c FROM workitem_assignments WHERE workitem_id = ? AND status = 'running' AND role = ?",
+    ).get(workitemId, role) as { c: number };
+    return row.c;
+  }
+
+  countRunningWorkers(workitemId: string): number {
+    return this.countRunningByRole(workitemId, 'worker');
+  }
+
+  // Parent-chain reverse lookup (D-19 consumption side): list a parent assignment's
+  // children for batch attribution / cascade abort.
+  listAssignmentsByParent(parentId: string): Assignment[] {
+    return this.db
+      .prepare('SELECT * FROM workitem_assignments WHERE parent_id = ? ORDER BY created_at, id')
+      .all(parentId)
       .map((row) => toAssignment(row as DbAssignment));
   }
 

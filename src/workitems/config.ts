@@ -6,6 +6,9 @@ export interface WorkitemsConfig {
   retryBudget: number;
   defaultDeadlineTtlSec: number;
   defaultWallclockCapSec: number;
+  // Concurrent worker cap per workitem for owner-workers topology (R01/R24). Solo
+  // topology ignores it. Default 2 — a typical requirement touches 2-3 repos.
+  maxWorkersPerItem: number;
 }
 
 export type WorkitemsEnv = Partial<Record<string, string | undefined>>;
@@ -18,6 +21,7 @@ const DEFAULTS: WorkitemsConfig = {
   retryBudget: 1,
   defaultDeadlineTtlSec: 3600,
   defaultWallclockCapSec: 1800,
+  maxWorkersPerItem: 2,
 };
 
 function positiveInt(env: WorkitemsEnv, name: string, fallback: number): number {
@@ -55,6 +59,11 @@ export function loadWorkitemsConfig(env: WorkitemsEnv = process.env): WorkitemsC
       env,
       'WORKITEMS_DEFAULT_WALLCLOCK_CAP_SEC',
       DEFAULTS.defaultWallclockCapSec,
+    ),
+    maxWorkersPerItem: positiveInt(
+      env,
+      'WORKITEMS_MAX_WORKERS_PER_ITEM',
+      DEFAULTS.maxWorkersPerItem,
     ),
   };
 }
