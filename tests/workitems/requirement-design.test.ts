@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { contractFingerprint } from '../../src/worktypes/requirement/contract.js';
 import {
+  composeSpecDesignPrompt,
   type InternalApiEntry,
+  parseInternalApis,
   promoteToContract,
   reposFromContract,
   sliceByRepo,
@@ -54,5 +56,100 @@ describe('design-phase 按端切片', () => {
       'frontend',
       'payments',
     ]);
+  });
+});
+
+describe('spec-design 输出解析 (parseInternalApis)', () => {
+  const block = (obj: unknown) => `前面是设计说明…\n\n\`\`\`json\n${JSON.stringify(obj)}\n\`\`\`\n`;
+
+  it('extracts the contract draft from the trailing ```json block → InternalApiEntry[]', () => {
+    const report = block({
+      interfaces: [
+        {
+          id: 'createOrder',
+          signature: 'POST /orders',
+          providerRepo: 'backend',
+          consumerRepos: ['frontend'],
+          fields: [{ name: 'amount', type: 'number', optional: false }],
+        },
+      ],
+    });
+    const entries = parseInternalApis(report);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      id: 'createOrder',
+      signature: 'POST /orders',
+      providerRepo: 'backend',
+      consumerRepos: ['frontend'],
+      fields: [{ name: 'amount', type: 'number', optional: false }],
+    });
+    // round-trips into a promotable snapshot
+    expect(promoteToContract('draft', entries).interfaces).toHaveLength(1);
+  });
+
+  it('accepts a bare top-level array form too', () => {
+    const report = `\`\`\`json\n${JSON.stringify([
+      { id: 'pay', signature: 'POST /pay', providerRepo: 'payments', consumerRepos: ['backend'] },
+    ])}\n\`\`\``;
+    expect(parseInternalApis(report).map((e) => e.id)).toEqual(['pay']);
+  });
+
+  it('takes the LAST valid block when an illustrative example precedes the real one', () => {
+    const example = block({
+      interfaces: [{ id: 'EXAMPLE', signature: 'x', providerRepo: 'demo' }],
+    });
+    const real = block({
+      interfaces: [{ id: 'realOne', signature: 'GET /x', providerRepo: 'backend' }],
+    });
+    expect(parseInternalApis(example + real).map((e) => e.id)).toEqual(['realOne']);
+  });
+
+  it('drops entries missing required keys (id/signature/providerRepo) but keeps valid siblings', () => {
+    const report = block({
+      interfaces: [
+        { signature: 'no id', providerRepo: 'backend' },
+        { id: 'ok', signature: 'GET /ok', providerRepo: 'backend', consumerRepos: ['frontend', 7] },
+      ],
+    });
+    const entries = parseInternalApis(report);
+    expect(entries.map((e) => e.id)).toEqual(['ok']);
+    expect(entries[0]?.consumerRepos).toEqual(['frontend']); // non-string consumer dropped
+  });
+
+  it('returns [] (never throws) on no block / malformed JSON / empty input', () => {
+    expect(parseInternalApis('没有任何代码块的纯文本报告')).toEqual([]);
+    expect(parseInternalApis('```json\n{ not valid json,, }\n```')).toEqual([]);
+    expect(parseInternalApis('')).toEqual([]);
+  });
+});
+
+describe('spec-design prompt (composeSpecDesignPrompt)', () => {
+  it('asks for spec-design + a trailing json contract block, lists repos, and is not the readonly probe句', () => {
+    const prompt = composeSpecDesignPrompt({
+      title: '加跨端下单接口',
+      knowledge: 'backend 用 NestJS',
+      priorReport: '理解：要支持下单',
+      repos: ['backend', 'frontend'],
+    });
+    expect(prompt).toContain('spec-design');
+    expect(prompt).toContain('加跨端下单接口');
+    expect(prompt).toContain('```json'); // the structured contract block instruction
+    expect(prompt).toContain('providerRepo');
+    expect(prompt).toContain('- backend');
+    expect(prompt).toContain('- frontend');
+    expect(prompt).toContain('backend 用 NestJS'); // knowledge injected
+    expect(prompt).toContain('理解：要支持下单'); // prior report injected
+    // a real parser run over the prompt's own example block must NOT yield placeholder entries
+    // leaking as real interfaces (the example uses non-key placeholder strings that still coerce,
+    // so we only assert the prompt is design-oriented, not readonly-probe-oriented):
+    expect(prompt).not.toContain('只读的代码调查助手');
+  });
+
+  it('omits the repo / knowledge / prior sections when not provided', () => {
+    const prompt = composeSpecDesignPrompt({ title: '小需求', repos: [] });
+    expect(prompt).toContain('小需求');
+    expect(prompt).not.toContain('涉及的仓库');
+    expect(prompt).not.toContain('各仓已有知识');
+    expect(prompt).not.toContain('上一轮理解产物');
   });
 });

@@ -308,6 +308,62 @@ describe('agent-run handler (WI-2)', () => {
     expect(ends).toEqual([{ outcome: 'failed', error: 'boom' }]);
   });
 
+  it('calls strategy.afterRun with the report AFTER report.md is written (success path)', async () => {
+    const calls: Array<{ report: string; phase: string }> = [];
+    const { pool } = fakePool(() => ({ fullText: 'REPORT BODY', sessionId: 's' }) as TurnResult);
+    const { store } = fakeStore();
+    const rec = makeCtx({});
+    const handler = createAgentRunHandler({
+      pool,
+      kernelStore: store,
+      defaultCwd: tmpDir,
+      strategyFor: () => ({
+        composePrompt: () => 'p',
+        runOptions: () => ({ permission: { mode: 'readonly' } }),
+        resolveCwd: ({ defaultCwd }) => defaultCwd,
+        prepareWorkspace: () => {},
+        canResume: () => false,
+        afterRun: ({ report, workitem, writeArtifact }) => {
+          calls.push({ report, phase: workitem.phase });
+          writeArtifact('contract/contract.json', '{"derived":true}', 'derived');
+        },
+      }),
+    });
+    await handler.run(rec.ctx);
+    expect(calls).toEqual([{ report: 'REPORT BODY', phase: 'noop:idle' }]);
+    // afterRun's own artifact landed too (report.md + the derived file)
+    expect(rec.writes.map((w) => w.relPath)).toEqual([
+      'assignments/as-1/brief.md',
+      'assignments/as-1/report.md',
+      'contract/contract.json',
+    ]);
+  });
+
+  it('a throwing afterRun is swallowed (never flips a successful run into run_failed)', async () => {
+    const { pool } = fakePool(() => ({ fullText: 'ok', sessionId: 's' }) as TurnResult);
+    const { store } = fakeStore();
+    const rec = makeCtx({});
+    const handler = createAgentRunHandler({
+      pool,
+      kernelStore: store,
+      defaultCwd: tmpDir,
+      strategyFor: () => ({
+        composePrompt: () => 'p',
+        runOptions: () => ({ permission: { mode: 'readonly' } }),
+        resolveCwd: ({ defaultCwd }) => defaultCwd,
+        prepareWorkspace: () => {},
+        canResume: () => false,
+        afterRun: () => {
+          throw new Error('parse boom');
+        },
+      }),
+    });
+    // resolves (does NOT throw) — the run already succeeded; afterRun is best-effort.
+    await expect(handler.run(rec.ctx)).resolves.toBeUndefined();
+    // report still written despite the afterRun throw.
+    expect(rec.writes.find((w) => w.relPath === 'assignments/as-1/report.md')?.content).toBe('ok');
+  });
+
   it('ends with outcome=aborted (no report) when aborted mid-run (M2)', async () => {
     const ends: Array<{ outcome: string; report?: string }> = [];
     const rec = makeCtx({});

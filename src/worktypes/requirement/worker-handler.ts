@@ -3,6 +3,8 @@ import { worktreeAdd, worktreeIsDirty, worktreePathFor } from '../../agents/work
 import type { Assignment, WorkItem } from '../../workitems/types.js';
 import type { RunStrategy } from '../agent-run/run-handler.js';
 import { type ContractSnapshot, EMPTY_SNAPSHOT } from './contract.js';
+import { composeSpecDesignPrompt, parseInternalApis, promoteToContract } from './design.js';
+import { PHASE } from './phases.js';
 import { composeWorkerPrompt, mapWritePermission } from './worker.js';
 
 // requirement run strategy (worker-runtime). Workers run in their own worktree under the
@@ -26,17 +28,30 @@ export function createRequirementRunStrategy(opts: {
   };
 
   return {
-    composePrompt: ({ title, assignment, priorReport, readArtifact }) => {
-      if (assignment.role !== 'worker') return composeOwnerPrompt(title, priorReport);
-      const contract = readContract(readArtifact);
-      return composeWorkerPrompt({
-        title,
-        repo: assignment.repo ?? '',
-        contract,
-        // 选择性注入: only workers get repo knowledge, keyed by the repo they own.
-        knowledge: assignment.repo ? opts.knowledgeFor?.(assignment.repo) : undefined,
-        reworkNote: assignment.replacesAssignmentId ? priorReport : undefined,
-      });
+    composePrompt: ({ title, assignment, priorReport, readArtifact, workitem }) => {
+      if (assignment.role === 'worker') {
+        const contract = readContract(readArtifact);
+        return composeWorkerPrompt({
+          title,
+          repo: assignment.repo ?? '',
+          contract,
+          // 选择性注入: only workers get repo knowledge, keyed by the repo they own.
+          knowledge: assignment.repo ? opts.knowledgeFor?.(assignment.repo) : undefined,
+          reworkNote: assignment.replacesAssignmentId ? priorReport : undefined,
+        });
+      }
+      // owner: the 合同-phase owner run IS the spec-design run (design-phase §5.1 / D-15). It
+      // browses readonly, produces the design narrative, and emits a structured contract draft
+      // block (afterRun 升格 it). Other owner phases (理解/详设/拆解/assess) keep the包工头 prompt.
+      if (workitem.phase === PHASE.contract) {
+        return composeSpecDesignPrompt({
+          title,
+          priorReport,
+          knowledge: knowledgeForRepos(workitem.repos, opts.knowledgeFor),
+          repos: workitem.repos,
+        });
+      }
+      return composeOwnerPrompt(title, priorReport);
     },
 
     runOptions: ({ assignment, cwd }) =>
@@ -72,7 +87,34 @@ export function createRequirementRunStrategy(opts: {
         return false;
       }
     },
+
+    // design-phase §5.1/§5.2: the 合同-phase spec-design (owner) run 收尾时把报告里的对接合同草案块
+    // 升格成 frozen-able contract/contract.json（T5/A2）。其它 phase / role 的 run 不产合同。健壮：
+    // 解析不到 → 空快照，灯②人审兜底而非 run 崩溃。（draft → 灯②approval-冻结的语义细分是
+    // contract-engine 域后续；此处直接写 contract.json 让 worker/集成对账端到端可读。）
+    afterRun: ({ report, workitem, assignment, writeArtifact }) => {
+      if (assignment.role !== 'owner' || workitem.phase !== PHASE.contract) return;
+      const entries = parseInternalApis(report);
+      const snapshot = promoteToContract('draft', entries);
+      writeArtifact(
+        'contract/contract.json',
+        `${JSON.stringify(snapshot, null, 2)}\n`,
+        `spec-design 升格合同（${entries.length} 条接口）`,
+      );
+    },
   };
+}
+
+// 设计 run 的代码考古复用各仓已有知识 map（D-08）：把涉及仓的知识块拼接，无则 undefined。
+function knowledgeForRepos(
+  repos: string[],
+  knowledgeFor: ((repoKey: string) => string | undefined) | undefined,
+): string | undefined {
+  if (!knowledgeFor) return undefined;
+  const blocks = repos
+    .map((r) => knowledgeFor(r))
+    .filter((b): b is string => typeof b === 'string' && b.trim().length > 0);
+  return blocks.length > 0 ? blocks.join('\n\n') : undefined;
 }
 
 function branchFor(workitem: WorkItem, assignment: Assignment): string {

@@ -27,6 +27,20 @@ export interface RunStrategy {
   /** Create/ready the cwd before the run (probe: mkdir; requirement worker: worktree add). */
   prepareWorkspace(args: { workitem: WorkItem; assignment: Assignment; cwd: string }): void;
   canResume(payload: unknown, assignment: Assignment | undefined, workitem: WorkItem): boolean;
+  /**
+   * Optional post-run hook (SUCCESS path only). Runs AFTER report.md is persisted and BEFORE
+   * onRunEnd. Lets a worktype derive artifacts from the run's own report WITHOUT forging a run
+   * conclusion — the requirement 合同-phase spec-design run uses it to升格 the report's structured
+   * contract draft into contract/contract.json (T5/A2). It is artifact-write only: it MUST NOT
+   * throw the run into failure (the handler swallows + logs any throw), so a parse miss degrades
+   * to an empty contract gated by the human at 灯②, never a crashed run. probe omits it (no-op).
+   */
+  afterRun?(args: {
+    report: string;
+    workitem: WorkItem;
+    assignment: Assignment;
+    writeArtifact: (relPath: string, content: string, message: string) => void;
+  }): void;
 }
 
 /**
@@ -227,6 +241,24 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
   if (result.sessionId) ctx.setAgentSessionId(result.sessionId);
   const report = result.fullText ?? '';
   ctx.writeArtifact(`assignments/${assignment.id}/report.md`, report, 'agent-run report');
+  // Optional strategy post-processing (e.g. spec-design 升格 → contract/contract.json). Kept off
+  // the run-conclusion path: it writes artifacts only. Swallow any throw so a strategy parse bug
+  // can never flip a successful run into run_failed (the contract is then empty, gated at 灯②).
+  if (strategy.afterRun) {
+    try {
+      strategy.afterRun({
+        report,
+        workitem,
+        assignment,
+        writeArtifact: (rel, content, msg) => ctx.writeArtifact(rel, content, msg),
+      });
+    } catch (err) {
+      deps.logger?.error?.(
+        { err, assignmentId: assignment.id },
+        'strategy.afterRun failed (non-fatal)',
+      );
+    }
+  }
   // M2 (merges WI-6): hand the report to the sink so the streaming card patches itself into
   // the report card. success path only — abort returns early above, failure throws before here.
   deps.progress?.onRunEnd({ assignmentId: assignment.id, outcome: 'success', report });

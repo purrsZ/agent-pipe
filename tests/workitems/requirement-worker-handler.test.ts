@@ -3,8 +3,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { createRequirementRunStrategy } from '../../src/worktypes/requirement/worker-handler.js';
 import { worktreePathFor } from '../../src/agents/worktree.js';
+import { PHASE } from '../../src/worktypes/requirement/phases.js';
+import { createRequirementRunStrategy } from '../../src/worktypes/requirement/worker-handler.js';
 import { makeAssignment, makeWorkItem } from '../helpers/workitems.js';
 
 let tmpDir: string;
@@ -142,7 +143,7 @@ describe('requirement worker run strategy (write profile + worktree)', () => {
     expect(prompt).toContain('npm test');
   });
 
-  it('only workers consult knowledgeFor — the owner coordinator prompt never does', () => {
+  it('the owner COORDINATOR prompt (非合同 phase) never consults knowledgeFor', () => {
     const seen: string[] = [];
     const s = createRequirementRunStrategy({
       worktreesDir: worktreesDir(),
@@ -154,11 +155,120 @@ describe('requirement worker run strategy (write profile + worktree)', () => {
     s.composePrompt({
       title: 't',
       followups: [],
-      workitem: item(),
+      workitem: item(), // default phase 'noop:idle' → coordinator branch, not the spec-design run
       assignment: owner(),
       batch: [],
       readArtifact: () => undefined,
     });
-    expect(seen).toEqual([]); // owner branch returns before touching knowledgeFor
+    expect(seen).toEqual([]); // coordinator branch returns before touching knowledgeFor
+  });
+});
+
+describe('requirement spec-design run (合同 phase owner) — T5/A2', () => {
+  const worktreesDir = () => path.join(tmpDir, 'worktrees');
+  const contractItem = () =>
+    makeWorkItem('wi-1', {
+      type: 'requirement',
+      phase: PHASE.contract,
+      repos: ['backend', 'frontend'],
+    });
+  const owner = () => makeAssignment('as-o1', 'wi-1', { role: 'owner' });
+
+  it('composePrompt for an owner in the 合同 phase is the spec-design run (consults knowledgeFor)', () => {
+    const seen: string[] = [];
+    const s = createRequirementRunStrategy({
+      worktreesDir: worktreesDir(),
+      knowledgeFor: (repo) => {
+        seen.push(repo);
+        return repo === 'backend' ? '## map\nNestJS' : undefined;
+      },
+    });
+    const prompt = s.composePrompt({
+      title: '加跨端下单接口',
+      followups: [],
+      workitem: contractItem(),
+      assignment: owner(),
+      batch: [],
+      readArtifact: () => undefined,
+    });
+    expect(prompt).toContain('spec-design');
+    expect(prompt).toContain('```json'); // structured contract draft instruction
+    expect(prompt).toContain('- backend');
+    expect(prompt).toContain('NestJS'); // knowledge injected for代码考古
+    expect(prompt).not.toContain('包工头'); // not the coordinator prompt
+    expect(seen.sort()).toEqual(['backend', 'frontend']); // consulted for every repo
+  });
+
+  it('afterRun 升格 the report contract block → contract/contract.json (only owner + 合同 phase)', () => {
+    const s = createRequirementRunStrategy({ worktreesDir: worktreesDir() });
+    const report = [
+      '设计说明……',
+      '```json',
+      JSON.stringify({
+        interfaces: [
+          {
+            id: 'createOrder',
+            signature: 'POST /orders',
+            providerRepo: 'backend',
+            consumerRepos: ['frontend'],
+            fields: [{ name: 'amount', type: 'number', optional: false }],
+          },
+        ],
+      }),
+      '```',
+    ].join('\n');
+    const writes: Array<{ relPath: string; content: string }> = [];
+    s.afterRun?.({
+      report,
+      workitem: contractItem(),
+      assignment: owner(),
+      writeArtifact: (relPath, content) => writes.push({ relPath, content }),
+    });
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.relPath).toBe('contract/contract.json');
+    const snap = JSON.parse(writes[0]?.content ?? '{}');
+    expect(snap.interfaces).toHaveLength(1);
+    expect(snap.interfaces[0]).toMatchObject({ id: 'createOrder', providerRepo: 'backend' });
+    expect(typeof snap.fingerprint).toBe('string'); // promoteToContract computed it
+  });
+
+  it('afterRun is inert for a worker, or for an owner outside the 合同 phase', () => {
+    const s = createRequirementRunStrategy({ worktreesDir: worktreesDir() });
+    const report =
+      '```json\n{"interfaces":[{"id":"x","signature":"s","providerRepo":"backend"}]}\n```';
+    const writes: string[] = [];
+    const sink = (relPath: string) => writes.push(relPath);
+    // worker in 合同 phase → no contract升格
+    s.afterRun?.({
+      report,
+      workitem: contractItem(),
+      assignment: makeAssignment('as-w', 'wi-1', { role: 'worker', repo: 'backend' }),
+      writeArtifact: sink,
+    });
+    // owner outside 合同 phase → no contract升格
+    s.afterRun?.({
+      report,
+      workitem: makeWorkItem('wi-1', {
+        type: 'requirement',
+        phase: PHASE.design,
+        repos: ['backend'],
+      }),
+      assignment: owner(),
+      writeArtifact: sink,
+    });
+    expect(writes).toEqual([]);
+  });
+
+  it('afterRun on a report with no contract block writes an EMPTY contract (灯②兜底, never throws)', () => {
+    const s = createRequirementRunStrategy({ worktreesDir: worktreesDir() });
+    const writes: Array<{ relPath: string; content: string }> = [];
+    s.afterRun?.({
+      report: '设计说明，但忘了输出合同块',
+      workitem: contractItem(),
+      assignment: owner(),
+      writeArtifact: (relPath, content) => writes.push({ relPath, content }),
+    });
+    expect(writes).toHaveLength(1);
+    expect(JSON.parse(writes[0]?.content ?? '{}').interfaces).toEqual([]);
   });
 });
