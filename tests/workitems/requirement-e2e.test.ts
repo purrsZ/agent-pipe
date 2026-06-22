@@ -117,6 +117,8 @@ describe('requirement skeleton end-to-end', () => {
       repos: ['repo-a'],
     }).item;
 
+    await walkThroughIntake(store, api, item.id); // 先过立项：收料 → 立项 gate → 进理解
+
     const checkpointsSeen: string[] = [];
     // Resolve each checkpoint as it appears until we rest in 交付.
     for (let i = 0; i < 8; i++) {
@@ -152,6 +154,49 @@ describe('requirement skeleton end-to-end', () => {
     await waitFor(() => expect(store.getWorkItem(item.id)!.status).toBe('done'));
   });
 
+  it('立项: a new requirement rests in 立项 (no run), gathers料, then the 立项 gate opens 理解', async () => {
+    const { store, api } = harness();
+    const item = api.createWorkItem({
+      type: 'requirement',
+      title: '订单状态查询',
+      source: {},
+      repos: ['repo-a'],
+    }).item;
+
+    // 创建即停在立项，不 dispatch 任何 run（收料先于开干）。
+    expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.intake);
+    expect(store.listAssignments(item.id)).toHaveLength(0);
+
+    // 必填未齐：填了部分，不 raise 立项 gate、不开干。
+    api.injectIntakeField(item.id, { key: 'name', value: '订单状态查询' });
+    api.injectIntakeField(item.id, { key: 'summary', value: '运营按单号查状态' });
+    expect(
+      store.listOpenWaits(item.id).filter((w) => w.reason.startsWith('checkpoint:')),
+    ).toHaveLength(0);
+    expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.intake);
+
+    // 必填齐 → 立项 gate（立项→理解）出现，仍不 dispatch（人审前不开干）。
+    api.injectIntakeField(item.id, { key: 'repos', value: ['repo-a'] });
+    api.injectIntakeField(item.id, { key: 'prd', value: 'PRD 全文' });
+    api.injectIntakeField(item.id, { key: 'acceptance', value: '输入单号返回状态' });
+    await waitFor(() =>
+      expect(
+        store.listOpenWaits(item.id).some((w) => w.reason === `checkpoint:${PHASE.understand}`),
+      ).toBe(true),
+    );
+    expect(store.listAssignments(item.id)).toHaveLength(0); // 仍未开干
+
+    // 放行立项 gate → 进理解，dispatch 首个 owner understand run（原 workitem_created 的动作后移一格）。
+    const gate = store
+      .listOpenWaits(item.id)
+      .find((w) => w.reason === `checkpoint:${PHASE.understand}`)!;
+    api.resolveWait(gate.id, { operator: 'lichao', reason: 'go', decision: { approved: true } });
+    await waitFor(() => {
+      expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.understand);
+      expect(store.listAssignments(item.id).some((a) => a.role === 'owner')).toBe(true);
+    });
+  });
+
   it('a rejected 灯① keeps the item in 理解 and re-runs the owner', async () => {
     const { store, api } = harness();
     const item = api.createWorkItem({
@@ -160,6 +205,8 @@ describe('requirement skeleton end-to-end', () => {
       source: {},
       repos: ['repo-a'],
     }).item;
+
+    await walkThroughIntake(store, api, item.id); // 先过立项才到 4 灯
 
     await waitFor(() =>
       expect(
@@ -177,6 +224,34 @@ describe('requirement skeleton end-to-end', () => {
     });
   });
 
+  // 立项：注入必填项 → 立项 gate（立项→理解）出现 → 放行 → 进理解（dispatch understand owner run）。
+  // 每条 intake_field_set 由容器 enrich 注入填项历史，worktype fold 出 gateReady；齐了才 raise gate。
+  async function walkThroughIntake(
+    store: WorkitemsStore,
+    api: WorkitemsApi,
+    itemId: string,
+  ): Promise<void> {
+    for (const f of [
+      { key: 'name', value: '需求' },
+      { key: 'summary', value: '背景' },
+      { key: 'prd', value: 'PRD' },
+      { key: 'acceptance', value: '验收' },
+      { key: 'repos', value: ['repo-a'] },
+    ]) {
+      api.injectIntakeField(itemId, f);
+    }
+    await waitFor(() =>
+      expect(
+        store.listOpenWaits(itemId).some((w) => w.reason === `checkpoint:${PHASE.understand}`),
+      ).toBe(true),
+    );
+    const gate = store
+      .listOpenWaits(itemId)
+      .find((w) => w.reason === `checkpoint:${PHASE.understand}`)!;
+    api.resolveWait(gate.id, { operator: 'lichao', reason: 'go', decision: { approved: true } });
+    await waitFor(() => expect(store.getWorkItem(itemId)!.phase).toBe(PHASE.understand));
+  }
+
   // Resolve 灯①/灯②快/灯②慢 (contract/design/split) so the item lands in 并行实现 and fans out
   // a worker per repo. Stops before the worker batch so a test can observe the fan-in.
   async function walkToImplement(
@@ -184,6 +259,7 @@ describe('requirement skeleton end-to-end', () => {
     api: WorkitemsApi,
     itemId: string,
   ): Promise<void> {
+    await walkThroughIntake(store, api, itemId); // 先过立项 gate 才进理解
     for (const boundary of [PHASE.contract, PHASE.design, PHASE.split]) {
       await waitFor(() =>
         expect(store.listOpenWaits(itemId).some((w) => w.reason === `checkpoint:${boundary}`)).toBe(

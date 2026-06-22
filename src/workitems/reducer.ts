@@ -704,12 +704,28 @@ export class ReducerRuntime {
   // interpretation (no phase compare), holding the container red-line.
   private enrichEventForType(item: WorkItem, event: WorkItemEvent): WorkItemEvent {
     if (this.topologyOf(item) !== 'owner-workers') return event;
-    if (event.kind !== 'run_completed' && event.kind !== 'run_failed') return event;
-    const runningWorkers = this.deps.store.countRunningWorkers(item.id);
-    return {
-      ...event,
-      payload: { ...(isObject(event.payload) ? event.payload : {}), runningWorkers },
-    };
+    if (event.kind === 'run_completed' || event.kind === 'run_failed') {
+      const runningWorkers = this.deps.store.countRunningWorkers(item.id);
+      return {
+        ...event,
+        payload: { ...(isObject(event.payload) ? event.payload : {}), runningWorkers },
+      };
+    }
+    // 立项收料事件：把该单截至此刻的 intake 填项历史（payload 序列）中性搬运给 worktype，由它自行
+    // fold 出立项清单状态并判定 gate（容器不解释 payload 语义、不存清单状态——走纯事件溯源）。同
+    // runningWorkers 一样是 transient enrichment：只对本次 onEvent 可见，持久化/观察的 event 保持
+    // 干净（无 priorIntakeEvents 字段），solo 拓扑不受影响。
+    if (event.kind === 'intake_field_set') {
+      const priorIntakeEvents = this.deps.store
+        .listEvents(item.id)
+        .filter((e) => e.kind === 'intake_field_set')
+        .map((e) => e.payload);
+      return {
+        ...event,
+        payload: { ...(isObject(event.payload) ? event.payload : {}), priorIntakeEvents },
+      };
+    }
+    return event;
   }
 
   private releaseWakePending(item: WorkItem, seq: number, now: number): void {

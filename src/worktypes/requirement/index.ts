@@ -8,7 +8,8 @@ import type {
 import { checkpointDecisionOf, crossesCheckpoint, raiseCheckpoint, ttlsOf } from './checkpoint.js';
 import { isRequirementDecisionStale } from './contract.js';
 import { fixRoundExceeded } from './integration.js';
-import { nextPhase, PHASE } from './phases.js';
+import { foldIntake, INTAKE_FIELD_SET, isGateReady } from './intake.js';
+import { CHECKPOINT_REQUIRED_BEFORE, nextPhase, PHASE } from './phases.js';
 
 // requirement worktype — the 7-phase coordinator (D-08/D-15). Pure sync reducer: this file
 // declares all side effects as Transition (dispatch / waits / effects); the effect handlers
@@ -28,16 +29,16 @@ const CHECKPOINT_WAIT_TTL_SEC = 86_400;
 export const requirementWorkType: WorkType = {
   id: 'requirement',
   triggers: { api: true },
-  initialPhase: () => PHASE.understand,
+  // 新单从「立项」起步（收料阶段），立项 gate 放行后才进「理解」。
+  initialPhase: () => PHASE.intake,
   onEvent: requirementTransition,
   isDecisionStale: isRequirementDecisionStale,
   // The parallel-dispatch master switch: returning non-'solo' makes the container's
   // single-flight gate route by role (owner single-flight / worker concurrency cap).
   topology: () => 'owner-workers',
   permissions: { mode: 'write' },
-  checkpoints: {
-    requiredBefore: [PHASE.contract, PHASE.design, PHASE.split, PHASE.deliver],
-  },
+  // Single source of truth with crossesCheckpoint (phases.ts): 立项 gate + 4 灯边界.
+  checkpoints: { requiredBefore: CHECKPOINT_REQUIRED_BEFORE },
   artifacts: { reportRequired: true },
 };
 
@@ -48,10 +49,11 @@ export function registerRequirement(registry: { register(type: WorkType): void }
 export function requirementTransition(item: WorkItem, ev: WorkItemEvent): Transition {
   switch (ev.kind) {
     case 'workitem_created':
-      return {
-        phase: { to: PHASE.understand, reason: 'created' },
-        dispatch: [ownerSpec(item, 'understand')],
-      };
+      // 进「立项」收料，不 dispatch run——收料由 bridge/effect 驱动（intake_field_set）。原本在此
+      // dispatch owner understand 的动作后移到立项 gate 通过后（onWaitResolved → enterPhase(理解)）。
+      return { phase: { to: PHASE.intake, reason: 'created' } };
+    case INTAKE_FIELD_SET:
+      return onIntakeFieldSet(item, ev);
     case 'wait_resolved':
       return onWaitResolved(item, ev);
     case 'run_completed':
@@ -140,6 +142,16 @@ function onIntegrationFailed(item: WorkItem, ev: WorkItemEvent): Transition {
   };
 }
 
+// 立项收料：容器（reducer.enrichEventForType）在每条 intake_field_set 上注入该单截至此刻的填项历史
+// （priorIntakeEvents，中性搬运，与 runningWorkers 同套路）。worktype 用纯 fold 重建清单状态、判定 gate：
+//   必填齐 → 复用 checkpoint 机制 raise 立项 gate（立项→理解 边界）；未齐 → 留在立项继续收料（{}）。
+function onIntakeFieldSet(item: WorkItem, ev: WorkItemEvent): Transition {
+  if (item.phase !== PHASE.intake) return {};
+  const state = foldIntake(priorIntakeEventsOf(ev.payload));
+  if (!isGateReady(state)) return {};
+  return requestAdvance(item, PHASE.intake, PHASE.understand, 'intake_ready');
+}
+
 // Phase-work done → either gate (raise the human wait, stay) or advance + run entry work.
 function requestAdvance(item: WorkItem, expected: string, to: string, reason: string): Transition {
   if (item.phase !== expected) return {};
@@ -174,6 +186,9 @@ function enterPhase(
 ): Transition {
   const base: Transition = { phase: { to, reason } };
   switch (to) {
+    case PHASE.understand:
+      // 立项 gate 通过 → 进理解，dispatch 首个 owner understand run（原 workitem_created 的动作后移一格）。
+      return { ...base, dispatch: [ownerSpec(item, stageKey(to))] };
     case PHASE.contract:
     case PHASE.design:
     case PHASE.split:
@@ -248,10 +263,16 @@ function workerDispatches(
 }
 
 function stageKey(phase: string): string {
+  if (phase === PHASE.understand) return 'understand';
   if (phase === PHASE.contract) return 'contract';
   if (phase === PHASE.design) return 'design';
   if (phase === PHASE.split) return 'split';
   return 'owner';
+}
+
+function priorIntakeEventsOf(payload: unknown): unknown[] {
+  const v = asObject(payload).priorIntakeEvents;
+  return Array.isArray(v) ? v : [];
 }
 
 function roleOf(payload: unknown): string | undefined {

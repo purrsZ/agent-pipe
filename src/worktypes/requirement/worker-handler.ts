@@ -49,6 +49,8 @@ export function createRequirementRunStrategy(opts: {
           priorReport,
           knowledge: knowledgeForRepos(workitem.repos, opts.knowledgeFor),
           repos: workitem.repos,
+          // 立项书（立项 gate 通过时落 intake/intake.md，M-I3 live 写）。不存在则优雅降级回裸标题。
+          intakeBrief: readArtifact('intake/intake.md'),
         });
       }
       return composeOwnerPrompt(title, priorReport);

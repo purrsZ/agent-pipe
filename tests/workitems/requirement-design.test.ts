@@ -152,4 +152,18 @@ describe('spec-design prompt (composeSpecDesignPrompt)', () => {
     expect(prompt).not.toContain('各仓已有知识');
     expect(prompt).not.toContain('上一轮理解产物');
   });
+
+  it('weaves in the intake brief (立项书) as the structured background', () => {
+    const prompt = composeSpecDesignPrompt({
+      title: '订单状态查询',
+      repos: ['backend'],
+      intakeBrief: '# 立项书：订单状态查询\n\n## 验收标准 / 完成定义\n输入订单号返回状态',
+    });
+    expect(prompt).toContain('立项书'); // brief section header
+    expect(prompt).toContain('输入订单号返回状态'); // 立项书全文喂进去，而非裸标题硬考古
+  });
+
+  it('omits the 立项书 section when no intake brief is provided (优雅降级回裸标题)', () => {
+    expect(composeSpecDesignPrompt({ title: '小需求', repos: [] })).not.toContain('立项书');
+  });
 });

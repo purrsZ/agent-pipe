@@ -199,6 +199,32 @@ describe('requirement spec-design run (合同 phase owner) — T5/A2', () => {
     expect(seen.sort()).toEqual(['backend', 'frontend']); // consulted for every repo
   });
 
+  it('the spec-design run weaves in 立项书 from intake/intake.md (优雅降级 when absent)', () => {
+    const s = createRequirementRunStrategy({ worktreesDir: worktreesDir() });
+    const brief = '# 立项书：下单\n\n## 验收标准 / 完成定义\n下单成功返回单号';
+    const withBrief = s.composePrompt({
+      title: '加跨端下单接口',
+      followups: [],
+      workitem: contractItem(),
+      assignment: owner(),
+      batch: [],
+      readArtifact: (rel) => (rel === 'intake/intake.md' ? brief : undefined),
+    });
+    expect(withBrief).toContain('立项书'); // 立项书装配进 spec-design 输入
+    expect(withBrief).toContain('下单成功返回单号');
+
+    // intake.md 不存在（立项书尚未落档）→ 不输出立项书段，回落裸标题，绝不报错。
+    const without = s.composePrompt({
+      title: '加跨端下单接口',
+      followups: [],
+      workitem: contractItem(),
+      assignment: owner(),
+      batch: [],
+      readArtifact: () => undefined,
+    });
+    expect(without).not.toContain('立项书');
+  });
+
   it('afterRun 升格 the report contract block → contract/contract.json (only owner + 合同 phase)', () => {
     const s = createRequirementRunStrategy({ worktreesDir: worktreesDir() });
     const report = [

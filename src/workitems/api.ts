@@ -80,6 +80,18 @@ export class WorkitemsApi {
   }
 
   /**
+   * Inject one「立项填项」fact into a work item's event stream (M-I1). The reducer enriches each
+   * such event with the item's intake-event history so the work type can fold the checklist state
+   * and raise the 立项 gate once the required fields are in. Routed from the bridge (群内收料 / 清单
+   * 卡补填) on a managed-claimed 立项 group; the sandbox e2e injects directly. The container only
+   * carries the payload (constructed by the caller, which owns the intake 纯核心) — it never
+   * interprets the field semantics, same as injectHumanMessage.
+   */
+  injectIntakeField(workitemId: string, payload: unknown): void {
+    this.deps.reducer.enqueue(workitemId, { kind: 'intake_field_set', payload });
+  }
+
+  /**
    * Request closing a work item to a terminal state (M1b WI-4). The work type's onEvent
    * maps the event to its terminal transition (probe → done). Routed from the `/done`
    * bridge command. An already-terminal item simply short-circuits the enqueue.

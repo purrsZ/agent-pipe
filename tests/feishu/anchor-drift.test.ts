@@ -20,7 +20,7 @@ describe('anchorAction ⇄ REQUIREMENT_EVENT_KINDS (no drift)', () => {
     }
   });
 
-  it('the authoritative list is non-empty and matches internal-apis §7 count (11)', () => {
-    expect(REQUIREMENT_EVENT_KINDS.length).toBe(11);
+  it('the authoritative list is non-empty and matches the §7 count (11 + 立项 intake_field_set = 12)', () => {
+    expect(REQUIREMENT_EVENT_KINDS.length).toBe(12);
   });
 });

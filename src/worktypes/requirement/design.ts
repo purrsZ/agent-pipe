@@ -75,6 +75,7 @@ export function composeSpecDesignPrompt(input: {
   priorReport?: string; // 理解 phase 的 owner 产物（延续，不重复）
   knowledge?: string; // 各仓已有知识 map（代码考古复用，D-08）
   repos: string[]; // 涉及的仓（升格补 providerRepo/consumerRepos 的候选 key 集，D-29）
+  intakeBrief?: string; // 立项书（buildIntakeBrief 产物：背景/仓库/PRD摘要/验收/UI/边界），从立项阶段装配
 }): string {
   const repoList = input.repos.filter((r) => typeof r === 'string' && r.trim().length > 0);
   const lines: string[] = [
@@ -85,6 +86,14 @@ export function composeSpecDesignPrompt(input: {
     '# 需求',
     input.title,
   ];
+  // 立项书是前置已收齐的需求材料（PRD 摘要/验收/UI/边界/多仓），优先据它设计，而非裸标题硬考古。
+  if (input.intakeBrief && input.intakeBrief.trim().length > 0) {
+    lines.push(
+      '',
+      '# 立项书（前置已收齐的需求材料，请据此设计；下面是结构化背景，不要重复无据猜测）',
+      input.intakeBrief.trim(),
+    );
+  }
   if (repoList.length > 0) {
     lines.push(
       '',

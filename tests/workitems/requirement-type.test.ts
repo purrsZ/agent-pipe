@@ -12,12 +12,13 @@ function ev(kind: string, payload: unknown = {}): WorkItemEvent {
 const t = requirementWorkType;
 
 describe('requirement WorkType definition', () => {
-  it('is an owner-workers write type with the 4-light requiredBefore boundaries', () => {
+  it('is an owner-workers write type starting at 立项, with 立项 gate + 4-light boundaries', () => {
     expect(t.id).toBe('requirement');
     expect(t.topology(makeWorkItem('wi-1'))).toBe('owner-workers');
     expect(t.permissions).toEqual({ mode: 'write' });
-    expect(t.initialPhase(makeWorkItem('wi-1'))).toBe(PHASE.understand);
+    expect(t.initialPhase(makeWorkItem('wi-1'))).toBe(PHASE.intake);
     expect(t.checkpoints.requiredBefore).toEqual([
+      PHASE.understand, // 立项 gate（立项→理解）
       PHASE.contract,
       PHASE.design,
       PHASE.split,
@@ -34,10 +35,55 @@ describe('requirement WorkType definition', () => {
 });
 
 describe('requirement lifecycle transitions', () => {
-  it('creation enters 理解 and dispatches an owner', () => {
+  it('creation enters 立项 (intake) without dispatching — 收料先于开干', () => {
     const out = t.onEvent(makeWorkItem('wi-1'), ev('workitem_created'));
-    expect(out.phase).toEqual({ to: PHASE.understand, reason: 'created' });
+    expect(out.phase).toEqual({ to: PHASE.intake, reason: 'created' });
+    expect(out.dispatch).toBeUndefined();
+  });
+
+  it('立项 gate: intake_field_set raises the gate only once all required fields are folded in', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.intake });
+    // partial history (one field) → not ready, stay put, no gate.
+    const partial = t.onEvent(
+      item,
+      ev('intake_field_set', { priorIntakeEvents: [{ key: 'name', value: 'n' }] }),
+    );
+    expect(partial).toEqual({});
+    // all 5 required fields folded → raise the 立项 gate (理解 boundary), NOT a phase change.
+    const ready = t.onEvent(
+      item,
+      ev('intake_field_set', {
+        priorIntakeEvents: [
+          { key: 'name', value: 'n' },
+          { key: 'summary', value: 's' },
+          { key: 'repos', value: ['repo-a'] },
+          { key: 'prd', value: 'p' },
+          { key: 'acceptance', value: 'a' },
+        ],
+      }),
+    );
+    expect(ready.phase).toBeUndefined();
+    expect(ready.waits?.[0]).toMatchObject({
+      kind: 'human',
+      reason: `checkpoint:${PHASE.understand}`,
+    });
+  });
+
+  it('立项 gate approved advances 立项 → 理解 and dispatches the understand owner', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.intake });
+    const out = t.onEvent(item, ev('wait_resolved', { decision: { approved: true } }));
+    expect(out.phase).toEqual({ to: PHASE.understand, reason: 'checkpoint_approved' });
     expect(out.dispatch?.[0]).toMatchObject({ role: 'owner' });
+  });
+
+  it('立项 gate rejected stays in 立项 (keep collecting), no dispatch', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.intake });
+    expect(t.onEvent(item, ev('wait_resolved', { decision: { approved: false } }))).toEqual({});
+  });
+
+  it('intake_field_set outside the 立项 phase is inert', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.understand });
+    expect(t.onEvent(item, ev('intake_field_set', { priorIntakeEvents: [] }))).toEqual({});
   });
 
   it('灯① — owner done in 理解 raises a checkpoint wait, NOT a phase change', () => {
