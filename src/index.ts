@@ -4,14 +4,17 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createClaudeFactory } from './agents/claude/runner.js';
 import { createCodexFactory } from './agents/codex/runner.js';
 import { AgentPool } from './agents/pool.js';
-import type { ProgressCallbacks } from './agents/types.js';
+import type { AskUserQuestion, ProgressCallbacks } from './agents/types.js';
 import { scheduleDailyBackup } from './backup.js';
 import { CommandHandler, currentTaskKey } from './bridge/commands.js';
 import { loadConfig, type Config } from './config.js';
 import {
   anchorAction,
+  AUQ_ACTION_KIND,
   buildAnchorCard,
   buildProcessingCard,
+  buildQuestionAnsweredCard,
+  buildQuestionCard,
   buildResultCard,
   buildStatusCard,
 } from './feishu/card.js';
@@ -21,7 +24,7 @@ import { createDispatcher } from './feishu/event-router.js';
 import { ProgressCards } from './feishu/progress-cards.js';
 import { Sender } from './feishu/sender.js';
 import { StreamingCard } from './feishu/stream-card.js';
-import type { IncomingMessage } from './feishu/types.js';
+import type { CardAction, IncomingMessage } from './feishu/types.js';
 import { installCrashGuard, removeOwnPidFile, startHeartbeat } from './lifecycle.js';
 import { createLogger, type Logger } from './logger.js';
 import type { Task } from './store.js';
@@ -33,6 +36,8 @@ import type { WorkItem, WorkItemEvent } from './workitems/types.js';
 import { createAgentRunHandler } from './worktypes/agent-run/run-handler.js';
 import { registerProbe } from './worktypes/probe/index.js';
 import { registerRequirement } from './worktypes/requirement/index.js';
+import { createIntegrationCheckHandler } from './worktypes/requirement/integration.js';
+import { createRequirementRunStrategy } from './worktypes/requirement/worker-handler.js';
 
 const COMPACT_PROMPT = [
   '请把我们到目前为止的完整对话压缩成一份结构化摘要，供新会话继续使用。',
@@ -293,12 +298,19 @@ async function main() {
       const streaming = ackCardId
         ? new StreamingCard(sender, ackCardId, task.display_name, task.agent_kind)
         : null;
-      const callbacks: ProgressCallbacks | undefined = streaming
-        ? {
-            onToolUse: (_id, t) => streaming.onToolUse(t.name),
-            onText: (_id, full) => streaming.onText(full),
-          }
-        : undefined;
+      let pendingQuestion: AskUserQuestion | null = null;
+      const callbacks: ProgressCallbacks = {
+        // Claude asked the user mid-turn (AskUserQuestion). The headless CLI auto-closes the
+        // tool so this turn still ends normally — we render the choices as the final card and
+        // resume the picked answer as the next message (see handleCardAction).
+        onAskUser: (_id, q) => {
+          pendingQuestion = q;
+        },
+      };
+      if (streaming) {
+        callbacks.onToolUse = (_id, t) => streaming.onToolUse(t.name);
+        callbacks.onText = (_id, full) => streaming.onText(full);
+      }
 
       let result: Awaited<ReturnType<typeof pool.send>>;
       try {
@@ -313,7 +325,14 @@ async function main() {
         await streaming?.stop();
       }
 
-      const card = buildResultCard(task.display_name, result);
+      // If Claude asked a question this turn, replace the result card (which would otherwise be
+      // the CLI's "弹窗关闭了" degrade text) with an interactive choice card.
+      const card = pendingQuestion
+        ? buildQuestionCard(task.display_name, pendingQuestion, {
+            taskId: task.id,
+            chatId: input.chatId,
+          })
+        : buildResultCard(task.display_name, result);
       if (ackCardId) {
         const ok = await sender.updateCard(ackCardId, card);
         if (!ok) {
@@ -619,158 +638,211 @@ async function main() {
     },
   );
 
-  const dispatcher = createDispatcher(botOpenId, logger, botStartTime, async (msg) => {
-    if (msg.chatType === 'group' && !msg.isMentioned) {
+  // Card button callbacks (R06/D-12) all arrive through one onCardAction; route by value.kind
+  // so other kinds (requirement checkpoints) can be added alongside the AskUserQuestion path.
+  async function handleCardAction(action: CardAction): Promise<void> {
+    const value = (action.value ?? {}) as Record<string, unknown>;
+    if (value.kind !== AUQ_ACTION_KIND) {
+      logger.warn({ kind: value.kind }, 'unhandled card action kind');
       return;
     }
-    const isAdmin = config.allowedOpenIds.has(msg.userId);
-    if (!isAdmin && !store.isAllowed(msg.userId)) {
-      logger.warn(
-        {
-          userId: msg.userId,
-          chatType: msg.chatType,
-          text: msg.text.slice(0, 50),
-        },
-        'unauthorized sender, ignoring',
+    if (!config.allowedOpenIds.has(action.operatorId) && !store.isAllowed(action.operatorId)) {
+      logger.warn({ operatorId: action.operatorId }, 'unauthorized card action, ignoring');
+      return;
+    }
+    const taskId = typeof value.taskId === 'string' ? value.taskId : '';
+    const chatId = typeof value.chatId === 'string' ? value.chatId : '';
+    const label = typeof value.label === 'string' ? value.label : '';
+    const header = typeof value.header === 'string' ? value.header : '';
+    if (!taskId || !label) {
+      logger.warn({ taskId, label }, 'auq card action missing taskId/label');
+      return;
+    }
+    const task = store.getTask(taskId);
+    if (!task) {
+      logger.warn({ taskId }, 'auq card action for unknown task');
+      return;
+    }
+    // Patch the question card to a terminal "已选 X" so it can't be answered twice.
+    if (action.messageId) {
+      await sender.updateCard(
+        action.messageId,
+        buildQuestionAnsweredCard(task.display_name, label),
       );
-      return;
     }
-
-    if (msg.text.startsWith('/')) {
-      await commands.dispatch(msg);
-      return;
+    // Feed the choice back as the next turn — same --resume path as a normal reply, since the
+    // CLI no longer accepts a tool_result for the (already auto-closed) AskUserQuestion.
+    const text = header ? `针对「${header}」，我选择：${label}` : label;
+    const turnInput: TurnInput = {
+      chatId,
+      messageId: action.messageId ?? '',
+      text,
+    };
+    if (runningTasks.has(taskId)) {
+      enqueue(taskId, turnInput);
+    } else {
+      void runWithDrain(taskId, turnInput);
     }
+  }
 
-    // WI-D/WI-5: consult the thread-claim registry BEFORE the bridge task fallback. A
-    // thread claimed by the managed (workitems) layer must not be swallowed by the bridge's
-    // root→task / recent-task fallback — the follow-up is routed into the owning work
-    // item's next round instead.
-    // 话题路由优先：话题里的追问带 thread_id（= 锚点卡创建话题时的 claim key）；回退到回复根。
-    const threadRoot = msg.threadId ?? msg.rootId ?? msg.parentId;
-    if (threadRoot) {
-      const claim = store.getThreadClaim(threadRoot);
-      if (claim?.owner_kind === 'managed') {
-        const item = workitems.api.getWorkItem(claim.owner_id);
-        if (item) {
-          // WI-7 P1: a terminal item (e.g. failed) keeps its claim until /done. Injecting a
-          // follow-up would hit the reducer terminal short-circuit (recorded, never
-          // dispatched) — so reply honestly instead of "已转交…稍候进展", which would promise
-          // a report that never comes. /done still releases the claim and closes the card.
-          if (isTerminalStatus(item.status)) {
-            await sender.reply(
-              msg.messageId,
-              '该调查已结束，回复 `/done` 关闭后可重新发起 `/probe`。',
-            );
+  const dispatcher = createDispatcher(
+    botOpenId,
+    logger,
+    botStartTime,
+    async (msg) => {
+      if (msg.chatType === 'group' && !msg.isMentioned) {
+        return;
+      }
+      const isAdmin = config.allowedOpenIds.has(msg.userId);
+      if (!isAdmin && !store.isAllowed(msg.userId)) {
+        logger.warn(
+          {
+            userId: msg.userId,
+            chatType: msg.chatType,
+            text: msg.text.slice(0, 50),
+          },
+          'unauthorized sender, ignoring',
+        );
+        return;
+      }
+
+      if (msg.text.startsWith('/')) {
+        await commands.dispatch(msg);
+        return;
+      }
+
+      // WI-D/WI-5: consult the thread-claim registry BEFORE the bridge task fallback. A
+      // thread claimed by the managed (workitems) layer must not be swallowed by the bridge's
+      // root→task / recent-task fallback — the follow-up is routed into the owning work
+      // item's next round instead.
+      // 话题路由优先：话题里的追问带 thread_id（= 锚点卡创建话题时的 claim key）；回退到回复根。
+      const threadRoot = msg.threadId ?? msg.rootId ?? msg.parentId;
+      if (threadRoot) {
+        const claim = store.getThreadClaim(threadRoot);
+        if (claim?.owner_kind === 'managed') {
+          const item = workitems.api.getWorkItem(claim.owner_id);
+          if (item) {
+            // WI-7 P1: a terminal item (e.g. failed) keeps its claim until /done. Injecting a
+            // follow-up would hit the reducer terminal short-circuit (recorded, never
+            // dispatched) — so reply honestly instead of "已转交…稍候进展", which would promise
+            // a report that never comes. /done still releases the claim and closes the card.
+            if (isTerminalStatus(item.status)) {
+              await sender.reply(
+                msg.messageId,
+                '该调查已结束，回复 `/done` 关闭后可重新发起 `/probe`。',
+              );
+              return;
+            }
+            workitems.api.injectHumanMessage(item.id, {
+              text: msg.text,
+              feishuMsgId: msg.messageId,
+            });
+            await sender.reply(msg.messageId, '已转交给调查，稍候进展会在本话题更新。');
             return;
           }
-          workitems.api.injectHumanMessage(item.id, {
-            text: msg.text,
-            feishuMsgId: msg.messageId,
-          });
-          await sender.reply(msg.messageId, '已转交给调查，稍候进展会在本话题更新。');
-          return;
+          // Owner vanished but the claim lingered — release it and fall through to normal
+          // bridge routing instead of swallowing the message forever.
+          logger.warn({ threadRoot, ownerId: claim.owner_id }, 'managed claim with missing owner');
+          store.releaseThreadClaim(threadRoot);
         }
-        // Owner vanished but the claim lingered — release it and fall through to normal
-        // bridge routing instead of swallowing the message forever.
-        logger.warn({ threadRoot, ownerId: claim.owner_id }, 'managed claim with missing owner');
-        store.releaseThreadClaim(threadRoot);
       }
-    }
 
-    const candidates = [msg.rootId, msg.parentId].filter((v): v is string => !!v);
-    let task = candidates.length > 0 ? store.getTaskByRootMsg(candidates[0]!) : undefined;
-    if (!task) {
-      for (const id of candidates) {
-        task = store.getTaskByMessageId(id);
-        if (task) break;
+      const candidates = [msg.rootId, msg.parentId].filter((v): v is string => !!v);
+      let task = candidates.length > 0 ? store.getTaskByRootMsg(candidates[0]!) : undefined;
+      if (!task) {
+        for (const id of candidates) {
+          task = store.getTaskByMessageId(id);
+          if (task) break;
+        }
       }
-    }
-    if (!task) {
-      const currentId = store.getState(currentTaskKey(msg.chatId));
-      if (currentId) {
-        task = store.getBridgeTask(currentId);
+      if (!task) {
+        const currentId = store.getState(currentTaskKey(msg.chatId));
+        if (currentId) {
+          task = store.getBridgeTask(currentId);
+          if (task) {
+            logger.info(
+              { fallbackTo: task.id, chatId: msg.chatId },
+              'routed to current task in chat',
+            );
+          }
+        }
+      }
+      if (!task) {
+        task = store.mostRecentTaskInChat(msg.chatId);
         if (task) {
           logger.info(
             { fallbackTo: task.id, chatId: msg.chatId },
-            'routed to current task in chat',
+            'fallback to most recent task in chat',
           );
         }
       }
-    }
-    if (!task) {
-      task = store.mostRecentTaskInChat(msg.chatId);
-      if (task) {
-        logger.info(
-          { fallbackTo: task.id, chatId: msg.chatId },
-          'fallback to most recent task in chat',
+      if (!task) {
+        await sender.reply(msg.messageId, '本会话没有任务，用 /new <name> 新建一个。');
+        return;
+      }
+
+      store.recordTaskMessage(task.id, msg.messageId);
+      store.logEvent(task.id, 'user', undefined, {
+        text: msg.text,
+        attachments: msg.attachments,
+      });
+      store.touchTask(task.id);
+
+      if (msg.attachments.length > 0) {
+        const inboxDir = path.join(task.cwd, 'inbox');
+        try {
+          fs.mkdirSync(inboxDir, { recursive: true });
+        } catch (err) {
+          logger.error({ err, inboxDir }, 'mkdir inbox failed');
+          await sender.reply(msg.messageId, `[${task.display_name}] 创建 inbox 目录失败`);
+          return;
+        }
+        const downloaded: string[] = [];
+        for (let i = 0; i < msg.attachments.length; i++) {
+          const a = msg.attachments[i]!;
+          const safe = sanitizeName(a.name);
+          const dest = path.join(inboxDir, `${msg.messageId}-${i}-${safe}`);
+          const ok = await sender.downloadAttachment(msg.messageId, a.fileKey, a.kind, dest);
+          if (ok) downloaded.push(dest);
+        }
+        if (downloaded.length === 0) {
+          await sender.reply(msg.messageId, `[${task.display_name}] 附件下载失败`);
+          return;
+        }
+        const expiresAt = Date.now() + ATTACHMENT_TTL_MS;
+        const list = pendingAttachments.get(msg.chatId) ?? [];
+        for (const p of downloaded) list.push({ path: p, expiresAt });
+        pendingAttachments.set(msg.chatId, list);
+        const ackLines = downloaded.map((p) => `- \`${p}\``).join('\n');
+        const agentLabel = task.agent_kind === 'codex' ? 'Codex' : 'Claude';
+        await sender.reply(
+          msg.messageId,
+          `[${task.display_name}] 已收到附件，存放在：\n${ackLines}\n\n下条消息会自动把这些路径告诉 ${agentLabel}。`,
         );
+        if (!msg.text) return;
       }
-    }
-    if (!task) {
-      await sender.reply(msg.messageId, '本会话没有任务，用 /new <name> 新建一个。');
-      return;
-    }
 
-    store.recordTaskMessage(task.id, msg.messageId);
-    store.logEvent(task.id, 'user', undefined, {
-      text: msg.text,
-      attachments: msg.attachments,
-    });
-    store.touchTask(task.id);
-
-    if (msg.attachments.length > 0) {
-      const inboxDir = path.join(task.cwd, 'inbox');
-      try {
-        fs.mkdirSync(inboxDir, { recursive: true });
-      } catch (err) {
-        logger.error({ err, inboxDir }, 'mkdir inbox failed');
-        await sender.reply(msg.messageId, `[${task.display_name}] 创建 inbox 目录失败`);
+      const input: TurnInput = {
+        chatId: msg.chatId,
+        messageId: msg.messageId,
+        text: msg.text,
+        parentId: msg.parentId,
+      };
+      if (runningTasks.has(task.id)) {
+        const ok = enqueue(task.id, input);
+        const depth = queues.get(task.id)?.length ?? 0;
+        await sender.reply(
+          msg.messageId,
+          ok
+            ? `[${task.display_name}] 正忙，已排队（队列第 ${depth} 位），处理完会自动接着跑。`
+            : `[${task.display_name}] 队列已满（上限 ${MAX_QUEUE}），请稍后再发。`,
+        );
         return;
       }
-      const downloaded: string[] = [];
-      for (let i = 0; i < msg.attachments.length; i++) {
-        const a = msg.attachments[i]!;
-        const safe = sanitizeName(a.name);
-        const dest = path.join(inboxDir, `${msg.messageId}-${i}-${safe}`);
-        const ok = await sender.downloadAttachment(msg.messageId, a.fileKey, a.kind, dest);
-        if (ok) downloaded.push(dest);
-      }
-      if (downloaded.length === 0) {
-        await sender.reply(msg.messageId, `[${task.display_name}] 附件下载失败`);
-        return;
-      }
-      const expiresAt = Date.now() + ATTACHMENT_TTL_MS;
-      const list = pendingAttachments.get(msg.chatId) ?? [];
-      for (const p of downloaded) list.push({ path: p, expiresAt });
-      pendingAttachments.set(msg.chatId, list);
-      const ackLines = downloaded.map((p) => `- \`${p}\``).join('\n');
-      const agentLabel = task.agent_kind === 'codex' ? 'Codex' : 'Claude';
-      await sender.reply(
-        msg.messageId,
-        `[${task.display_name}] 已收到附件，存放在：\n${ackLines}\n\n下条消息会自动把这些路径告诉 ${agentLabel}。`,
-      );
-      if (!msg.text) return;
-    }
-
-    const input: TurnInput = {
-      chatId: msg.chatId,
-      messageId: msg.messageId,
-      text: msg.text,
-      parentId: msg.parentId,
-    };
-    if (runningTasks.has(task.id)) {
-      const ok = enqueue(task.id, input);
-      const depth = queues.get(task.id)?.length ?? 0;
-      await sender.reply(
-        msg.messageId,
-        ok
-          ? `[${task.display_name}] 正忙，已排队（队列第 ${depth} 位），处理完会自动接着跑。`
-          : `[${task.display_name}] 队列已满（上限 ${MAX_QUEUE}），请稍后再发。`,
-      );
-      return;
-    }
-    void runWithDrain(task.id, input);
-  });
+      void runWithDrain(task.id, input);
+    },
+    handleCardAction,
+  );
 
   await wsClient.start({ eventDispatcher: dispatcher });
   // WS reconnect guard: the SDK's reconnect interval is a hard-coded 120s, so a dropped ws
@@ -874,6 +946,11 @@ export function createWorkitemsRuntime(deps: {
   // its own effect handlers (worker write run / integration_check / checkpoint) are layered
   // in later stages. Registered after probe so the shared 'run' handler covers both.
   registerRequirement(workitems.registry);
+  // requirement workers run under the WRITE profile in their own worktree (Stage 4); probe
+  // keeps the default readonly strategy. strategyFor picks per workitem type.
+  const requirementStrategy = createRequirementRunStrategy({
+    worktreesDir: path.join(deps.config.dataDir, 'worktrees'),
+  });
   workitems.effects.registerHandler(
     createAgentRunHandler({
       pool: deps.pool,
@@ -881,8 +958,11 @@ export function createWorkitemsRuntime(deps: {
       defaultCwd: deps.defaultCwd,
       logger: deps.logger,
       progress: progressCards,
+      strategyFor: (item) => (item.type === 'requirement' ? requirementStrategy : undefined),
     }),
   );
+  // requirement 集成验证: static contract对账 effect (emits integration_check_passed/failed).
+  workitems.effects.registerHandler(createIntegrationCheckHandler());
   workitems.start();
   return workitems;
 }
