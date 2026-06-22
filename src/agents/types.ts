@@ -14,6 +14,13 @@ export interface ProgressCallbacks {
   onToolResult?: (taskId: string, r: { isError?: boolean }) => void;
   onText?: (taskId: string, fullText: string) => void;
   /**
+   * Fired the moment a session id is first observed (the runner's `session` event), so an
+   * upper layer can persist it immediately. The kernel store already records it against the
+   * task; this lets a consumer mirror it into its own state BEFORE a crash, which is the
+   * precondition for a real `--resume` on recovery (D-30). Neutral signature.
+   */
+  onSession?: (taskId: string, sessionId: string) => void;
+  /**
    * WI-9 liveness tick — invoked on EVERY stdout line (before parsing), so a turn that
    * streams anything (thinking deltas, SSE pings, tool noise) keeps signalling "alive" even
    * when it produces no assistant text. A consumer bridges this to a liveness heartbeat so a
@@ -96,7 +103,10 @@ export interface AgentFactory {
  * permissions, no tool injection) so the bridge's default path is a zero regression.
  */
 export interface PermissionProfile {
-  mode: 'full' | 'readonly'; // M1a two profiles; 'write' lands in M2
+  // 'write' is the requirement-worker profile: --add-dir scope + a PreToolUse path guard
+  // (the real constraint), never --dangerously-skip-permissions. Mapping write→full would
+  // drop the dir limit entirely and is a bug (D-04).
+  mode: 'full' | 'readonly' | 'write';
 }
 
 export interface McpServerSpec {
@@ -109,18 +119,25 @@ export interface McpServerSpec {
 export interface RunOptions {
   permission?: PermissionProfile;
   mcpServers?: McpServerSpec[];
+  // Write profile only: the directories the agent may write to. The agents layer knows
+  // only paths, never "repo" (kernel neutrality, D-04). Same source as the run's cwd
+  // (worktreePathFor), so cwd + writableDirs always move together (R05.AC-7).
+  writableDirs?: string[];
 }
 
 /**
  * Stable serialization of RunOptions for the pool's per-process rebuild decision
  * (§2.1). Default options collapse to '' so the no-options bridge path never triggers
- * a rebuild — this is the zero-regression guarantee the pool relies on.
+ * a rebuild — this is the zero-regression guarantee the pool relies on. writableDirs
+ * MUST be in the fingerprint (D-21): a changed dir set with an unchanged fingerprint
+ * would keep a stale --add-dir pointing at the old worktree.
  */
 export function runOptionsFingerprint(o?: RunOptions): string {
   const permission = o?.permission?.mode ?? 'full';
   const servers = (o?.mcpServers ?? [])
     .map((s) => ({ name: s.name, command: s.command, args: s.args ?? [], env: s.env ?? {} }))
     .sort((a, b) => a.name.localeCompare(b.name));
-  if (permission === 'full' && servers.length === 0) return '';
-  return JSON.stringify({ permission, servers });
+  const writableDirs = [...(o?.writableDirs ?? [])].sort();
+  if (permission === 'full' && servers.length === 0 && writableDirs.length === 0) return '';
+  return JSON.stringify({ permission, servers, writableDirs });
 }

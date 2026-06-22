@@ -9,41 +9,85 @@ import {
   runOptionsFingerprint,
 } from './types.js';
 
+export type RunPriority = 'high' | 'normal';
+
 export interface AgentPoolConfig {
   maxHot: number;
   // WI-C: global cap on concurrent runTurns. Defaults to maxHot, clamped ≤ maxHot
   // (more in-flight than hot slots would re-introduce "over hot cap").
   maxConcurrent?: number;
+  // R07/D-18: slots that low-priority (worker) runs may not occupy, so a high-priority
+  // (owner) run is never starved at the back of the FIFO. Default 0 ⇒ pure FIFO, the
+  // bridge path is byte-for-byte unchanged. Clamped to ≤ cap-1 so the pool can't deadlock.
+  reservedHighPrioritySlots?: number;
 }
 
 // WI-C: global concurrency gate. Bounds how many runTurns run at once; excess send()
-// calls queue FIFO and resume in order as slots free. The slot is held across runTurn and
-// released in finally (§2.1). Replaces the old "busy → spawn over maxHot" behavior.
+// calls queue and resume as slots free. The slot is held across runTurn and released in
+// finally (§2.1). R07: priority-aware — high-priority waiters are served before normal
+// ones, and `reserved` slots are off-limits to normal runs so a high-priority run always
+// has somewhere to land (no preemption needed; deadlock-free because owner→worker dispatch
+// does not acquire inside the owner run — D-18).
 class Semaphore {
   private active = 0;
-  private readonly waiters: Array<() => void> = [];
+  private lowActive = 0;
+  private readonly highWaiters: Array<() => void> = [];
+  private readonly lowWaiters: Array<() => void> = [];
 
-  constructor(private readonly max: number) {}
+  constructor(
+    private readonly max: number,
+    private readonly reserved = 0,
+  ) {}
 
-  tryAcquire(): boolean {
-    if (this.active < this.max) {
+  private lowCap(): number {
+    return Math.max(0, this.max - this.reserved);
+  }
+
+  tryAcquire(high = false): boolean {
+    if (high) {
+      if (this.active < this.max) {
+        this.active++;
+        return true;
+      }
+      return false;
+    }
+    if (this.active < this.max && this.lowActive < this.lowCap()) {
       this.active++;
+      this.lowActive++;
       return true;
     }
     return false;
   }
 
-  acquire(): Promise<void> {
-    if (this.tryAcquire()) return Promise.resolve();
-    return new Promise<void>((resolve) => this.waiters.push(resolve));
+  acquire(high = false): Promise<void> {
+    if (this.tryAcquire(high)) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      (high ? this.highWaiters : this.lowWaiters).push(resolve);
+    });
   }
 
-  release(): void {
-    // Hand the slot straight to the next waiter (active unchanged); only drop the count
-    // when nobody is queued.
-    const next = this.waiters.shift();
-    if (next) next();
-    else this.active = Math.max(0, this.active - 1);
+  release(high = false): void {
+    this.active = Math.max(0, this.active - 1);
+    if (!high) this.lowActive = Math.max(0, this.lowActive - 1);
+    this.pump();
+  }
+
+  private pump(): void {
+    // High-priority first — may use any free slot up to the full cap.
+    while (this.active < this.max && this.highWaiters.length > 0) {
+      const next = this.highWaiters.shift();
+      if (!next) break;
+      this.active++;
+      next();
+    }
+    // Then normal — bounded by both the full cap and the reduced low cap.
+    while (this.active < this.max && this.lowActive < this.lowCap() && this.lowWaiters.length > 0) {
+      const next = this.lowWaiters.shift();
+      if (!next) break;
+      this.active++;
+      this.lowActive++;
+      next();
+    }
   }
 
   get activeCount(): number {
@@ -51,7 +95,7 @@ class Semaphore {
   }
 
   get queuedCount(): number {
-    return this.waiters.length;
+    return this.highWaiters.length + this.lowWaiters.length;
   }
 }
 
@@ -74,7 +118,13 @@ export class AgentPool {
     // execution, never a permanent hang. config.ts validation is the primary guard.
     const rawCap = Math.min(cfg.maxConcurrent ?? cfg.maxHot, cfg.maxHot);
     const cap = Number.isFinite(rawCap) && rawCap >= 1 ? Math.floor(rawCap) : 1;
-    this.slots = new Semaphore(cap);
+    // Reserve at most cap-1 slots for high priority — reserving all would starve normal
+    // runs and could deadlock. Default 0 keeps the legacy pure-FIFO behaviour.
+    const rawReserved = cfg.reservedHighPrioritySlots ?? 0;
+    const reserved = Number.isFinite(rawReserved)
+      ? Math.max(0, Math.min(Math.floor(rawReserved), cap - 1))
+      : 0;
+    this.slots = new Semaphore(cap, reserved);
   }
 
   factoryFor(kind: AgentKind): AgentFactory {
@@ -112,6 +162,10 @@ export class AgentPool {
     callbacks?: ProgressCallbacks,
     options?: RunOptions,
     onQueued?: () => void,
+    // R07/D-18: 'high' lets an owner run jump the queue + use a reserved slot. Neutral —
+    // the pool never reads task.owner_kind (owner & worker are both 'managed'); the caller
+    // maps its role to a priority. Default 'normal' keeps the bridge path unchanged.
+    priority: RunPriority = 'normal',
   ): Promise<TurnResult> {
     // §2.1 step 1: drop the cached runner when the kind changed (/agent switch) OR the
     // per-run options fingerprint changed (WI-A) — Claude bakes its args at spawn, so a
@@ -135,10 +189,11 @@ export class AgentPool {
 
     // §2.1 step 2 (WI-C): acquire a global slot BEFORE createRunner — otherwise N sends
     // each build a runner (mutual evict thrash) and squat a maxHot slot while waiting.
-    // Full → onQueued once, then FIFO wait. Released in finally below.
-    if (!this.slots.tryAcquire()) {
+    // Full → onQueued once, then priority wait. Released in finally below.
+    const high = priority === 'high';
+    if (!this.slots.tryAcquire(high)) {
       onQueued?.();
-      await this.slots.acquire();
+      await this.slots.acquire(high);
     }
     try {
       if (!runner) {
@@ -162,7 +217,7 @@ export class AgentPool {
       }
       return await runner.runTurn(text, callbacks, options);
     } finally {
-      this.slots.release();
+      this.slots.release(high);
     }
   }
 

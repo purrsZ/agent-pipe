@@ -26,3 +26,18 @@ export interface IncomingMessage {
 }
 
 export type MessageHandler = (msg: IncomingMessage) => void | Promise<void>;
+
+/**
+ * A card button callback, delivered over the existing ws connection (R06/D-12 — no HTTP
+ * endpoint). The kernel treats `value` as an OPAQUE payload and never interprets its
+ * contents (the upper adapter decodes it); keeping it `unknown` here is what holds the
+ * kernel red-line (no business vocabulary leaks into feishu).
+ */
+export interface CardAction {
+  value: unknown;
+  operatorId: string;
+  token?: string;
+  messageId?: string;
+}
+
+export type CardActionHandler = (action: CardAction) => void | Promise<void>;

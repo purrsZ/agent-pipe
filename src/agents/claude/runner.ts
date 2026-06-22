@@ -14,6 +14,7 @@ import type {
   TurnResult,
 } from '../types.js';
 import { ClaudeParser } from './parser.js';
+import { buildWriteSettings, renderWriteGuardScript } from './write-guard.js';
 
 export interface ClaudeFactoryConfig {
   binPath: string;
@@ -39,6 +40,11 @@ export function buildClaudeArgs(p: {
   sessionId: string | null;
   mcpConfigPath?: string;
   readonly?: boolean;
+  // Write profile (D-04): the directories the agent may write to + the PreToolUse guard
+  // settings file (the real path constraint). Present ⇒ write mode. Never combined with
+  // --dangerously-skip-permissions (that would drop the dir limit, R04.AC-6).
+  writableDirs?: string[];
+  guardSettingsPath?: string;
 }): string[] {
   const args = [
     '-p',
@@ -52,9 +58,14 @@ export function buildClaudeArgs(p: {
     '--effort',
     p.effort,
   ];
-  // Permission profile (WI-B). readonly: drop the blanket bypass and deny write tools
-  // deterministically. full (default): legacy --dangerously-skip-permissions, unchanged.
-  if (p.readonly) {
+  // Permission profile. write: --add-dir scopes + PreToolUse guard enforces paths, no
+  // blanket bypass, no --disallowedTools (the hook is the constraint, D-04/D-22). readonly:
+  // drop the bypass and deny write tools deterministically. full (default): legacy
+  // --dangerously-skip-permissions, unchanged byte-for-byte.
+  if (p.writableDirs && p.writableDirs.length > 0) {
+    for (const dir of p.writableDirs) args.push('--add-dir', dir);
+    if (p.guardSettingsPath) args.push('--settings', p.guardSettingsPath);
+  } else if (p.readonly) {
     args.push('--disallowedTools', READONLY_DENIED_TOOLS);
   } else {
     args.push('--dangerously-skip-permissions');
@@ -105,6 +116,10 @@ class ClaudeRunner implements Runner {
   // (the proc spans many turns; deleting per-turn would drop the config on turn 2).
   private mcpConfigPath: string | null = null;
   private mcpSeq = 0;
+  // Write profile (D-04): per-process temp files for the PreToolUse guard (settings +
+  // script). Same lifecycle as mcpConfigPath — cleaned on dispose AND proc close/error.
+  private guardPaths: { settings: string; script: string } | null = null;
+  private guardSeq = 0;
 
   constructor(
     private task: Task,
@@ -200,6 +215,7 @@ class ClaudeRunner implements Runner {
     this.proc = null;
     this.state = 'cold';
     this.cleanupMcpConfig();
+    this.cleanupGuard();
   }
 
   private writeMcpConfig(options?: RunOptions): string | null {
@@ -223,16 +239,44 @@ class ClaudeRunner implements Runner {
     this.mcpConfigPath = null;
   }
 
+  private writeGuardFiles(options?: RunOptions): { settings: string; script: string } | null {
+    if (options?.permission?.mode !== 'write') return null;
+    const dirs = options.writableDirs ?? [];
+    if (dirs.length === 0) return null;
+    const base = path.join(os.tmpdir(), `agent-pipe-guard-${this.taskId}-${this.guardSeq++}`);
+    const script = `${base}.mjs`;
+    const settings = `${base}.settings.json`;
+    fs.writeFileSync(script, renderWriteGuardScript(dirs));
+    fs.writeFileSync(settings, JSON.stringify(buildWriteSettings(script)));
+    return { settings, script };
+  }
+
+  private cleanupGuard(): void {
+    if (!this.guardPaths) return;
+    for (const p of [this.guardPaths.settings, this.guardPaths.script]) {
+      try {
+        fs.unlinkSync(p);
+      } catch {
+        /* best-effort */
+      }
+    }
+    this.guardPaths = null;
+  }
+
   private spawn(options?: RunOptions): void {
     const model = this.task.model ?? this.cfg.defaultModel;
     this.mcpConfigPath = this.writeMcpConfig(options);
-    const readonly = options?.permission?.mode === 'readonly';
+    this.guardPaths = this.writeGuardFiles(options);
+    const mode = options?.permission?.mode ?? 'full';
+    const readonly = mode === 'readonly';
     const args = buildClaudeArgs({
       model,
       effort: this.cfg.effort,
       sessionId: this.sessionId,
       mcpConfigPath: this.mcpConfigPath ?? undefined,
       readonly,
+      writableDirs: mode === 'write' ? (options?.writableDirs ?? []) : undefined,
+      guardSettingsPath: this.guardPaths?.settings,
     });
 
     const cleanEnv: Record<string, string | undefined> = { ...process.env };
@@ -249,7 +293,8 @@ class ClaudeRunner implements Runner {
         hasResume: !!this.sessionId,
         model,
         mcpServers: (options?.mcpServers ?? []).map((s) => s.name),
-        permission: readonly ? 'readonly' : 'full',
+        permission: mode,
+        writableDirs: mode === 'write' ? (options?.writableDirs ?? []) : undefined,
       },
       'spawning claude process',
     );
@@ -298,9 +343,10 @@ class ClaudeRunner implements Runner {
         { taskId: this.taskId, code, stderr: this.stderrBuf.slice(-500) },
         'claude exited',
       );
-      // Crash/normal exit lands here, not in dispose() — clean the MCP temp file on
-      // every proc end so it can't leak (WI-A / review #6).
+      // Crash/normal exit lands here, not in dispose() — clean the MCP + guard temp files
+      // on every proc end so they can't leak (WI-A / review #6).
       this.cleanupMcpConfig();
+      this.cleanupGuard();
       // If we were disposed (e.g. by /clear, /model, /agent or LRU eviction) a fresh
       // runner may already own this taskId. Don't touch shared store state in that case.
       if (this.disposed) return;
@@ -317,6 +363,7 @@ class ClaudeRunner implements Runner {
     proc.on('error', (err) => {
       this.deps.logger.error({ err, taskId: this.taskId }, 'claude spawn error');
       this.cleanupMcpConfig();
+      this.cleanupGuard();
       if (this.inflight) {
         this.inflight.reject(err);
         this.inflight = null;
@@ -332,6 +379,9 @@ class ClaudeRunner implements Runner {
       case 'session':
         this.sessionId = e.sessionId;
         this.deps.store.setAgentSessionId(this.taskId, e.sessionId);
+        // D-30: surface the session id the instant it appears so an upper layer can mirror
+        // it into its own state before any crash — the precondition for --resume.
+        inflight?.callbacks?.onSession?.(this.taskId, e.sessionId);
         break;
       case 'ready':
         if (this.state === 'starting') {

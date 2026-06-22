@@ -71,3 +71,38 @@ describe('buildClaudeArgs readonly profile (WI-B)', () => {
     expect(args.slice(-2)).toEqual(['--resume', 's1']);
   });
 });
+
+describe('buildClaudeArgs write profile (D-04)', () => {
+  it('adds --add-dir per writable dir + --settings, and NEVER --dangerously-skip-permissions', () => {
+    const args = buildClaudeArgs({
+      model: 'm',
+      effort: 'high',
+      sessionId: null,
+      writableDirs: ['/wt/a', '/wt/b'],
+      guardSettingsPath: '/tmp/guard.settings.json',
+    });
+    expect(args).not.toContain('--dangerously-skip-permissions'); // R04.AC-6: never full
+    expect(args).not.toContain('--disallowedTools'); // hook is the constraint, not a deny list
+    // both dirs declared
+    const addDirIdxA = args.findIndex((a, i) => a === '--add-dir' && args[i + 1] === '/wt/a');
+    const addDirIdxB = args.findIndex((a, i) => a === '--add-dir' && args[i + 1] === '/wt/b');
+    expect(addDirIdxA).toBeGreaterThanOrEqual(0);
+    expect(addDirIdxB).toBeGreaterThanOrEqual(0);
+    const si = args.indexOf('--settings');
+    expect(args[si + 1]).toBe('/tmp/guard.settings.json');
+  });
+
+  it('write composes with --mcp-config and --resume', () => {
+    const args = buildClaudeArgs({
+      model: 'm',
+      effort: 'high',
+      sessionId: 's1',
+      mcpConfigPath: '/tmp/c.json',
+      writableDirs: ['/wt/a'],
+      guardSettingsPath: '/tmp/g.json',
+    });
+    expect(args).toContain('--add-dir');
+    expect(args).toContain('--mcp-config');
+    expect(args.slice(-2)).toEqual(['--resume', 's1']);
+  });
+});

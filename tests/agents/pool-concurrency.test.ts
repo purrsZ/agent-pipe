@@ -23,7 +23,7 @@ function fakeTask(id: string, kind: AgentKind): Task {
   };
 }
 
-function setup(maxConcurrent?: number, maxHot = 8) {
+function setup(maxConcurrent?: number, maxHot = 8, reservedHighPrioritySlots?: number) {
   const created: FakeRunner[] = [];
   const releases: Array<() => void> = [];
   const factory = (kind: AgentKind): AgentFactory => ({
@@ -45,7 +45,7 @@ function setup(maxConcurrent?: number, maxHot = 8) {
   const store = { setStatus() {} } as unknown as Store;
   const pool = new AgentPool(
     { claude: factory('claude'), codex: factory('codex') },
-    { maxHot, maxConcurrent },
+    { maxHot, maxConcurrent, reservedHighPrioritySlots },
     store,
     logger,
   );
@@ -110,5 +110,50 @@ describe('AgentPool global concurrency gate (WI-C / §2.1)', () => {
     for (const r of releases.splice(0)) r();
     await Promise.all(sends);
     expect(pool.activeRuns()).toBe(0);
+  });
+});
+
+describe('AgentPool owner reserved slot (R07 / D-18)', () => {
+  it('caps normal runs below the full cap, leaving a slot for high priority', async () => {
+    // cap 2, reserve 1 → normal runs may take at most 1; the other is owner-only.
+    const { pool, created } = setup(2, 8, 1);
+    pool.send(fakeTask('w1', 'claude'), 'a'); // normal — takes the single low slot
+    let w2queued = false;
+    pool.send(fakeTask('w2', 'claude'), 'b', undefined, undefined, () => {
+      w2queued = true;
+    }); // normal — blocked by the reduced low cap, even though a raw slot is free
+    await tick();
+    expect(pool.activeRuns()).toBe(1);
+    expect(w2queued).toBe(true);
+
+    // an owner run lands immediately in the reserved slot — not starved behind w2.
+    pool.send(fakeTask('owner', 'claude'), 'c', undefined, undefined, undefined, 'high');
+    await tick();
+    expect(pool.activeRuns()).toBe(2);
+    expect(created.map((r) => r.taskId)).toContain('owner');
+    expect(created.map((r) => r.taskId)).not.toContain('w2'); // still queued
+  });
+
+  it('serves a high-priority waiter before a queued normal one when a slot frees', async () => {
+    const { pool, created, releases } = setup(1, 8, 0); // cap 1, no reserve → pure priority order
+    pool.send(fakeTask('w1', 'claude'), 'a'); // holds the only slot
+    await tick();
+    pool.send(fakeTask('w2', 'claude'), 'b'); // normal, queued
+    pool.send(fakeTask('owner', 'claude'), 'c', undefined, undefined, undefined, 'high'); // high, queued
+    await tick();
+    expect(pool.queuedRuns()).toBe(2);
+
+    releases[0]!(); // free the slot → high waiter (owner) goes first
+    await tick();
+    expect(created.map((r) => r.taskId)).toContain('owner');
+    expect(created.map((r) => r.taskId)).not.toContain('w2');
+  });
+
+  it('zero regression: reserved=0 keeps pure FIFO behaviour', async () => {
+    const { pool } = setup(2, 8, 0);
+    pool.send(fakeTask('t1', 'claude'), 'a');
+    pool.send(fakeTask('t2', 'claude'), 'b');
+    await tick();
+    expect(pool.activeRuns()).toBe(2); // both normal runs fit (no reservation)
   });
 });
