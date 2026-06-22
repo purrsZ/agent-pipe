@@ -32,6 +32,9 @@ import { installCrashGuard, removeOwnPidFile, startHeartbeat } from './lifecycle
 import { createLogger, type Logger } from './logger.js';
 import type { Task } from './store.js';
 import { Store } from './store.js';
+import { composeRepoKnowledge, KNOWLEDGE_BUDGET_CHARS } from './knowledge/compose.js';
+import { loadFreshnessPolicy } from './knowledge/freshness.js';
+import { KnowledgeStore } from './knowledge/store.js';
 import { createWorkitemsContainer, type WorkitemsContainer } from './workitems/container.js';
 import { createWorkbenchAdapter } from './workitems/workbench-adapter.js';
 import { createTokenAuth } from './workbench/auth.js';
@@ -1159,9 +1162,25 @@ export function createWorkitemsRuntime(deps: {
   // in later stages. Registered after probe so the shared 'run' handler covers both.
   registerRequirement(workitems.registry);
   // requirement workers run under the WRITE profile in their own worktree (Stage 4); probe
-  // keeps the default readonly strategy. strategyFor picks per workitem type.
+  // keeps the default readonly strategy. strategyFor picks per workitem type. Stage 5: each
+  // worker also gets budget-bounded, freshness-flagged repo knowledge (repoKey == repo path).
+  // The cold-index run that FILLS the knowledge docs is the live half (Stage 7); here we only
+  // read+inject — a never-indexed repo yields undefined and the prompt simply omits the block.
+  const knowledgeStore = new KnowledgeStore(path.join(deps.config.dataDir, 'knowledge'));
+  const freshnessPolicy = loadFreshnessPolicy();
   const requirementStrategy = createRequirementRunStrategy({
     worktreesDir: path.join(deps.config.dataDir, 'worktrees'),
+    knowledgeFor: (repo) =>
+      composeRepoKnowledge(
+        {
+          store: knowledgeStore,
+          policy: freshnessPolicy,
+          budgetChars: KNOWLEDGE_BUDGET_CHARS,
+          now: () => Date.now(),
+        },
+        repo,
+        repo,
+      ),
   });
   workitems.effects.registerHandler(
     createAgentRunHandler({

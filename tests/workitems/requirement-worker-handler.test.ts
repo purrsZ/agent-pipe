@@ -124,4 +124,41 @@ describe('requirement worker run strategy (write profile + worktree)', () => {
     expect(prompt).toContain('GET /orders/:id');
     expect(prompt).toContain('冻结的对接合同');
   });
+
+  it('worker prompt injects the repo knowledge block from knowledgeFor (Stage 5 选择性注入)', () => {
+    const s = createRequirementRunStrategy({
+      worktreesDir: worktreesDir(),
+      knowledgeFor: (repo) => (repo === repoPath ? '## runbook\nnpm test' : undefined),
+    });
+    const prompt = s.composePrompt({
+      title: 't',
+      followups: [],
+      workitem: item(),
+      assignment: worker(),
+      batch: [],
+      readArtifact: () => undefined,
+    });
+    expect(prompt).toContain('该仓知识'); // the knowledge section header in composeWorkerPrompt
+    expect(prompt).toContain('npm test');
+  });
+
+  it('only workers consult knowledgeFor — the owner coordinator prompt never does', () => {
+    const seen: string[] = [];
+    const s = createRequirementRunStrategy({
+      worktreesDir: worktreesDir(),
+      knowledgeFor: (repo) => {
+        seen.push(repo);
+        return 'X';
+      },
+    });
+    s.composePrompt({
+      title: 't',
+      followups: [],
+      workitem: item(),
+      assignment: owner(),
+      batch: [],
+      readArtifact: () => undefined,
+    });
+    expect(seen).toEqual([]); // owner branch returns before touching knowledgeFor
+  });
 });

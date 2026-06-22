@@ -12,6 +12,10 @@ import { composeWorkerPrompt, mapWritePermission } from './worker.js';
 export function createRequirementRunStrategy(opts: {
   worktreesDir: string;
   baseRef?: string; // feature base ref in the target repo; default HEAD
+  // Stage 5 选择性注入: returns the budget-bounded repo-knowledge block (or undefined) for a
+  // worker's repo. Injected as a function so this worktypes-layer file never imports the
+  // knowledge layer — index.ts wires the real KnowledgeStore-backed reader (composeRepoKnowledge).
+  knowledgeFor?: (repoKey: string) => string | undefined;
 }): RunStrategy {
   const base = opts.baseRef ?? 'HEAD';
 
@@ -29,6 +33,8 @@ export function createRequirementRunStrategy(opts: {
         title,
         repo: assignment.repo ?? '',
         contract,
+        // 选择性注入: only workers get repo knowledge, keyed by the repo they own.
+        knowledge: assignment.repo ? opts.knowledgeFor?.(assignment.repo) : undefined,
         reworkNote: assignment.replacesAssignmentId ? priorReport : undefined,
       });
     },

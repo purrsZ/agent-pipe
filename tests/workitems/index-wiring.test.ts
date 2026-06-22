@@ -80,6 +80,17 @@ describe('index workitems wiring', () => {
     expect(source).toContain('void runRequirement(msg, opts)');
   });
 
+  it('wires repo-knowledge selective injection into the requirement worker strategy (T5)', () => {
+    const source = indexSource();
+
+    expect(source).toContain("from './knowledge/compose.js'");
+    expect(source).toContain('new KnowledgeStore');
+    expect(source).toContain('loadFreshnessPolicy()');
+    // the run strategy gets a knowledgeFor reader backed by composeRepoKnowledge.
+    expect(source).toContain('knowledgeFor:');
+    expect(source).toContain('composeRepoKnowledge(');
+  });
+
   it('wires the requirement 灯卡: push on new checkpoint waits + card.action 消费 (T3)', () => {
     const source = indexSource();
 

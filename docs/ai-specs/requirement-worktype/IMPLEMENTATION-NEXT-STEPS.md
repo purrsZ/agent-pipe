@@ -22,7 +22,8 @@
 | `1844761` | **T1** `/req` 触发闭包 + 命令接线（仿 runProbe）：commands onRequirement/handleRequirement（重复 --repo 多端）+ index runRequirement；commands-req 测试 + index-wiring 断言 |
 | `7dc62d2` | **T2** 工作台 HTTP server 起停：index 接 createWorkbenchAdapter+createWorkbenchServer；新增 `src/workbench/auth.ts`（createTokenAuth 本人鉴权，Bearer/cookie 常量时比对）；config workbench 块（enabled/host/port/token/operator）；releaseResources 收尾关停；auth 单测+真服务端到端+config 测试 |
 | `9048d82` | **T3** 需求灯卡：buildAnchorCard noun 去"调查"化 + buildCheckpointCard/AnsweredCard（通过/打回 callback）；`lights.ts`(灯标签/4灯rail)；index surfaceCheckpoints 推灯卡 + handleCheckpointAction 走 workbenchAdapter.actions.resolve 单写路径；lights/card/wiring 测试 |
-| _本笔_ | **T4** owner 多 worker 聚合：reducer enrichEventForType 注入中性 runningWorkers → worktype "最后一个 worker 才唤醒 owner / owner 完成进 integrate"；over-cap warn surface；worktype 单测 + e2e 慢仓 hold + 三仓告警。⚠️ 补派/批量窗口(R01.AC-9)推迟 |
+| `5bf194c` | **T4** owner 多 worker 聚合：reducer enrichEventForType 注入中性 runningWorkers → worktype "最后一个 worker 才唤醒 owner / owner 完成进 integrate"；over-cap warn surface；worktype 单测 + e2e 慢仓 hold + 三仓告警。⚠️ 补派/批量窗口(R01.AC-9)推迟 |
+| _本笔_ | **T5(部分)** 知识选择性注入接线：`knowledge/compose.ts` composeRepoKnowledge + 运行策略 knowledgeFor + index 真 KnowledgeStore 接线；compose/策略/wiring 测试。spec-design run + 冷启索引 run 留 live(Stage 7) |
 
 > 注：`docs/ai-specs/requirement-worktype/` 等设计文档仍未跟踪，按需 `git add docs/`。
 > ⚠️ `src/feishu/event-router.ts` 有用户并行的 AskUserQuestion 调试改动（TEMP debug + messageId 取 context），未纳入 T1–T3 提交，留用户处理。
@@ -55,9 +56,10 @@
 - 测试：worktype 单测（runningWorkers>0 静默 / ===0 唤醒 / 缺省兼容 / integrate 批门）+ e2e（慢 repo-b 卡住 `并行实现` 不提前推进 → 双 worker 齐了才进 灯③；三仓 over-cap 告警）。460 测试绿。
 - ⚠️ **仍开口（R01.AC-9 / R02.AC-3/7）**：>`maxWorkersPerItem`(默认 2) 的仓会被 wakePending **丢弃不补派**——reducer 已加显式 warn surface，workaround：`WORKITEMS_MAX_WORKERS_PER_ITEM ≥ 单需求最大仓数`。完整"批量唤醒窗口 + releaseWakePending 按 role 补派"是 container-concurrency 域剩余的高风险改造（需 wakePending 布尔→spec 队列的 data-model 改），单列后续。
 
-### T5. 设计/知识 agent run（S5 live 半）  ←（下一笔）
-- spec-design run effect handler（design-phase）：调起跑 spec-design 的 managed run，产物落 `contract/`+`design/`，收尾 emit `design_ready`；升格用 `design.ts` 的 `promoteToContract`。
-- 冷启索引 run（knowledge）：readonly 考古 run 填 `map/conventions/runbook/pitfalls`，写 manifest（`generatedAtCommit`）；选择性注入接 `composeWorkerPrompt` 的 `knowledge` 参数。
+### T5. 设计/知识 agent run（S5 live 半）— 部分完成（选择性注入 ✅；两条 agent run 留 live）
+- ✅ **选择性注入接线**（可测核心）：新增 `src/knowledge/compose.ts` `composeRepoKnowledge`（读 4 档 → `assess` 保鲜 → `selectInjection` 预算选择 → `renderInjection`，never-indexed 返 undefined、stale 仍注入但打标）；运行策略加 `knowledgeFor?` 注入函数（worktypes 不 import knowledge 层，由 index 注入真 store）；worker `composePrompt` 仅 worker 取本仓知识喂 `composeWorkerPrompt.knowledge`；index 用真 `KnowledgeStore`+`loadFreshnessPolicy`+`KNOWLEDGE_BUDGET_CHARS` 接线。compose 单测 + 策略注入单测 + wiring 断言。467 测试绿。
+- ⏳ **冷启索引 run（knowledge）— 留 live（Stage 7）**：readonly 考古 agent run 填 `map/conventions/runbook/pitfalls` + 写 manifest（`generatedAtCommit`=`currentHeadOf`）。store/保鲜/注入已就绪，缺的是「触发（命令 or 按需）+ agent 真跑 + 输出解析落 4 档」——agent 输出解析是 live、沙箱测不了。
+- ⏳ **spec-design run effect（design-phase）— 留 live（Stage 7）**：design 阶段 owner run 跑 spec-design 产 `contract/`+`design/`、emit `design_ready`（事件已被 onEvent 处理）；升格用 `design.ts` 的 `promoteToContract`（已就绪）。缺的是「run 编排 + agent spec-design 输出 → InternalApiEntry[] 解析 → 写 contract.json」——同样是 live 解析。
 
 ## Stage 7 — 端到端 + live 手验清单（沙箱测不了，需真机）
 - [ ] write 档真 Claude run：fail-closed 探针实测 PreToolUse hook 生效（不过则拒绝 write 档启动）；DEFER-1 Bash 路径残余如实记录。
