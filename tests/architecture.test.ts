@@ -44,8 +44,17 @@ describe('architecture guard', () => {
     );
     write('worktypes/noop/index.ts', `export const noopType = {};`);
     write('workitems/store.ts', `export class WorkitemsStore {}`);
+    // D-16: knowledge may use business words (not kernel) but must not import workitems.
+    write(
+      'knowledge/store.ts',
+      `
+        import { WorkitemsStore } from '../workitems/store.js';
+        export const phase = 'knowledge may say phase';
+      `,
+    );
 
-    expect(scanArchitecture(tmpDir)).toEqual(
+    const violations = scanArchitecture(tmpDir);
+    expect(violations).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           file: 'kernel.ts',
@@ -63,7 +72,15 @@ describe('architecture guard', () => {
           file: 'workitems/reducer.ts',
           rule: 'phase-interpreted-by-container',
         }),
+        expect.objectContaining({
+          file: 'knowledge/store.ts',
+          rule: 'knowledge-imports-workitems',
+        }),
       ]),
+    );
+    // knowledge is exempt from the kernel business-word ban.
+    expect(violations).not.toContainEqual(
+      expect.objectContaining({ file: 'knowledge/store.ts', rule: 'kernel-business-vocabulary' }),
     );
   });
 });

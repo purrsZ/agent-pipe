@@ -7,11 +7,15 @@ export interface ArchitectureViolation {
     | 'kernel-imports-upper-layer'
     | 'kernel-business-vocabulary'
     | 'workitems-imports-worktypes'
-    | 'phase-interpreted-by-container';
+    | 'phase-interpreted-by-container'
+    | 'knowledge-imports-workitems';
   detail: string;
 }
 
-type Layer = 'kernel' | 'kernel-exempt' | 'workitems' | 'worktypes';
+// 'knowledge' is its own layer (D-16): repo knowledge tracks the repo, not a work item, so
+// it is exempt from the kernel business-word ban (its docs describe repos, may mention
+// phase/worktype) but carries its own purity rule — it must NOT depend on workitems.
+type Layer = 'kernel' | 'kernel-exempt' | 'workitems' | 'worktypes' | 'knowledge';
 
 const IMPORT_RE = /\bimport\b(?:[\s\S]*?\bfrom\s*)?['"]([^'"]+)['"]/g;
 const KERNEL_BUSINESS_RE = /\b(workitem|workitems|assignment|worktype|phase)\b/i;
@@ -42,6 +46,15 @@ export function scanArchitecture(srcRoot: string): ArchitectureViolation[] {
         violations.push({
           file: rel,
           rule: 'workitems-imports-worktypes',
+          detail: `${imported} -> ${target}`,
+        });
+      }
+      // D-16: knowledge tracks the repo, not the work item — it must never reach into the
+      // workitems container (no workitemId/assignment as an organising dimension).
+      if (layer === 'knowledge' && targetLayer === 'workitems') {
+        violations.push({
+          file: rel,
+          rule: 'knowledge-imports-workitems',
           detail: `${imported} -> ${target}`,
         });
       }
@@ -109,6 +122,7 @@ function resolveImport(srcRoot: string, fromFile: string, specifier: string): st
 function layerFor(relPath: string): Layer {
   if (relPath.startsWith('workitems/')) return 'workitems';
   if (relPath.startsWith('worktypes/')) return 'worktypes';
+  if (relPath.startsWith('knowledge/')) return 'knowledge';
   if (relPath === 'index.ts' || relPath === 'config.ts') return 'kernel-exempt';
   return 'kernel';
 }
