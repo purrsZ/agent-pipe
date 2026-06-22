@@ -1,4 +1,4 @@
-import type { AgentEvent } from '../types.js';
+import type { AgentEvent, AskUserQuestionItem } from '../types.js';
 
 export class ClaudeParser {
   private _fullText = '';
@@ -65,12 +65,20 @@ export class ClaudeParser {
           events.push({ type: 'text', delta: block.text });
         } else if (block.type === 'tool_use') {
           const input = block.input;
+          const name = String(block.name ?? '');
           events.push({
             type: 'tool_use',
             id: String(block.id ?? ''),
-            name: String(block.name ?? ''),
+            name,
             input: input !== undefined ? JSON.stringify(input).slice(0, 500) : undefined,
           });
+          // AskUserQuestion needs the FULL, structured choices — the tool_use input above is
+          // truncated to 500 chars for the progress card. Surface a separate ask_user event so
+          // a consumer can render an interactive choice card from the untruncated questions.
+          if (name === 'AskUserQuestion') {
+            const ask = parseAskUserQuestion(String(block.id ?? ''), input);
+            if (ask) events.push(ask);
+          }
         }
       }
       return events;
@@ -112,4 +120,40 @@ export class ClaudeParser {
 
     return events;
   }
+}
+
+/**
+ * Parse the AskUserQuestion tool input into a structured ask_user event. Defensive against
+ * partial/malformed shapes (streamed JSON, missing fields) — returns null when there's
+ * nothing renderable so the caller simply falls back to the plain tool_use path.
+ */
+function parseAskUserQuestion(toolUseId: string, input: unknown): AgentEvent | null {
+  if (!input || typeof input !== 'object') return null;
+  const rawQuestions = (input as Record<string, unknown>).questions;
+  if (!Array.isArray(rawQuestions)) return null;
+  const questions: AskUserQuestionItem[] = [];
+  for (const rq of rawQuestions) {
+    if (!rq || typeof rq !== 'object') continue;
+    const o = rq as Record<string, unknown>;
+    const question = typeof o.question === 'string' ? o.question : '';
+    const rawOptions = Array.isArray(o.options) ? o.options : [];
+    const options = rawOptions
+      .map((ro) => {
+        const oo = (ro ?? {}) as Record<string, unknown>;
+        return {
+          label: typeof oo.label === 'string' ? oo.label : '',
+          description: typeof oo.description === 'string' ? oo.description : undefined,
+        };
+      })
+      .filter((opt) => opt.label !== '');
+    if (!question && options.length === 0) continue;
+    questions.push({
+      question,
+      header: typeof o.header === 'string' ? o.header : undefined,
+      multiSelect: o.multiSelect === true,
+      options,
+    });
+  }
+  if (questions.length === 0) return null;
+  return { type: 'ask_user', toolUseId, questions };
 }

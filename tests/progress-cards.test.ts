@@ -46,7 +46,10 @@ function fakeSender() {
       replyImpl = f;
     },
     setThreadReplyImpl: (
-      f: (to: string, card: object) => Promise<{ messageId: string; threadId: string | null } | null>,
+      f: (
+        to: string,
+        card: object,
+      ) => Promise<{ messageId: string; threadId: string | null } | null>,
     ) => {
       threadReplyImpl = f;
     },

@@ -3,6 +3,31 @@ import type { Store, Task } from '../store.js';
 
 export type AgentKind = 'claude' | 'codex';
 
+/** A single selectable choice in an AskUserQuestion question. */
+export interface AskUserQuestionOption {
+  label: string;
+  description?: string;
+}
+
+/** One question (with its choices) from Claude's AskUserQuestion tool. */
+export interface AskUserQuestionItem {
+  question: string;
+  header?: string;
+  multiSelect?: boolean;
+  options: AskUserQuestionOption[];
+}
+
+/**
+ * Structured payload for an AskUserQuestion tool call surfaced mid-turn. The headless CLI
+ * auto-closes this tool with an error (no interactive UI), so the turn ends normally; a
+ * consumer renders these choices and feeds the picked answer back as the next --resume
+ * message rather than as a tool_result (which the CLI no longer accepts at that point).
+ */
+export interface AskUserQuestion {
+  toolUseId: string;
+  questions: AskUserQuestionItem[];
+}
+
 /**
  * Live progress hooks invoked by runners during a turn. index.ts subscribes these
  * to drive an incrementally-updated "处理中" card (tool activity + streamed text).
@@ -29,6 +54,13 @@ export interface ProgressCallbacks {
    * stuck-detector: any pane change resets the stuck counter; only a frozen pane is a wedge.)
    */
   onActivity?: (taskId: string) => void;
+  /**
+   * Fired when the agent invokes a question/choice tool mid-turn (Claude's AskUserQuestion).
+   * Carries the full, untruncated questions so a consumer can render an interactive choice
+   * card. The same tool_use also fires onToolUse (for the progress card); this is the
+   * structured channel for the choices themselves.
+   */
+  onAskUser?: (taskId: string, q: AskUserQuestion) => void;
 }
 
 export interface TurnResult {
@@ -50,6 +82,7 @@ export type AgentEvent =
   | { type: 'ready' }
   | { type: 'text'; delta: string }
   | { type: 'tool_use'; id: string; name: string; input?: string }
+  | { type: 'ask_user'; toolUseId: string; questions: AskUserQuestionItem[] }
   | { type: 'tool_result'; id: string; isError?: boolean }
   | {
       type: 'usage';

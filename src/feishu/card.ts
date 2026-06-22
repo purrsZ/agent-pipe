@@ -1,4 +1,4 @@
-import type { TurnResult } from '../agents/types.js';
+import type { AskUserQuestion, TurnResult } from '../agents/types.js';
 import type { Task } from '../store.js';
 
 const MAX_CARD_MARKDOWN = 28_000;
@@ -344,6 +344,111 @@ export function buildStatusCard(
       direction: 'vertical',
       padding: '12px',
       elements: [{ tag: 'markdown', content }],
+    },
+  };
+}
+
+const QUESTION_TEXT_MAX = 600;
+const OPTION_DESC_MAX = 300;
+const BUTTON_TEXT_MAX = 100;
+
+/** Callback-button payload value for an interactive choice card (see AUQ_ACTION_KIND). */
+export const AUQ_ACTION_KIND = 'auq';
+
+/** Routing carried in each choice button so a click can be resumed into the right session. */
+export interface QuestionCardRouting {
+  taskId: string;
+  chatId: string;
+}
+
+/**
+ * Interactive choice card for an AskUserQuestion. Each option becomes a 2.0 callback button
+ * whose action.value carries the routing (taskId/chatId) + the picked label — the card action
+ * event itself does NOT include a chat_id, so it must travel in the value. A "也可直接回复选项名"
+ * footer is a zero-cost fallback for any click whose callback isn't delivered. Neutral naming
+ * keeps this kernel-layer file within the architecture guard.
+ */
+export function buildQuestionCard(
+  taskName: string,
+  q: AskUserQuestion,
+  routing: QuestionCardRouting,
+): object {
+  const elements: object[] = [];
+  q.questions.forEach((item, qIdx) => {
+    if (qIdx > 0) elements.push({ tag: 'hr' });
+    const qText = (item.question ?? '').slice(0, QUESTION_TEXT_MAX) || '(请选择)';
+    const head = item.header ? `【${item.header}】` : '';
+    elements.push({ tag: 'markdown', content: `**❓ ${head}${qText}**` });
+    if (item.multiSelect) {
+      elements.push({
+        tag: 'markdown',
+        content: '<font color="grey">可多选：逐个点击，或直接回复多个选项名。</font>',
+      });
+    }
+    for (const opt of item.options) {
+      const label = opt.label || '(选项)';
+      if (opt.description) {
+        elements.push({
+          tag: 'markdown',
+          content: `**${label}**\n<font color="grey">${opt.description.slice(0, OPTION_DESC_MAX)}</font>`,
+        });
+      }
+      elements.push({
+        tag: 'button',
+        text: { tag: 'plain_text', content: label.slice(0, BUTTON_TEXT_MAX) },
+        type: 'primary',
+        width: 'default',
+        behaviors: [
+          {
+            type: 'callback',
+            value: {
+              kind: AUQ_ACTION_KIND,
+              taskId: routing.taskId,
+              chatId: routing.chatId,
+              qIdx,
+              header: item.header ?? '',
+              label: opt.label,
+            },
+          },
+        ],
+      });
+    }
+  });
+  elements.push({ tag: 'hr' });
+  elements.push({
+    tag: 'markdown',
+    content: '<font color="grey">点选项按钮即可；也可直接回复选项名。</font>',
+  });
+  return {
+    schema: '2.0',
+    header: {
+      template: 'orange',
+      title: { tag: 'plain_text', content: `[${taskName}] 需要你确认` },
+    },
+    body: { direction: 'vertical', padding: '12px', elements },
+  };
+}
+
+/**
+ * Terminal patch for a question card once an option is picked: replaces the buttons with a
+ * plain "已选择 X" so the card can't be answered twice and the choice is on record.
+ */
+export function buildQuestionAnsweredCard(taskName: string, answer: string): object {
+  return {
+    schema: '2.0',
+    header: {
+      template: 'green',
+      title: { tag: 'plain_text', content: `[${taskName}] 已确认` },
+    },
+    body: {
+      direction: 'vertical',
+      padding: '12px',
+      elements: [
+        {
+          tag: 'markdown',
+          content: `已选择：**${answer}**\n\n<font color="grey">已转交继续处理…</font>`,
+        },
+      ],
     },
   };
 }

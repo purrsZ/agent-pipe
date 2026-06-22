@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
   anchorAction,
+  AUQ_ACTION_KIND,
   buildAnchorCard,
   buildCancelledCard,
   buildErrorCard,
+  buildQuestionAnsweredCard,
+  buildQuestionCard,
   buildReportCard,
   formatClock,
 } from '../src/feishu/card.js';
+import { parseCardAction } from '../src/feishu/event-router.js';
 
 describe('formatClock', () => {
   it('under an hour: m:ss', () => {
@@ -162,5 +166,82 @@ describe('anchorAction (M1b WI-7 → M2)', () => {
     expect(anchorAction('run_completed', false)).toEqual({ reply: false, update: true });
     expect(anchorAction('human_message', false)).toEqual({ reply: false, update: true });
     expect(anchorAction('run_failed', false)).toEqual({ reply: false, update: true });
+  });
+});
+
+describe('buildQuestionCard (AskUserQuestion interactive card)', () => {
+  const q = {
+    toolUseId: 'toolu_1',
+    questions: [
+      {
+        question: '在重构上更偏好哪种？',
+        header: '重构策略',
+        multiSelect: false,
+        options: [
+          { label: '激进重写', description: '推倒重来' },
+          { label: '渐进迁移', description: '逐步迁移' },
+        ],
+      },
+    ],
+  };
+  type Btn = { tag: string; behaviors?: Array<{ value: Record<string, unknown> }> };
+
+  it('renders one callback button per option carrying routing + label in action.value', () => {
+    const card = buildQuestionCard('我的任务', q, { taskId: 't1', chatId: 'c1' }) as {
+      header: { template: string };
+      body: { elements: Btn[] };
+    };
+    expect(card.header.template).toBe('orange');
+    const buttons = card.body.elements.filter((e) => e.tag === 'button');
+    expect(buttons).toHaveLength(2);
+    const v0 = buttons[0]!.behaviors![0]!.value;
+    expect(v0.kind).toBe(AUQ_ACTION_KIND);
+    expect(v0.taskId).toBe('t1');
+    expect(v0.chatId).toBe('c1');
+    expect(v0.label).toBe('激进重写');
+    expect(v0.header).toBe('重构策略');
+  });
+
+  it('keeps option label + description and the 直接回复 fallback hint', () => {
+    const json = JSON.stringify(buildQuestionCard('t', q, { taskId: 't1', chatId: 'c1' }));
+    expect(json).toContain('激进重写');
+    expect(json).toContain('推倒重来');
+    expect(json).toContain('也可直接回复选项名');
+  });
+
+  it('button action.value round-trips through parseCardAction (the kernel callback path)', () => {
+    const card = buildQuestionCard('t', q, { taskId: 't1', chatId: 'c1' }) as {
+      body: { elements: Btn[] };
+    };
+    const value = card.body.elements.find((e) => e.tag === 'button')!.behaviors![0]!.value;
+    const action = parseCardAction({
+      action: { value },
+      operator: { open_id: 'ou_1' },
+      open_message_id: 'om_1',
+    });
+    expect(action).not.toBeNull();
+    const v = action!.value as Record<string, unknown>;
+    expect(v.kind).toBe(AUQ_ACTION_KIND);
+    expect(v.taskId).toBe('t1');
+    expect(v.label).toBe('激进重写');
+  });
+
+  it('marks a multiSelect question with a hint', () => {
+    const multi = { ...q, questions: [{ ...q.questions[0]!, multiSelect: true }] };
+    expect(JSON.stringify(buildQuestionCard('t', multi, { taskId: 't1', chatId: 'c1' }))).toContain(
+      '可多选',
+    );
+  });
+});
+
+describe('buildQuestionAnsweredCard', () => {
+  it('renders 已选择 X under a green header', () => {
+    const card = buildQuestionAnsweredCard('我的任务', '渐进迁移') as {
+      header: { template: string };
+    };
+    const json = JSON.stringify(card);
+    expect(json).toContain('已选择');
+    expect(json).toContain('渐进迁移');
+    expect(card.header.template).toBe('green');
   });
 });

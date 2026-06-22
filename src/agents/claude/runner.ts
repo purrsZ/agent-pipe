@@ -404,6 +404,12 @@ class ClaudeRunner implements Runner {
           input: e.input,
         });
         break;
+      case 'ask_user':
+        inflight?.callbacks?.onAskUser?.(this.taskId, {
+          toolUseId: e.toolUseId,
+          questions: e.questions,
+        });
+        break;
       case 'tool_result':
         this.deps.store.logEvent(this.taskId, 'tool_end', undefined, {
           id: e.id,
