@@ -12,11 +12,14 @@ import {
   anchorAction,
   AUQ_ACTION_KIND,
   buildAnchorCard,
+  buildCheckpointAnsweredCard,
+  buildCheckpointCard,
   buildProcessingCard,
   buildQuestionAnsweredCard,
   buildQuestionCard,
   buildResultCard,
   buildStatusCard,
+  CHECKPOINT_ACTION_KIND,
 } from './feishu/card.js';
 import { createFeishuClients } from './feishu/client.js';
 import { startWsReconnectGuard } from './feishu/ws-health.js';
@@ -38,8 +41,10 @@ import { isTerminalStatus } from './workitems/shared.js';
 import type { WorkItem, WorkItemEvent } from './workitems/types.js';
 import { createAgentRunHandler } from './worktypes/agent-run/run-handler.js';
 import { registerProbe } from './worktypes/probe/index.js';
+import { checkpointBoundaryOf } from './worktypes/requirement/checkpoint.js';
 import { registerRequirement } from './worktypes/requirement/index.js';
 import { createIntegrationCheckHandler } from './worktypes/requirement/integration.js';
+import { checkpointGateLabel, checkpointRail } from './worktypes/requirement/lights.js';
 import { createRequirementRunStrategy } from './worktypes/requirement/worker-handler.js';
 
 const COMPACT_PROMPT = [
@@ -90,6 +95,13 @@ async function fetchBotOpenId(client: any, logger: Logger): Promise<string> {
     await new Promise((r) => setTimeout(r, 1500));
   }
   return '';
+}
+
+// Anchor-card header noun by unit type: requirement reads "需求", everything else keeps the
+// historical "调查" (probe). Lives in index (kernel-exempt) so the neutral card builder stays
+// type-agnostic — it just takes the rendered noun.
+export function anchorNoun(type: string): string {
+  return type === 'requirement' ? '需求' : '调查';
 }
 
 export function ensureSingleInstance(pidPath: string, logger: Logger): void {
@@ -170,20 +182,21 @@ async function main() {
   // 页面只读投影、agent 不碰页面）。读开放、写要本人 token（Authorization: Bearer 或 wb_token
   // cookie）。绑定地址/端口可配；公司外访问走内网穿透（在外，R17.AC-6）。WORKBENCH_ENABLED=false
   // 可整体关停。listen 在 ws 就绪后进行（见下）。
+  // Single write path shared by the board (T2) and the feishu 灯卡 (T3): both funnel a checkpoint
+  // p板 through workbenchAdapter.actions.resolve → resolveWait. Built unconditionally (cheap, no
+  // IO) so card-action handling works even when the HTTP board is disabled.
+  const workbenchAdapter = createWorkbenchAdapter({
+    store: workitems.store,
+    artifacts: workitems.artifacts,
+    api: workitems.api,
+  });
   const workbenchServer = config.workbench.enabled
-    ? (() => {
-        const { data, actions } = createWorkbenchAdapter({
-          store: workitems.store,
-          artifacts: workitems.artifacts,
-          api: workitems.api,
-        });
-        return createWorkbenchServer({
-          data,
-          actions,
-          auth: createTokenAuth(config.workbench),
-          logger,
-        });
-      })()
+    ? createWorkbenchServer({
+        data: workbenchAdapter.data,
+        actions: workbenchAdapter.actions,
+        auth: createTokenAuth(config.workbench),
+        logger,
+      })
     : null;
 
   const releaseResources = createReleaseResources({
@@ -637,6 +650,7 @@ async function main() {
           stage: item.phase,
           status: 'done',
           closed: true,
+          noun: anchorNoun(item.type),
         }),
       );
     }
@@ -663,6 +677,7 @@ async function main() {
       title: opts.description,
       stage: 'requirement:理解',
       status: 'open',
+      noun: anchorNoun('requirement'),
     });
     let anchorMsgId: string | null;
     let threadId: string | undefined;
@@ -712,7 +727,13 @@ async function main() {
     // 4) 占位锚点卡补全为真实 id / 状态。
     await sender.updateCard(
       anchorMsgId,
-      buildAnchorCard({ id: item.id, title: item.title, stage: item.phase, status: item.status }),
+      buildAnchorCard({
+        id: item.id,
+        title: item.title,
+        stage: item.phase,
+        status: item.status,
+        noun: anchorNoun(item.type),
+      }),
     );
     logger.info({ workitemId: item.id, threadId, anchorMsgId, repos }, 'requirement anchor posted');
   }
@@ -744,16 +765,20 @@ async function main() {
     },
   );
 
-  // Card button callbacks (R06/D-12) all arrive through one onCardAction; route by value.kind
-  // so other kinds (requirement checkpoints) can be added alongside the AskUserQuestion path.
+  // Card button callbacks (R06/D-12) all arrive through one onCardAction; route by value.kind.
+  // The whitelist gate is common to every kind; kind-specific handling follows.
   async function handleCardAction(action: CardAction): Promise<void> {
     const value = (action.value ?? {}) as Record<string, unknown>;
-    if (value.kind !== AUQ_ACTION_KIND) {
-      logger.warn({ kind: value.kind }, 'unhandled card action kind');
-      return;
-    }
     if (!config.allowedOpenIds.has(action.operatorId) && !store.isAllowed(action.operatorId)) {
       logger.warn({ operatorId: action.operatorId }, 'unauthorized card action, ignoring');
+      return;
+    }
+    if (value.kind === CHECKPOINT_ACTION_KIND) {
+      await handleCheckpointAction(action, value);
+      return;
+    }
+    if (value.kind !== AUQ_ACTION_KIND) {
+      logger.warn({ kind: value.kind }, 'unhandled card action kind');
       return;
     }
     const taskId = typeof value.taskId === 'string' ? value.taskId : '';
@@ -788,6 +813,41 @@ async function main() {
       enqueue(taskId, turnInput);
     } else {
       void runWithDrain(taskId, turnInput);
+    }
+  }
+
+  // Checkpoint 灯卡 click (T3): 通过/打回 funnels through the same single write path the board
+  // uses (workbenchAdapter.actions.resolve → resolveWait). The card carries the exact waitId, so
+  // no lookup is needed; an already-resolved wait (board / double click) resolves to ok=false and
+  // the card is patched to a neutral "已处理".
+  async function handleCheckpointAction(
+    action: CardAction,
+    value: Record<string, unknown>,
+  ): Promise<void> {
+    const itemId = typeof value.itemId === 'string' ? value.itemId : '';
+    const waitId = typeof value.waitId === 'string' ? value.waitId : '';
+    const boundary = typeof value.boundary === 'string' ? value.boundary : '';
+    const approved = value.approved === true;
+    if (!itemId || !waitId) {
+      logger.warn({ itemId, waitId }, 'checkpoint card action missing itemId/waitId');
+      return;
+    }
+    // 飞书按钮无输入框，打回理由用固定文案；操作者 = 点按钮的飞书用户（已过白名单门）。
+    const reason = approved ? '飞书拍板：通过' : '飞书拍板：打回，请按反馈修改';
+    const r = workbenchAdapter.actions.resolve({
+      itemId,
+      waitId,
+      operator: action.operatorId,
+      approved,
+      reason,
+    });
+    const title = workitems.api.getWorkItem(itemId)?.title ?? itemId;
+    const gateLabel = boundary ? checkpointGateLabel(boundary) : '检查点';
+    if (action.messageId) {
+      await sender.updateCard(
+        action.messageId,
+        buildCheckpointAnsweredCard(title, gateLabel, r.ok ? approved : null),
+      );
     }
   }
 
@@ -1029,22 +1089,49 @@ export function createWorkitemsRuntime(deps: {
     sender: deps.sender,
     logger: deps.logger,
   });
+  // T3: 灯卡 dedup — a checkpoint human wait gets exactly one interactive card. In-memory; a
+  // restart may re-post (best-effort, like the anchor refresh). A 打回 re-raises a fresh wait id
+  // → a new card, which is correct.
+  const cardedWaits = new Set<string>();
+  // Surface any new human checkpoint wait as an interactive 灯卡 replied under the anchor (so it
+  // lands in the thread). The worktype owns the phase→灯 mapping (checkpointBoundaryOf/lights);
+  // this kernel-exempt observer only renders + routes.
+  const surfaceCheckpoints = async (
+    workitemId: string,
+    title: string,
+    anchorMsgId: string,
+  ): Promise<void> => {
+    for (const w of workitems.store.listOpenWaits(workitemId)) {
+      if (w.kind !== 'human') continue;
+      const boundary = checkpointBoundaryOf(w.reason);
+      if (!boundary || cardedWaits.has(w.id)) continue;
+      cardedWaits.add(w.id);
+      const posted = await deps.sender.replyCard(
+        anchorMsgId,
+        buildCheckpointCard(
+          { title, gateLabel: checkpointGateLabel(boundary), rail: checkpointRail(boundary) },
+          { itemId: workitemId, waitId: w.id, boundary },
+        ),
+      );
+      if (!posted) cardedWaits.delete(w.id); // 发送失败 → 允许下一次事件重试
+    }
+  };
   // M1b WI-7 → M2: outbound status bridge — subscribe to committed events and refresh the
   // anchor card per anchorAction. M2: the failure card is now the streaming card's own
   // onRunEnd(failed) terminal patch (ProgressCards, one card per run), so this observer no
   // longer replies its own error card — anchorAction collapses run_failed to update-only.
   // The anchor refresh can't fall back (updateCard needs the original message id) so it logs.
+  // T3: after the anchor refresh, surface any pending checkpoint as a 灯卡.
   postStatus = (workitemId, event) => {
     void (async () => {
       try {
         const item = workitems.api.getWorkItem(workitemId);
         if (!item) return;
-        const { update } = anchorAction(event.kind, isTerminalStatus(item.status));
-        if (!update) return;
-        // WI-8: anchor refresh targets the anchor card's own message id, not the thread
-        // root (which now keys routing / report replies).
+        // WI-8: anchor / 灯卡 both target the anchor card's own message id, not the thread root
+        // (which keys routing / report replies).
         const anchorMsgId = deps.kernelStore.getThreadAnchorByOwner(workitemId);
-        if (anchorMsgId) {
+        const { update } = anchorAction(event.kind, isTerminalStatus(item.status));
+        if (update && anchorMsgId) {
           await deps.sender.updateCard(
             anchorMsgId,
             buildAnchorCard({
@@ -1052,11 +1139,13 @@ export function createWorkitemsRuntime(deps: {
               title: item.title,
               stage: item.phase,
               status: item.status,
+              noun: anchorNoun(item.type),
             }),
           );
-        } else {
+        } else if (update) {
           deps.logger.warn({ workitemId }, 'no anchor to refresh');
         }
+        if (anchorMsgId) await surfaceCheckpoints(workitemId, item.title, anchorMsgId);
       } catch (err) {
         deps.logger.error({ err, workitemId }, 'post status failed');
       }

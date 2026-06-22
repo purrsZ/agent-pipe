@@ -54,6 +54,9 @@ export interface AnchorCardData {
   stage: string;
   status: string;
   closed?: boolean;
+  // Header 名词，缺省"调查"（probe）。上层按单元类型传入（requirement 传"需求"），让这个
+  // kernel-neutral 文件不必识别业务类型。
+  noun?: string;
 }
 
 export function buildAnchorCard(data: AnchorCardData): object {
@@ -74,11 +77,12 @@ export function buildAnchorCard(data: AnchorCardData): object {
     footer,
   ].join('\n');
   const template = data.closed ? 'grey' : failed ? 'red' : 'blue';
+  const noun = data.noun ?? '调查';
   const headTitle = data.closed
     ? `已关闭 · ${title}`
     : failed
-      ? `调查失败 · ${title}`
-      : `调查 · ${title}`;
+      ? `${noun}失败 · ${title}`
+      : `${noun} · ${title}`;
   return {
     schema: '2.0',
     header: {
@@ -447,6 +451,103 @@ export function buildQuestionAnsweredCard(taskName: string, answer: string): obj
         {
           tag: 'markdown',
           content: `已选择：**${answer}**\n\n<font color="grey">已转交继续处理…</font>`,
+        },
+      ],
+    },
+  };
+}
+
+/** Callback-button payload value for a checkpoint 灯卡 (通过/打回). */
+export const CHECKPOINT_ACTION_KIND = 'ckpt';
+
+/** Routing carried in each 灯卡 button so a click resolves the right open wait. */
+export interface CheckpointCardRouting {
+  itemId: string;
+  waitId: string;
+  boundary: string;
+}
+
+/**
+ * Interactive checkpoint 灯卡 (D-03/R06): an orange card with 通过/打回 callback buttons. The
+ * gate label + 4-灯 rail are pre-rendered upstream (the requirement layer owns the 灯 mapping;
+ * this kernel-neutral file only renders the strings). Each button's action.value carries the
+ * routing (itemId/waitId) + approved flag — the card-action event has no chat id, so it travels
+ * in the value, same as the AUQ card. A click funnels through the single inject门面 (resolveWait).
+ */
+export function buildCheckpointCard(
+  data: { title: string; gateLabel: string; rail: string },
+  routing: CheckpointCardRouting,
+): object {
+  const title = data.title.length > 40 ? `${data.title.slice(0, 40)}…` : data.title;
+  const lines = [
+    `**${data.gateLabel}** — 该你拍板了`,
+    '',
+    `<font color="grey">${data.rail}</font>`,
+    '',
+    '通过 → 进入下一步；打回 → 退回本阶段按反馈重做。',
+  ].join('\n');
+  const button = (text: string, type: string, approved: boolean): object => ({
+    tag: 'button',
+    text: { tag: 'plain_text', content: text },
+    type,
+    width: 'default',
+    behaviors: [
+      {
+        type: 'callback',
+        value: {
+          kind: CHECKPOINT_ACTION_KIND,
+          itemId: routing.itemId,
+          waitId: routing.waitId,
+          boundary: routing.boundary,
+          approved,
+        },
+      },
+    ],
+  });
+  return {
+    schema: '2.0',
+    header: {
+      template: 'orange',
+      title: { tag: 'plain_text', content: `需要你拍板 · ${title}` },
+    },
+    body: {
+      direction: 'vertical',
+      padding: '12px',
+      elements: [
+        { tag: 'markdown', content: lines },
+        button('通过', 'primary', true),
+        button('打回', 'default', false),
+      ],
+    },
+  };
+}
+
+/**
+ * Terminal patch for a 灯卡 once a button is clicked (or the wait was resolved elsewhere):
+ * replaces the buttons with a plain "已通过/已打回/已处理" so it can't be answered twice.
+ * approved === null means it was already resolved through another channel (board / double click).
+ */
+export function buildCheckpointAnsweredCard(
+  title: string,
+  gateLabel: string,
+  approved: boolean | null,
+): object {
+  const head = title.length > 40 ? `${title.slice(0, 40)}…` : title;
+  const verb = approved === null ? '已处理' : approved ? '已通过' : '已打回';
+  const template = approved === true ? 'green' : 'grey';
+  return {
+    schema: '2.0',
+    header: {
+      template,
+      title: { tag: 'plain_text', content: `${verb} · ${head}` },
+    },
+    body: {
+      direction: 'vertical',
+      padding: '12px',
+      elements: [
+        {
+          tag: 'markdown',
+          content: `**${gateLabel}**：${verb}\n\n<font color="grey">已转交继续处理…</font>`,
         },
       ],
     },

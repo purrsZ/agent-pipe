@@ -80,6 +80,24 @@ describe('index workitems wiring', () => {
     expect(source).toContain('void runRequirement(msg, opts)');
   });
 
+  it('wires the requirement 灯卡: push on new checkpoint waits + card.action 消费 (T3)', () => {
+    const source = indexSource();
+
+    // de-投查化: the anchor noun is type-aware, requirement passes 需求.
+    expect(source).toContain('function anchorNoun');
+    expect(source).toContain('noun: anchorNoun(item.type)');
+    // push: the observer surfaces open checkpoint waits as interactive cards.
+    expect(source).toContain('surfaceCheckpoints');
+    expect(source).toContain('workitems.store.listOpenWaits');
+    expect(source).toContain('checkpointBoundaryOf(w.reason)');
+    expect(source).toContain('buildCheckpointCard');
+    // consume: the click funnels through the SAME single write path the board uses.
+    expect(source).toContain('handleCheckpointAction');
+    expect(source).toContain('value.kind === CHECKPOINT_ACTION_KIND');
+    expect(source).toContain('workbenchAdapter.actions.resolve');
+    expect(source).toContain('buildCheckpointAnsweredCard');
+  });
+
   it('wires the HTML workbench server: adapter + 本人 token auth + lifecycle stop (T2)', () => {
     const source = indexSource();
 

@@ -4,10 +4,13 @@ import {
   AUQ_ACTION_KIND,
   buildAnchorCard,
   buildCancelledCard,
+  buildCheckpointAnsweredCard,
+  buildCheckpointCard,
   buildErrorCard,
   buildQuestionAnsweredCard,
   buildQuestionCard,
   buildReportCard,
+  CHECKPOINT_ACTION_KIND,
   formatClock,
 } from '../src/feishu/card.js';
 import { parseCardAction } from '../src/feishu/event-router.js';
@@ -90,6 +93,111 @@ describe('buildAnchorCard (M1b WI-4)', () => {
       closed: true,
     }) as { header: { template: string } };
     expect(card.header.template).toBe('grey');
+  });
+
+  it('defaults the header noun to 调查 (probe), but honours an override (T3 去调查化)', () => {
+    const probe = buildAnchorCard({ id: 'wi-1', title: 't', stage: 's', status: 'open' });
+    expect(JSON.stringify(probe)).toContain('调查 · t');
+
+    const req = buildAnchorCard({
+      id: 'wi-2',
+      title: 't',
+      stage: 'requirement:理解',
+      status: 'open',
+      noun: '需求',
+    });
+    const json = JSON.stringify(req);
+    expect(json).toContain('需求 · t');
+    expect(json).not.toContain('调查');
+  });
+
+  it('applies the noun to the failed header too (需求失败)', () => {
+    const card = buildAnchorCard({
+      id: 'wi-2',
+      title: 't',
+      stage: 's',
+      status: 'failed',
+      noun: '需求',
+    });
+    expect(JSON.stringify(card)).toContain('需求失败 · t');
+  });
+});
+
+describe('buildCheckpointCard (T3 灯卡)', () => {
+  const routing = { itemId: 'wi-1', waitId: 'wt-9', boundary: 'requirement:合同' };
+
+  it('renders gate label + rail and 通过/打回 callback buttons carrying the routing', () => {
+    const card = buildCheckpointCard(
+      { title: '双端登录', gateLabel: '灯① 理解→合同', rail: '●灯①  ○灯②(快)' },
+      routing,
+    ) as { header: { template: string }; body: { elements: Array<Record<string, unknown>> } };
+    expect(card.header.template).toBe('orange');
+    const json = JSON.stringify(card);
+    expect(json).toContain('灯① 理解→合同');
+    expect(json).toContain('●灯①');
+    expect(json).toContain('通过');
+    expect(json).toContain('打回');
+
+    const buttons = card.body.elements.filter((e) => e.tag === 'button');
+    expect(buttons).toHaveLength(2);
+    const values = buttons.map(
+      (b) => (b.behaviors as Array<{ value: Record<string, unknown> }>)[0]!.value,
+    );
+    expect(values).toEqual([
+      {
+        kind: CHECKPOINT_ACTION_KIND,
+        itemId: 'wi-1',
+        waitId: 'wt-9',
+        boundary: 'requirement:合同',
+        approved: true,
+      },
+      {
+        kind: CHECKPOINT_ACTION_KIND,
+        itemId: 'wi-1',
+        waitId: 'wt-9',
+        boundary: 'requirement:合同',
+        approved: false,
+      },
+    ]);
+  });
+
+  it('parseCardAction round-trips the 通过 button value (the consumer reads it back)', () => {
+    const card = buildCheckpointCard({ title: 't', gateLabel: '灯①', rail: 'r' }, routing) as {
+      body: { elements: Array<Record<string, unknown>> };
+    };
+    const approveBtn = card.body.elements.find((e) => e.tag === 'button') as {
+      behaviors: Array<{ value: unknown }>;
+    };
+    const action = parseCardAction({
+      action: { value: approveBtn.behaviors[0]!.value },
+      operator: { open_id: 'ou_owner' },
+    });
+    expect(action?.value).toMatchObject({
+      kind: CHECKPOINT_ACTION_KIND,
+      itemId: 'wi-1',
+      waitId: 'wt-9',
+      approved: true,
+    });
+  });
+});
+
+describe('buildCheckpointAnsweredCard (T3 灯卡终态)', () => {
+  it('green 已通过 when approved', () => {
+    const card = buildCheckpointAnsweredCard('t', '灯①', true) as { header: { template: string } };
+    expect(card.header.template).toBe('green');
+    expect(JSON.stringify(card)).toContain('已通过');
+  });
+
+  it('grey 已打回 when rejected', () => {
+    const card = buildCheckpointAnsweredCard('t', '灯①', false) as { header: { template: string } };
+    expect(card.header.template).toBe('grey');
+    expect(JSON.stringify(card)).toContain('已打回');
+  });
+
+  it('grey 已处理 when resolved elsewhere (approved === null)', () => {
+    const card = buildCheckpointAnsweredCard('t', '灯①', null) as { header: { template: string } };
+    expect(card.header.template).toBe('grey');
+    expect(JSON.stringify(card)).toContain('已处理');
   });
 });
 
