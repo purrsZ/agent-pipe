@@ -19,22 +19,27 @@
 | `36ac8a0` | S6 工作台读视图 SSR / HTTP server / 本人鉴权 / adapter |
 | `fe1f7ef` | S6 anchorAction 不漂移断言（R24.AC-7） |
 | `7f2c868` | index 接线：strategyFor（write worker）+ integration_check handler 注册 |
+| `1844761` | **T1** `/req` 触发闭包 + 命令接线（仿 runProbe）：commands onRequirement/handleRequirement（重复 --repo 多端）+ index runRequirement；commands-req 测试 + index-wiring 断言 |
+| _本笔_ | **T2** 工作台 HTTP server 起停：index 接 createWorkbenchAdapter+createWorkbenchServer；新增 `src/workbench/auth.ts`（createTokenAuth 本人鉴权，Bearer/cookie 常量时比对）；config workbench 块（enabled/host/port/token/operator）；releaseResources 收尾关停；auth 单测+真服务端到端+config 测试 |
 
 > 注：`docs/ai-specs/requirement-worktype/` 等设计文档仍未跟踪，按需 `git add docs/`。
 
 ## 续作任务（建议顺序）
 
-### T1. `/req` 触发闭包 + 命令接线（接 S3 骨架的入口）
-- `src/index.ts`：仿 `runProbe`（`index.ts` 内 runProbe 范式）写 `runRequirement`：发锚点占位卡 → `createWorkItem({type:'requirement', repos, ...})` → `claimThread(claimKey,'managed',item.id,anchorMsgId)` → 补全卡。
-- `src/bridge/commands.ts`：仿 `onProbe`/`handleProbe` 加 `/req`（dispatch case + 构造器回调），index 注入 `onRequirement`。
-- 出站定位（chatId/threadId/anchorMsgId）写进 `source`（run-handler 的 `locatorFromSource` 已消费）。
+### ~~T1. `/req` 触发闭包 + 命令接线~~ ✅ 已完成（`1844761`）
+- `runRequirement`（index.ts，kernel-exempt）仿 runProbe：先发锚点占位卡建话题 → `createWorkItem({type:'requirement', repos, ...})` → `claimThread(claimKey,'managed',item.id,anchorMsgId)` → 补全卡。
+- `handleRequirement`（commands.ts）：`/req [--repo <path> ...] <需求>`，收集重复 `--repo`（多端）；无 repo 时 index 回退默认 cwd。kernel 中性（解析委托，创建在 index）。
+- 出站定位 chatId/threadId/anchorMsgId 写进 `source`（run-handler 的 `locatorFromSource` 消费）。
+- ⚠️ 锚点卡暂复用 `buildAnchorCard`，header 仍"调查"字样 → T3 一并去化。
 
-### T2. 工作台 HTTP server 起停接入
-- `src/index.ts`：仿 BackupJob 注入处，`createWorkbenchServer({ data, actions, auth, logger })`，其中 `data/actions` 来自 `createWorkbenchAdapter({ store, artifacts, api })`（已实现，`src/workitems/workbench-adapter.ts`）。
-- `auth`：单用户本人校验（参考 ai-sentinel owner 校验）；绑定地址/端口可配（R17.AC-6 内网穿透在外）。
-- 起停挂常驻进程生命周期 + `createReleaseResources`。
+### ~~T2. 工作台 HTTP server 起停接入~~ ✅ 已完成（本笔）
+- `src/index.ts`：`createWorkbenchAdapter({ store, artifacts, api })` → `createWorkbenchServer({ data, actions, auth, logger })`，`WORKBENCH_ENABLED` 门控；ws 就绪后 `listen(host, port)`，挂 `'error'` 防 EADDRINUSE 拖垮全局。
+- `auth`：新增中性 `src/workbench/auth.ts` `createTokenAuth`——写要本人 token（`Authorization: Bearer` 或浏览器 `wb_token` cookie），常量时间比对；**空 token = 看板只读**。读始终开放（server 仅 POST 调 auth）。
+- `config.workbench`：enabled/host(默认 127.0.0.1)/port(默认 7080)/token/operator(默认首个 admin)。`.env.example` 已补。
+- 生命周期：server 交给 `createReleaseResources` 先关（停收请求）再拆 store/pool；shutdown + crashGuard 共用。
+- ⚠️ 浏览器写需先有 `wb_token` cookie（server 不发 cookie，无 /auth 路由）——真机由内网穿透代理注入或手动设 cookie；Stage 7 走查。
 
-### T3. 飞书灯卡（`src/feishu/card.ts`，kernel 中性）
+### T3. 飞书灯卡（`src/feishu/card.ts`，kernel 中性）  ←（下一笔）
 - 标题去"调查"化：`buildAnchorCard` 的 `调查 ·` 前缀参数化，或新建 requirement 专用构造器（4 灯 rail / 各端工人 / 决策台账，用 `stage/status` 中性字段）。
 - 灯交互卡：button `value` 带 `{workitemId, checkpoint, decision}`（feishu 只塞不解释）。
 - card.action 消费侧 adapter（workitems 层）：解释 value → 按 checkpoint 找 open wait → `resolveWait(waitId,{operator,reason,decision})`。kernel 分发侧 `card.action.trigger` 已就绪（S2，`parseCardAction`）。

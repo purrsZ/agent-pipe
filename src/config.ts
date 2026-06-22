@@ -32,6 +32,13 @@ export interface Config {
   sessionsDir: string;
   workitemsDbPath: string;
   workitemsDir: string;
+  workbench: {
+    enabled: boolean;
+    host: string;
+    port: number;
+    token: string;
+    operator: string;
+  };
 }
 
 function parseAgent(v: string | undefined): AgentKind {
@@ -79,6 +86,15 @@ export function loadConfig(): Config {
   const maxHot = parsePositiveInt(process.env.MAX_HOT, 4, 'MAX_HOT');
   const maxConcurrent = parsePositiveInt(process.env.MAX_CONCURRENT, maxHot, 'MAX_CONCURRENT');
 
+  // HTML 工作台 (R17/R18): bind 默认仅本机（公司外访问走内网穿透，R17.AC-6）。空 token =>
+  // 看板只读（写入口拒绝），直到 operator 设置 token。operator 缺省取第一个 admin open_id。
+  const workbenchEnabled =
+    (process.env.WORKBENCH_ENABLED ?? 'true').trim().toLowerCase() !== 'false';
+  const workbenchHost = process.env.WORKBENCH_HOST?.trim() || '127.0.0.1';
+  const workbenchPort = parsePositiveInt(process.env.WORKBENCH_PORT, 7080, 'WORKBENCH_PORT');
+  const workbenchToken = process.env.WORKBENCH_TOKEN ?? '';
+  const workbenchOperator = process.env.WORKBENCH_OPERATOR?.trim() || allowed[0] || 'owner';
+
   return {
     feishu: { appId, appSecret },
     claude: {
@@ -104,5 +120,12 @@ export function loadConfig(): Config {
       process.env.WORKITEMS_DB_PATH ?? path.join(dataDir, 'workitems.sqlite'),
     ),
     workitemsDir: expandHome(process.env.WORKITEMS_DIR ?? path.join(dataDir, 'workitems')),
+    workbench: {
+      enabled: workbenchEnabled,
+      host: workbenchHost,
+      port: workbenchPort,
+      token: workbenchToken,
+      operator: workbenchOperator,
+    },
   };
 }

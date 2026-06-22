@@ -30,6 +30,9 @@ import { createLogger, type Logger } from './logger.js';
 import type { Task } from './store.js';
 import { Store } from './store.js';
 import { createWorkitemsContainer, type WorkitemsContainer } from './workitems/container.js';
+import { createWorkbenchAdapter } from './workitems/workbench-adapter.js';
+import { createTokenAuth } from './workbench/auth.js';
+import { createWorkbenchServer } from './workbench/server.js';
 import { OpenLimitError } from './workitems/errors.js';
 import { isTerminalStatus } from './workitems/shared.js';
 import type { WorkItem, WorkItemEvent } from './workitems/types.js';
@@ -163,7 +166,33 @@ async function main() {
   const runningTasks = new Set<string>();
   const botStartTime = Date.now();
 
-  const releaseResources = createReleaseResources({ pool, workitems, store, pidPath });
+  // HTML 工作台 (R17/R18): SSR 读视图 + 单写入口（funnels through resolveWait/injectHumanMessage，
+  // 页面只读投影、agent 不碰页面）。读开放、写要本人 token（Authorization: Bearer 或 wb_token
+  // cookie）。绑定地址/端口可配；公司外访问走内网穿透（在外，R17.AC-6）。WORKBENCH_ENABLED=false
+  // 可整体关停。listen 在 ws 就绪后进行（见下）。
+  const workbenchServer = config.workbench.enabled
+    ? (() => {
+        const { data, actions } = createWorkbenchAdapter({
+          store: workitems.store,
+          artifacts: workitems.artifacts,
+          api: workitems.api,
+        });
+        return createWorkbenchServer({
+          data,
+          actions,
+          auth: createTokenAuth(config.workbench),
+          logger,
+        });
+      })()
+    : null;
+
+  const releaseResources = createReleaseResources({
+    pool,
+    workitems,
+    store,
+    pidPath,
+    workbenchServer,
+  });
   installCrashGuard(logger, releaseResources);
   scheduleDailyBackup(store, path.join(config.dataDir, 'backups'), logger, [workitems.backupJob()]);
 
@@ -935,6 +964,23 @@ async function main() {
     'agent-pipe ready',
   );
 
+  // Bring up the workbench last, after the bridge is live. An 'error' listener keeps a bind
+  // failure (e.g. EADDRINUSE) from taking down the whole bot — the board is best-effort.
+  if (workbenchServer) {
+    workbenchServer.on('error', (err) => {
+      logger.error(
+        { err, host: config.workbench.host, port: config.workbench.port },
+        'workbench server error',
+      );
+    });
+    workbenchServer.listen(config.workbench.port, config.workbench.host, () => {
+      logger.info(
+        { host: config.workbench.host, port: config.workbench.port },
+        'workbench listening',
+      );
+    });
+  }
+
   startHeartbeat(logger, () => ({
     uptimeSec: Math.floor(process.uptime()),
     rssMb: Math.round(process.memoryUsage().rss / 1048576),
@@ -1049,9 +1095,17 @@ export function createReleaseResources(deps: {
   workitems: Pick<WorkitemsContainer, 'stop'>;
   store: Pick<Store, 'close'>;
   pidPath: string;
+  // HTML 工作台 server — closed first so it stops accepting requests before the store/pool it
+  // reads through are torn down. Optional/nullable: absent when WORKBENCH_ENABLED=false.
+  workbenchServer?: { close(): void } | null;
   removePidFile?: typeof removeOwnPidFile;
 }): () => void {
   return () => {
+    try {
+      deps.workbenchServer?.close();
+    } catch {
+      /* ignore */
+    }
     try {
       deps.pool.killAll();
     } catch {

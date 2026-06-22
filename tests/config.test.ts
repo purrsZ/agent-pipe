@@ -25,6 +25,11 @@ const MANAGED = [
   'WORKITEMS_DB_PATH',
   'WORKITEMS_DIR',
   'WORKITEMS_RETRY_BUDGET',
+  'WORKBENCH_ENABLED',
+  'WORKBENCH_HOST',
+  'WORKBENCH_PORT',
+  'WORKBENCH_TOKEN',
+  'WORKBENCH_OPERATOR',
 ] as const;
 
 const saved: Record<string, string | undefined> = {};
@@ -172,5 +177,46 @@ describe('loadConfig: parsing & defaults', () => {
     expect(() => loadConfig()).toThrow(/MAX_HOT/);
     process.env.MAX_HOT = '-1';
     expect(() => loadConfig()).toThrow(/MAX_HOT/);
+  });
+
+  it('workbench defaults: enabled, bound to localhost:7080, empty token, operator = first admin', () => {
+    process.env.ALLOWED_OPEN_IDS = 'ou_admin, ou_two';
+    const cfg = loadConfig();
+    expect(cfg.workbench).toEqual({
+      enabled: true,
+      host: '127.0.0.1',
+      port: 7080,
+      token: '',
+      operator: 'ou_admin',
+    });
+  });
+
+  it('WORKBENCH_ENABLED=false disables the board (case-insensitive)', () => {
+    process.env.WORKBENCH_ENABLED = 'false';
+    expect(loadConfig().workbench.enabled).toBe(false);
+    process.env.WORKBENCH_ENABLED = 'FALSE';
+    expect(loadConfig().workbench.enabled).toBe(false);
+    process.env.WORKBENCH_ENABLED = 'true';
+    expect(loadConfig().workbench.enabled).toBe(true);
+  });
+
+  it('overrides host / port / token / operator from env', () => {
+    process.env.WORKBENCH_HOST = '0.0.0.0';
+    process.env.WORKBENCH_PORT = '9090';
+    process.env.WORKBENCH_TOKEN = 's3cret';
+    process.env.WORKBENCH_OPERATOR = 'ou_owner';
+    const cfg = loadConfig();
+    expect(cfg.workbench).toEqual({
+      enabled: true,
+      host: '0.0.0.0',
+      port: 9090,
+      token: 's3cret',
+      operator: 'ou_owner',
+    });
+  });
+
+  it('fails fast on non-numeric WORKBENCH_PORT', () => {
+    process.env.WORKBENCH_PORT = 'eighty';
+    expect(() => loadConfig()).toThrow(/WORKBENCH_PORT/);
   });
 });

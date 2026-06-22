@@ -80,6 +80,24 @@ describe('index workitems wiring', () => {
     expect(source).toContain('void runRequirement(msg, opts)');
   });
 
+  it('wires the HTML workbench server: adapter + 本人 token auth + lifecycle stop (T2)', () => {
+    const source = indexSource();
+
+    expect(source).toContain("from './workbench/server.js'");
+    expect(source).toContain("from './workbench/auth.js'");
+    expect(source).toContain("from './workitems/workbench-adapter.js'");
+    expect(source).toContain('createWorkbenchAdapter');
+    expect(source).toContain('createWorkbenchServer');
+    // writes are 本人-only via the token auth helper.
+    expect(source).toContain('createTokenAuth(config.workbench)');
+    // gated by the enabled flag, bound to the configured host/port.
+    expect(source).toContain('config.workbench.enabled');
+    expect(source).toContain('workbenchServer.listen(config.workbench.port, config.workbench.host');
+    // lifecycle: the server is handed to releaseResources so shutdown + crash guard close it.
+    expect(source).toContain('workbenchServer,');
+    expect(source).toContain('deps.workbenchServer?.close()');
+  });
+
   it('wires the outbound progress bridge: a streaming card per run via ProgressCards (M2, merges WI-6)', () => {
     const source = indexSource();
 
