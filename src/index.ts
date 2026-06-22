@@ -32,6 +32,7 @@ import { isTerminalStatus } from './workitems/shared.js';
 import type { WorkItem, WorkItemEvent } from './workitems/types.js';
 import { createAgentRunHandler } from './worktypes/agent-run/run-handler.js';
 import { registerProbe } from './worktypes/probe/index.js';
+import { registerRequirement } from './worktypes/requirement/index.js';
 
 const COMPACT_PROMPT = [
   '请把我们到目前为止的完整对话压缩成一份结构化摘要，供新会话继续使用。',
@@ -869,6 +870,10 @@ export function createWorkitemsRuntime(deps: {
   // Production wiring: the real agent-run handler (drives the pool) replaces the noop
   // run handler; noop stays a test-only fixture (M1b WI-2/WI-3).
   registerProbe(workitems.registry);
+  // requirement worktype (D-15): reuses the generic agent-run handler for owner/worker runs;
+  // its own effect handlers (worker write run / integration_check / checkpoint) are layered
+  // in later stages. Registered after probe so the shared 'run' handler covers both.
+  registerRequirement(workitems.registry);
   workitems.effects.registerHandler(
     createAgentRunHandler({
       pool: deps.pool,
