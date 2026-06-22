@@ -67,6 +67,19 @@ describe('index workitems wiring', () => {
     expect(source).toContain('buildAnchorCard');
   });
 
+  it('wires /req create + anchor claim through the requirement worktype (T1)', () => {
+    const source = indexSource();
+
+    expect(source).toContain('async function runRequirement');
+    // /req creates a requirement-typed unit (the worktype registered in createWorkitemsRuntime).
+    expect(source).toContain("type: 'requirement'");
+    // same managed-claim + anchor-card path probe uses, keyed on the thread root.
+    expect(source).toContain("store.claimThread(claimKey, 'managed'");
+    expect(source).toContain('item.id, anchorMsgId)');
+    // onRequirement closure is handed to the CommandHandler alongside onProbe/onDone.
+    expect(source).toContain('void runRequirement(msg, opts)');
+  });
+
   it('wires the outbound progress bridge: a streaming card per run via ProgressCards (M2, merges WI-6)', () => {
     const source = indexSource();
 

@@ -39,6 +39,7 @@ function makeHandler() {
     () => {}, // onDiagReadonly
     (_msg, opts) => probes.push(opts), // onProbe
     (_msg, threadRoot) => dones.push(threadRoot), // onDone
+    () => {}, // onRequirement (covered in commands-req.test.ts)
   );
   return { handler, replies, probes, dones };
 }

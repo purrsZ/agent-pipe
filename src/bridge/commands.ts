@@ -34,6 +34,7 @@ const HELP_TEXT = [
   '  /wl rm @某人 / <open_id>                   移除',
   '  /probe [--repo <path>] <问题>             只读代码调查：缺省查默认目录、--repo 指定项目，过程+报告回贴到话题',
   '  /done                                     关闭当前调查（在其话题里回复）',
+  '  /req [--repo <path> ...] <需求>            发起多端需求：按合同并行实现、4 灯人工把关，进展回贴话题',
   '  /help                                     本帮助',
   '',
   '普通消息（不带 /）：优先发给本会话当前任务；若无则发给本会话最近活跃。',
@@ -55,6 +56,10 @@ export class CommandHandler {
     private onDiagReadonly: (taskId: string, replyMsgId: string) => void,
     private onProbe: (msg: IncomingMessage, opts: { repo?: string; description: string }) => void,
     private onDone: (msg: IncomingMessage, threadRoot: string) => void,
+    private onRequirement: (
+      msg: IncomingMessage,
+      opts: { repos?: string[]; description: string },
+    ) => void,
   ) {}
 
   private isAdmin(openId: string): boolean {
@@ -126,6 +131,9 @@ export class CommandHandler {
           return;
         case '/done':
           await this.handleDone(msg);
+          return;
+        case '/req':
+          await this.handleRequirement(msg, rest);
           return;
         case '/help':
           await this.sender.reply(msg.messageId, HELP_TEXT);
@@ -330,6 +338,36 @@ export class CommandHandler {
       return;
     }
     this.onDone(msg, threadRoot);
+  }
+
+  // /req: 从飞书发起一个多端需求单。这里只做解析——收集重复的 `--repo`（多端用多个）与尾随
+  // 描述；真正的创建 + 锚点卡 + 话题认领都在 index.ts 的 onRequirement 里完成（本文件保持
+  // kernel 中性，不碰上层逻辑/词汇）。
+  private async handleRequirement(msg: IncomingMessage, rest: string[]): Promise<void> {
+    const repos: string[] = [];
+    const positional: string[] = [];
+    for (let i = 0; i < rest.length; i++) {
+      const t = rest[i];
+      if (t === undefined) continue;
+      if (t === '--repo') {
+        const next = rest[i + 1];
+        if (next !== undefined && !next.startsWith('--')) {
+          repos.push(next);
+          i++;
+        }
+      } else {
+        positional.push(t);
+      }
+    }
+    const description = positional.join(' ').trim();
+    if (!description) {
+      await this.sender.reply(
+        msg.messageId,
+        '用法: /req [--repo <path> ...] <要做的需求>（多端用多个 --repo）',
+      );
+      return;
+    }
+    this.onRequirement(msg, { repos: repos.length > 0 ? repos : undefined, description });
   }
 
   private async handleStatus(msg: IncomingMessage): Promise<void> {

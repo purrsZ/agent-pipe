@@ -614,6 +614,80 @@ async function main() {
     await sender.reply(msg.messageId, `已关闭调查 ${item.id}。`);
   }
 
+  // /req (D-15): create a managed requirement unit, post its anchor card, and claim the thread
+  // so follow-ups + 灯卡 route into it. Mirrors runProbe's anchor-before-create ordering: the
+  // first owner run reads thread/anchor locators from source the moment it dispatches, so those
+  // locators must exist before createWorkItem. The 4-light checkpoint rail + card.action
+  // consumption land in a later stage (T3); here we only kick the unit off.
+  async function runRequirement(
+    msg: IncomingMessage,
+    opts: { repos?: string[]; description: string },
+  ): Promise<void> {
+    const repos =
+      opts.repos && opts.repos.length > 0
+        ? opts.repos
+        : [config.allowedCwdPrefixes[0] ?? process.cwd()];
+
+    // 1) 先发占位锚点卡建话题，拿 anchorMsgId + threadId（同 runProbe 的时序理由）。
+    const placeholder = buildAnchorCard({
+      id: '创建中…',
+      title: opts.description,
+      stage: 'requirement:理解',
+      status: 'open',
+    });
+    let anchorMsgId: string | null;
+    let threadId: string | undefined;
+    if (msg.chatType === 'group') {
+      const res = await sender.replyCardInThread(msg.messageId, placeholder);
+      anchorMsgId = res?.messageId ?? null;
+      threadId = res?.threadId ?? undefined;
+    } else {
+      anchorMsgId = await sender.replyCard(msg.messageId, placeholder);
+    }
+    if (!anchorMsgId) {
+      await sender.reply(msg.messageId, '锚点卡发送失败，请重试 /req。');
+      return;
+    }
+
+    // 2) createWorkItem：把 thread/anchor 定位 + 多仓写进 source/repos，随 owner run 下发。
+    let item: WorkItem;
+    try {
+      item = workitems.api.createWorkItem({
+        type: 'requirement',
+        title: opts.description,
+        source: {
+          kind: 'feishu',
+          userId: msg.userId,
+          chatId: msg.chatId,
+          messageId: msg.messageId,
+          threadId,
+          anchorMsgId,
+        },
+        repos,
+        context: {},
+      }).item;
+    } catch (err) {
+      const why =
+        err instanceof OpenLimitError
+          ? `${err.message}（先用 /done 关掉几个再来）`
+          : `需求创建失败: ${(err as Error).message}`;
+      if (!(err instanceof OpenLimitError)) logger.error({ err }, 'requirement create failed');
+      await sender.updateCard(anchorMsgId, buildStatusCard(opts.description, 'error', why));
+      return;
+    }
+
+    // 3) 同步建 claim（入站路由）：话题内追问 / 灯卡回调按同一 key 匹配进本单元。
+    const claimKey = threadId ?? msg.rootId ?? msg.messageId;
+    store.claimThread(claimKey, 'managed', item.id, anchorMsgId);
+
+    // 4) 占位锚点卡补全为真实 id / 状态。
+    await sender.updateCard(
+      anchorMsgId,
+      buildAnchorCard({ id: item.id, title: item.title, stage: item.phase, status: item.status }),
+    );
+    logger.info({ workitemId: item.id, threadId, anchorMsgId, repos }, 'requirement anchor posted');
+  }
+
   const commands = new CommandHandler(
     store,
     sender,
@@ -635,6 +709,9 @@ async function main() {
     },
     (msg, threadRoot) => {
       void runDone(msg, threadRoot);
+    },
+    (msg, opts) => {
+      void runRequirement(msg, opts);
     },
   );
 
