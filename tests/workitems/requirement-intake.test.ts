@@ -133,6 +133,16 @@ describe('isGateReady / requiredMissing', () => {
   it('未勾 UI 时 ui 项不影响 gate', () => {
     expect(isGateReady(fillAllRequired())).toBe(true);
   });
+
+  it('空 repos 数组（去空白后为空）建了字段但不算齐 → 未 ready，requiredMissing 含 repos', () => {
+    let s = fillAllRequired();
+    s = applyFieldInput(s, { key: 'repos', value: ['', '  '] });
+    const repos = s.fields.find((f) => f.key === 'repos')!;
+    expect(repos.value).toEqual([]); // 字段存在但值为空数组
+    expect(isFieldSatisfied(repos)).toBe(false); // 空数组不算「有值」
+    expect(isGateReady(s)).toBe(false);
+    expect(requiredMissing(s).map((d) => d.key)).toContain('repos');
+  });
 });
 
 describe('requiredProgress', () => {
