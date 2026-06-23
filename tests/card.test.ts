@@ -9,6 +9,7 @@ import {
   buildErrorCard,
   buildQuestionAnsweredCard,
   buildQuestionCard,
+  buildQuestionFormCard,
   buildReportCard,
   CHECKPOINT_ACTION_KIND,
   formatClock,
@@ -351,5 +352,57 @@ describe('buildQuestionAnsweredCard', () => {
     expect(json).toContain('已选择');
     expect(json).toContain('渐进迁移');
     expect(card.header.template).toBe('green');
+  });
+});
+
+describe('buildQuestionFormCard (AUQ 表单卡：凑齐 + 自定义)', () => {
+  const q = {
+    toolUseId: 'toolu_1',
+    questions: [
+      { question: '早餐?', header: '早餐', options: [{ label: '面包' }, { label: '粥' }] },
+      { question: '颜色?', header: '颜色', options: [{ label: '红' }] },
+    ],
+  };
+  type El = {
+    tag: string;
+    name?: string;
+    elements?: El[];
+    behaviors?: Array<{ value: Record<string, unknown> }>;
+    options?: Array<{ value: string }>;
+  };
+
+  it('wraps a form: per-question select_static + input, submit button carries total/headers', () => {
+    const card = buildQuestionFormCard('任务', q, { taskId: 't1', chatId: 'c1' }) as {
+      header: { template: string };
+      body: { elements: El[] };
+    };
+    expect(card.header.template).toBe('orange');
+    const form = card.body.elements.find((e) => e.tag === 'form');
+    if (!form?.elements) throw new Error('expected a form container');
+    const inner = form.elements;
+    expect(inner.filter((e) => e.tag === 'select_static').map((e) => e.name)).toEqual([
+      'q0_pick',
+      'q1_pick',
+    ]);
+    expect(inner.filter((e) => e.tag === 'input').map((e) => e.name)).toEqual([
+      'q0_custom',
+      'q1_custom',
+    ]);
+    const submit = inner.find((e) => e.tag === 'button');
+    const v = submit!.behaviors![0]!.value;
+    expect(v.kind).toBe(AUQ_ACTION_KIND);
+    expect(v.taskId).toBe('t1');
+    expect(v.chatId).toBe('c1');
+    expect(v.total).toBe(2);
+    expect(v.headers).toEqual(['早餐', '颜色']);
+  });
+
+  it('select_static options carry the label as value', () => {
+    const card = buildQuestionFormCard('任务', q, { taskId: 't1', chatId: 'c1' }) as {
+      body: { elements: El[] };
+    };
+    const form = card.body.elements.find((e) => e.tag === 'form');
+    const sel = form?.elements?.find((e) => e.tag === 'select_static');
+    expect(sel?.options?.map((o) => o.value)).toEqual(['面包', '粥']);
   });
 });

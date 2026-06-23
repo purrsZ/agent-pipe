@@ -38,6 +38,12 @@ export interface CardAction {
   operatorId: string;
   token?: string;
   messageId?: string;
+  /**
+   * Form-submit values keyed by each component's `name` (AskUserQuestion 表单卡 only).
+   * MUST stay optional: button-callback cards (e.g. checkpoint 灯卡) carry no form_value, so
+   * their parse/handle path is untouched.
+   */
+  formValue?: Record<string, unknown>;
 }
 
 export type CardActionHandler = (action: CardAction) => void | Promise<void>;

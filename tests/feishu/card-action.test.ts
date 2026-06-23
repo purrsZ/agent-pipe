@@ -36,4 +36,28 @@ describe('parseCardAction (R06: opaque value pass-through)', () => {
     expect(parseCardAction(null)).toBeNull();
     expect(parseCardAction('nope')).toBeNull();
   });
+
+  it('surfaces form_value on a form submit (AUQ 表单卡)', () => {
+    const action = parseCardAction({
+      action: {
+        value: { kind: 'auq', taskId: 't1', total: 2 },
+        form_value: { q0_pick: '面包', q1_custom: '莫兰迪色' },
+      },
+      operator: { open_id: 'ou_x' },
+      context: { open_message_id: 'om_1' },
+    });
+    expect(action).not.toBeNull();
+    expect(action!.formValue).toEqual({ q0_pick: '面包', q1_custom: '莫兰迪色' });
+    expect(action!.messageId).toBe('om_1');
+  });
+
+  it('leaves formValue undefined for a button callback (checkpoint 灯卡隔离)', () => {
+    const action = parseCardAction({
+      action: { value: { kind: 'ckpt', itemId: 'wi-1', waitId: 'wt-9', approved: true } },
+      operator: { open_id: 'ou_owner' },
+      open_message_id: 'om_2',
+    });
+    expect(action!.formValue).toBeUndefined();
+    expect((action!.value as Record<string, unknown>).kind).toBe('ckpt');
+  });
 });

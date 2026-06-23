@@ -457,6 +457,96 @@ export function buildQuestionAnsweredCard(taskName: string, answer: string): obj
   };
 }
 
+/**
+ * Form-card variant of the AskUserQuestion card (multi-question, 凑齐 once submit). Each question
+ * renders a `select_static` (preset options) + an `input` (free-text custom, wins when filled),
+ * all wrapped in a `form` so nothing fires until the user clicks 提交. The submit button's
+ * action.value carries routing + total + headers (the card-action event has no chat id / question
+ * text, so they travel in value); per-question answers come back in `form_value` keyed q{i}_pick /
+ * q{i}_custom. 2.0 schema (form / select_static / form_action_type) — verify on first real run.
+ */
+export function buildQuestionFormCard(
+  taskName: string,
+  q: AskUserQuestion,
+  routing: QuestionCardRouting,
+): object {
+  const formElements: object[] = [];
+  const headers: string[] = [];
+  q.questions.forEach((item, qIdx) => {
+    if (qIdx > 0) formElements.push({ tag: 'hr' });
+    const qText = (item.question ?? '').slice(0, QUESTION_TEXT_MAX) || '(请选择)';
+    const head = item.header ? `【${item.header}】` : '';
+    headers.push(item.header || `问题${qIdx + 1}`);
+    formElements.push({ tag: 'markdown', content: `**❓ ${head}${qText}**` });
+    const opts = item.options.filter((o) => o.label);
+    const optLines = opts.map((o) =>
+      o.description
+        ? `· **${o.label}** — ${o.description.slice(0, OPTION_DESC_MAX)}`
+        : `· **${o.label}**`,
+    );
+    if (optLines.length) {
+      formElements.push({
+        tag: 'markdown',
+        content: `<font color="grey">${optLines.join('\n')}</font>`,
+      });
+      formElements.push({
+        tag: 'select_static',
+        name: `q${qIdx}_pick`,
+        placeholder: { tag: 'plain_text', content: '从预设里选…' },
+        options: opts.map((o) => ({
+          text: { tag: 'plain_text', content: o.label.slice(0, BUTTON_TEXT_MAX) },
+          value: o.label,
+        })),
+      });
+    }
+    formElements.push({
+      tag: 'input',
+      name: `q${qIdx}_custom`,
+      placeholder: { tag: 'plain_text', content: '或在此自定义（留空则用上面选的）' },
+    });
+  });
+  formElements.push({ tag: 'hr' });
+  formElements.push({
+    tag: 'button',
+    text: { tag: 'plain_text', content: '提交' },
+    type: 'primary',
+    width: 'default',
+    form_action_type: 'submit',
+    name: 'auq_submit',
+    behaviors: [
+      {
+        type: 'callback',
+        value: {
+          kind: AUQ_ACTION_KIND,
+          taskId: routing.taskId,
+          chatId: routing.chatId,
+          total: q.questions.length,
+          headers,
+        },
+      },
+    ],
+  });
+  return {
+    schema: '2.0',
+    header: {
+      template: 'orange',
+      title: { tag: 'plain_text', content: `[${taskName}] 需要你确认` },
+    },
+    body: {
+      direction: 'vertical',
+      padding: '12px',
+      elements: [
+        { tag: 'form', name: 'auq_form', elements: formElements },
+        {
+          tag: 'markdown',
+          content:
+            '<font color="grey">每题可从下拉选预设，或在输入框自定义；填完点「提交」。</font>',
+        },
+      ],
+    },
+  };
+}
+
 /** Callback-button payload value for a checkpoint 灯卡 (通过/打回). */
 export const CHECKPOINT_ACTION_KIND = 'ckpt';
 

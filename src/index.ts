@@ -17,7 +17,7 @@ import {
   buildCheckpointCard,
   buildProcessingCard,
   buildQuestionAnsweredCard,
-  buildQuestionCard,
+  buildQuestionFormCard,
   buildResultCard,
   buildStatusCard,
   CHECKPOINT_ACTION_KIND,
@@ -434,7 +434,7 @@ async function main() {
       // If Claude asked a question this turn, replace the result card (which would otherwise be
       // the CLI's "弹窗关闭了" degrade text) with an interactive choice card.
       const card = pendingQuestion
-        ? buildQuestionCard(task.display_name, pendingQuestion, {
+        ? buildQuestionFormCard(task.display_name, pendingQuestion, {
             taskId: task.id,
             chatId: input.chatId,
           })
@@ -953,29 +953,66 @@ async function main() {
       logger.warn({ kind: value.kind }, 'unhandled card action kind');
       return;
     }
+    // auq 表单卡提交：凑齐每题答案（input 自定义优先、否则下拉 select），拼成一段文本一次回灌。
     const taskId = typeof value.taskId === 'string' ? value.taskId : '';
     const chatId = typeof value.chatId === 'string' ? value.chatId : '';
-    const label = typeof value.label === 'string' ? value.label : '';
-    const header = typeof value.header === 'string' ? value.header : '';
-    if (!taskId || !label) {
-      logger.warn({ taskId, label }, 'auq card action missing taskId/label');
+    const total = typeof value.total === 'number' ? value.total : 0;
+    const headers = Array.isArray(value.headers) ? (value.headers as unknown[]) : [];
+    if (!taskId || total <= 0) {
+      logger.warn({ taskId, total }, 'auq form submit missing taskId/total');
       return;
     }
     const task = store.getTask(taskId);
     if (!task) {
-      logger.warn({ taskId }, 'auq card action for unknown task');
+      logger.warn({ taskId }, 'auq form submit for unknown task');
       return;
     }
-    // Patch the question card to a terminal "已选 X" so it can't be answered twice.
+    const fv = action.formValue ?? {};
+    // select_static value may arrive as a plain string or as { value } / { option }.
+    const selVal = (raw: unknown): string => {
+      if (typeof raw === 'string') return raw;
+      if (raw && typeof raw === 'object') {
+        const o = raw as Record<string, unknown>;
+        if (typeof o.value === 'string') return o.value;
+        if (typeof o.option === 'string') return o.option;
+      }
+      return '';
+    };
+    const lines: string[] = [];
+    const brief: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const customRaw = fv[`q${i}_custom`];
+      const custom = typeof customRaw === 'string' ? customRaw.trim() : '';
+      const picked = selVal(fv[`q${i}_pick`]);
+      const hdr = typeof headers[i] === 'string' ? (headers[i] as string) : `问题${i + 1}`;
+      // Free-text wins over the dropdown, and is flagged so the agent takes it verbatim instead
+      // of snapping it back to one of its preset options (AskUserQuestion is a choice tool, so
+      // by default the model maps the reply onto its options — the flag overrides that).
+      if (custom) {
+        lines.push(
+          `${i + 1}. 【${hdr}】→ ${custom}（自定义回答，请按字面采纳，不要套到预设选项上）`,
+        );
+        brief.push(`${hdr}：${custom}`);
+      } else if (picked) {
+        lines.push(`${i + 1}. 【${hdr}】→ ${picked}（选自预设）`);
+        brief.push(`${hdr}：${picked}`);
+      } else {
+        lines.push(`${i + 1}. 【${hdr}】→ (未作答)`);
+        brief.push(`${hdr}：(未作答)`);
+      }
+    }
+    // Patch the form card to a terminal "已选 …" so it can't be submitted twice.
     if (action.messageId) {
       await sender.updateCard(
         action.messageId,
-        buildQuestionAnsweredCard(task.display_name, label),
+        buildQuestionAnsweredCard(task.display_name, brief.join('；')),
       );
     }
-    // Feed the choice back as the next turn — same --resume path as a normal reply, since the
-    // CLI no longer accepts a tool_result for the (already auto-closed) AskUserQuestion.
-    const text = header ? `针对「${header}」，我选择：${label}` : label;
+    // Feed all answers back as the next turn — same --resume path as a normal reply (the CLI
+    // already auto-closed the AskUserQuestion tool, so a tool_result can't go back in).
+    const text =
+      '这是我对你刚才提问的回答（下列即为最终答复；凡标「自定义回答」的，请按我写的字面采纳，' +
+      `不要再归类或套用到你给的预设选项上）：\n${lines.join('\n')}`;
     const turnInput: TurnInput = {
       chatId,
       messageId: action.messageId ?? '',

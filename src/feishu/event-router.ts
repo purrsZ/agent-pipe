@@ -19,22 +19,30 @@ export function parseCardAction(data: unknown): CardAction | null {
   const d = data as Record<string, unknown>;
   const action = (d.action ?? {}) as Record<string, unknown>;
   const operator = (d.operator ?? {}) as Record<string, unknown>;
+  // WS card.action.trigger nests the message/chat ids under `context`; older/HTTP shapes put
+  // them at the top level. Read context first, then fall back to the flat names — otherwise
+  // messageId comes back empty and a downstream reply hits `/messages//reply` → 404.
+  const context = (d.context ?? {}) as Record<string, unknown>;
   const operatorId =
     typeof operator.open_id === 'string'
       ? operator.open_id
       : typeof operator.operator_id === 'string'
         ? operator.operator_id
         : '';
+  const pick = (...vals: unknown[]): string | undefined =>
+    vals.find((v): v is string => typeof v === 'string' && v !== '');
+  // Form submits carry per-component values under action.form_value (some shapes top-level).
+  // Optional — button-callback cards (checkpoint) have none, so this is undefined for them and
+  // their handler path is unchanged.
+  const rawForm = (action.form_value ?? d.form_value) as unknown;
+  const formValue =
+    rawForm && typeof rawForm === 'object' ? (rawForm as Record<string, unknown>) : undefined;
   return {
     value: action.value,
     operatorId,
     token: typeof d.token === 'string' ? d.token : undefined,
-    messageId:
-      typeof d.open_message_id === 'string'
-        ? d.open_message_id
-        : typeof d.message_id === 'string'
-          ? d.message_id
-          : undefined,
+    messageId: pick(context.open_message_id, d.open_message_id, d.message_id),
+    formValue,
   };
 }
 
