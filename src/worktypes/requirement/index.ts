@@ -5,7 +5,13 @@ import type {
   WorkItemEvent,
   WorkType,
 } from '../../workitems/types.js';
-import { checkpointDecisionOf, crossesCheckpoint, raiseCheckpoint, ttlsOf } from './checkpoint.js';
+import {
+  checkpointDecisionOf,
+  checkpointReason,
+  crossesCheckpoint,
+  raiseCheckpoint,
+  ttlsOf,
+} from './checkpoint.js';
 import { isRequirementDecisionStale } from './contract.js';
 import { fixRoundExceeded } from './integration.js';
 import { foldIntake, INTAKE_FIELD_SET, isGateReady } from './intake.js';
@@ -149,6 +155,9 @@ function onIntakeFieldSet(item: WorkItem, ev: WorkItemEvent): Transition {
   if (item.phase !== PHASE.intake) return {};
   const state = foldIntake(priorIntakeEventsOf(ev.payload));
   if (!isGateReady(state)) return {};
+  // 幂等：立项 gate 已 raise（容器 enrich 注入的 openWaitReasons 含它）就别因补料重复弹 gate——否则
+  // 每次补料都新增一个孤儿 human wait、重复推卡。gate 只在「必填首次齐」时 raise 一次。
+  if (openWaitReasonsOf(ev.payload).includes(checkpointReason(PHASE.understand))) return {};
   return requestAdvance(item, PHASE.intake, PHASE.understand, 'intake_ready');
 }
 
@@ -273,6 +282,11 @@ function stageKey(phase: string): string {
 function priorIntakeEventsOf(payload: unknown): unknown[] {
   const v = asObject(payload).priorIntakeEvents;
   return Array.isArray(v) ? v : [];
+}
+
+function openWaitReasonsOf(payload: unknown): string[] {
+  const v = asObject(payload).openWaitReasons;
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
 }
 
 function roleOf(payload: unknown): string | undefined {

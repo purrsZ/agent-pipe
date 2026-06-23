@@ -197,6 +197,33 @@ describe('requirement skeleton end-to-end', () => {
     });
   });
 
+  it('立项: 补料 after the gate opened does NOT raise a duplicate gate (容器注入 openWaitReasons → 幂等)', async () => {
+    const { store, api } = harness();
+    const item = api.createWorkItem({
+      type: 'requirement',
+      title: '幂等',
+      source: {},
+      repos: ['repo-a'],
+    }).item;
+    for (const f of [
+      { key: 'name', value: 'n' },
+      { key: 'summary', value: 's' },
+      { key: 'repos', value: ['repo-a'] },
+      { key: 'prd', value: 'p' },
+      { key: 'acceptance', value: 'a' },
+    ]) {
+      api.injectIntakeField(item.id, f);
+    }
+    const intakeGates = () =>
+      store.listOpenWaits(item.id).filter((w) => w.reason === `checkpoint:${PHASE.understand}`);
+    await waitFor(() => expect(intakeGates()).toHaveLength(1));
+
+    // 补料（再填可选项 + 改必填项）→ 仍只有 1 个立项 gate wait（容器 enrich 注入 openWaitReasons，幂等）。
+    api.injectIntakeField(item.id, { key: 'scope', value: '不做导出' });
+    api.injectIntakeField(item.id, { key: 'acceptance', value: '更精确的验收' });
+    expect(intakeGates()).toHaveLength(1);
+  });
+
   it('a rejected 灯① keeps the item in 理解 and re-runs the owner', async () => {
     const { store, api } = harness();
     const item = api.createWorkItem({

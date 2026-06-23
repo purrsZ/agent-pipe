@@ -720,9 +720,16 @@ export class ReducerRuntime {
         .listEvents(item.id)
         .filter((e) => e.kind === 'intake_field_set')
         .map((e) => e.payload);
+      // 同时把当前 open waits 的 reason（中性字符串）交给 worktype，使其 gate 判定幂等：gate 已 raise
+      // 就别因后续补料重复 raise。容器不解释 reason，只搬运。
+      const openWaitReasons = this.deps.store.listOpenWaits(item.id).map((w) => w.reason);
       return {
         ...event,
-        payload: { ...(isObject(event.payload) ? event.payload : {}), priorIntakeEvents },
+        payload: {
+          ...(isObject(event.payload) ? event.payload : {}),
+          priorIntakeEvents,
+          openWaitReasons,
+        },
       };
     }
     return event;

@@ -69,6 +69,26 @@ describe('requirement lifecycle transitions', () => {
     });
   });
 
+  it('立项 gate 幂等：已 raise（open wait 在）后补料不重复 raise（避免孤儿 wait / 重复推卡）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.intake });
+    const required = [
+      { key: 'name', value: 'n' },
+      { key: 'summary', value: 's' },
+      { key: 'repos', value: ['repo-a'] },
+      { key: 'prd', value: 'p' },
+      { key: 'acceptance', value: 'a' },
+    ];
+    // 容器 enrich 注入的 openWaitReasons 已含立项 gate（上一条填项已 raise）→ 补料只刷卡，不再 raise。
+    const out = t.onEvent(
+      item,
+      ev('intake_field_set', {
+        priorIntakeEvents: [...required, { key: 'scope', value: '边界' }],
+        openWaitReasons: [`checkpoint:${PHASE.understand}`],
+      }),
+    );
+    expect(out).toEqual({});
+  });
+
   it('立项 gate approved advances 立项 → 理解 and dispatches the understand owner', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.intake });
     const out = t.onEvent(item, ev('wait_resolved', { decision: { approved: true } }));
