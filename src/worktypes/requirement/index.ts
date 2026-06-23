@@ -196,8 +196,14 @@ function enterPhase(
   const base: Transition = { phase: { to, reason } };
   switch (to) {
     case PHASE.understand:
-      // 立项 gate 通过 → 进理解，dispatch 首个 owner understand run（原 workitem_created 的动作后移一格）。
-      return { ...base, dispatch: [ownerSpec(item, stageKey(to))] };
+      // 立项 gate 通过 → 进理解：① intake_finalize effect 落立项书 intake/intake.md + 把立项收齐的仓库
+      // 提升为 workitem.repos（从立项填项历史 fold）；② dispatch 首个 owner understand run（原
+      // workitem_created 的动作后移一格）。
+      return {
+        ...base,
+        dispatch: [ownerSpec(item, stageKey(to))],
+        effects: [{ kind: 'intake_finalize' }],
+      };
     case PHASE.contract:
     case PHASE.design:
     case PHASE.split:

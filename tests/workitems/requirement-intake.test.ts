@@ -5,6 +5,7 @@ import {
   foldIntake,
   INTAKE_CHECKLIST,
   initialIntakeState,
+  intakeReposOf,
   isFieldSatisfied,
   isGateReady,
   requiredMissing,
@@ -179,5 +180,15 @@ describe('buildIntakeBrief', () => {
   it('勾了 UI 但未填稿 → 立项书标注待补', () => {
     const s = applyFieldInput(fillAllRequired(), { uiRequired: true });
     expect(buildIntakeBrief(s)).toContain('设计稿待补');
+  });
+});
+
+describe('intakeReposOf', () => {
+  it('取立项收齐的仓库（repos 字段归一值）供 workitem.repos 提升', () => {
+    expect(intakeReposOf(fillAllRequired())).toEqual(['/abs/backend', '/abs/frontend']);
+  });
+
+  it('未填 repos → 空数组', () => {
+    expect(intakeReposOf(initialIntakeState())).toEqual([]);
   });
 });

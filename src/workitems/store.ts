@@ -433,6 +433,16 @@ export class WorkitemsStore {
     this.stmt(`UPDATE workitems SET ${clause} WHERE id = @id`).run({ ...values, id });
   }
 
+  // repos 提升（repos_json 是 JSON 数组列，setClauses 不序列化数组，故专列一法）。worker 拆分 /
+  // spec-design repo 候选都读 workitem.repos，而 /req 不再带 --repo——仓库走立项收齐后提升到这里。
+  setRepos(id: string, repos: string[]): void {
+    this.stmt('UPDATE workitems SET repos_json = @repos, updated_at = @now WHERE id = @id').run({
+      repos: JSON.stringify(repos),
+      now: this.clock.now(),
+      id,
+    });
+  }
+
   insertAssignment(row: Assignment): void {
     this.db
       .prepare(

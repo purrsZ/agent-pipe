@@ -387,6 +387,9 @@ export class ReducerRuntime {
       case 'wait_renewed':
         this.applyWaitRenewed(event);
         return {};
+      case 'repos_set':
+        this.applyReposSet(event);
+        return {};
       case 'assignment_stalled':
         return this.handleStalledAssignment(event, now, postCommit);
       case 'effect_aborted':
@@ -481,6 +484,17 @@ export class ReducerRuntime {
       renewedCount: wait.renewedCount + 1,
       remindedAt: null,
     });
+  }
+
+  // A worktype effect (e.g. 立项收尾 / intake_finalize) emits repos_set to lift its gathered repo
+  // list onto the work item — a pure worktype/effect can't write workitem fields directly. Neutral:
+  // the container only stores the string[] (no interpretation). Malformed payload is inert.
+  private applyReposSet(event: WorkItemEvent): void {
+    if (!isObject(event.payload)) return;
+    const raw = event.payload.repos;
+    if (!Array.isArray(raw)) return;
+    const repos = raw.filter((r): r is string => typeof r === 'string' && r.length > 0);
+    this.deps.store.setRepos(event.workitemId, repos);
   }
 
   private handleStalledAssignment(

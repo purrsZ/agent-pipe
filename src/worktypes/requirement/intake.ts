@@ -189,6 +189,13 @@ export function requiredProgress(state: IntakeState): { filled: number; total: n
   return { filled, total: defs.length };
 }
 
+// 立项收齐的仓库（repos 字段的归一值）。立项 gate 通过时由 intake_finalize effect 提升为
+// workitem.repos——worker 拆分 / spec-design repo 候选都读 workitem.repos，而 /req 不再带 --repo。
+export function intakeReposOf(state: IntakeState): string[] {
+  const f = state.fields.find((x) => x.key === 'repos');
+  return f && Array.isArray(f.value) ? f.value : [];
+}
+
 // 产出结构化立项书（MD），作为「理解」/ spec-design run 的首要上游输入。只输出有值的项。
 export function buildIntakeBrief(state: IntakeState): string {
   const byKey = new Map(state.fields.map((f) => [f.key, f]));

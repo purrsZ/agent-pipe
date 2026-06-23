@@ -9,6 +9,7 @@ import { EffectRuntime, type EffectContext } from '../../src/workitems/effects.j
 import { WorkTypeRegistry } from '../../src/workitems/registry.js';
 import { ReducerRuntime } from '../../src/workitems/reducer.js';
 import { WorkitemsStore } from '../../src/workitems/store.js';
+import { createIntakeFinalizeHandler } from '../../src/worktypes/requirement/intake-finalize.js';
 import { createIntegrationCheckHandler } from '../../src/worktypes/requirement/integration.js';
 import { PHASE } from '../../src/worktypes/requirement/phases.js';
 import { registerRequirement } from '../../src/worktypes/requirement/index.js';
@@ -80,6 +81,8 @@ function harness(opts: { workerDelayMs?: Record<string, number> } = {}) {
   });
   // 集成验证 effect: with no frozen contract in this skeleton run it emits passed (no_contract).
   effects.registerHandler(createIntegrationCheckHandler());
+  // 立项收尾 effect: 立项 gate 通过 → 落立项书 + 提升 repos（emit repos_set）。
+  effects.registerHandler(createIntakeFinalizeHandler());
   const api = new WorkitemsApi({
     store,
     registry,
@@ -224,6 +227,37 @@ describe('requirement skeleton end-to-end', () => {
     expect(intakeGates()).toHaveLength(1);
   });
 
+  it('立项: repos 收齐后提升进 workitem.repos（/req 不带 --repo 的头号坑）', async () => {
+    const { store, api } = harness();
+    const item = api.createWorkItem({
+      type: 'requirement',
+      title: 'repo 提升',
+      source: {},
+      repos: [], // M-I3 /req 去掉 --repo → 创建时仓库为空
+    }).item;
+    expect(store.getWorkItem(item.id)!.repos).toEqual([]);
+
+    for (const f of [
+      { key: 'name', value: 'n' },
+      { key: 'summary', value: 's' },
+      { key: 'repos', value: ['/abs/repo-x', '/abs/repo-y'] },
+      { key: 'prd', value: 'p' },
+      { key: 'acceptance', value: 'a' },
+    ]) {
+      api.injectIntakeField(item.id, f);
+    }
+    const gate = () =>
+      store.listOpenWaits(item.id).find((w) => w.reason === `checkpoint:${PHASE.understand}`);
+    await waitFor(() => expect(gate()).toBeDefined());
+    api.resolveWait(gate()!.id, { operator: 'lichao', reason: 'go', decision: { approved: true } });
+
+    // 进理解后，intake_finalize effect 把立项 repos 提升为 workitem.repos（emit repos_set → setRepos）。
+    await waitFor(() => {
+      expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.understand);
+      expect(store.getWorkItem(item.id)!.repos).toEqual(['/abs/repo-x', '/abs/repo-y']);
+    });
+  });
+
   it('立项: 工作台「驳回」立项 gate 不卡死——重弹 gate，仍可立项完成进理解', async () => {
     const { store, api } = harness();
     const item = api.createWorkItem({
@@ -298,13 +332,16 @@ describe('requirement skeleton end-to-end', () => {
     store: WorkitemsStore,
     api: WorkitemsApi,
     itemId: string,
+    repos: string[] = ['repo-a'],
   ): Promise<void> {
+    // 立项收的 repos 在 gate 通过时（intake_finalize effect）提升为 workitem.repos，覆盖 createWorkItem
+    // 的初值——所以这里注入的 repos 必须 = 该测试期望 worker fan-out 的仓库集。
     for (const f of [
       { key: 'name', value: '需求' },
       { key: 'summary', value: '背景' },
       { key: 'prd', value: 'PRD' },
       { key: 'acceptance', value: '验收' },
-      { key: 'repos', value: ['repo-a'] },
+      { key: 'repos', value: repos },
     ]) {
       api.injectIntakeField(itemId, f);
     }
@@ -326,8 +363,9 @@ describe('requirement skeleton end-to-end', () => {
     store: WorkitemsStore,
     api: WorkitemsApi,
     itemId: string,
+    repos: string[] = ['repo-a'],
   ): Promise<void> {
-    await walkThroughIntake(store, api, itemId); // 先过立项 gate 才进理解
+    await walkThroughIntake(store, api, itemId, repos); // 先过立项 gate 才进理解（repos 提升）
     for (const boundary of [PHASE.contract, PHASE.design, PHASE.split]) {
       await waitFor(() =>
         expect(store.listOpenWaits(itemId).some((w) => w.reason === `checkpoint:${boundary}`)).toBe(
@@ -354,7 +392,7 @@ describe('requirement skeleton end-to-end', () => {
       repos: ['repo-a', 'repo-b'],
     }).item;
 
-    await walkToImplement(store, api, item.id);
+    await walkToImplement(store, api, item.id, ['repo-a', 'repo-b']);
 
     // repo-a finishes fast while repo-b is still running.
     await waitFor(() => {
@@ -388,7 +426,7 @@ describe('requirement skeleton end-to-end', () => {
       repos: ['repo-a', 'repo-b', 'repo-c'],
     }).item;
 
-    await walkToImplement(store, api, item.id);
+    await walkToImplement(store, api, item.id, ['repo-a', 'repo-b', 'repo-c']);
 
     // entering 并行实现 fans out 3 workers; cap=2 parks the third and logs it loudly.
     await waitFor(() =>

@@ -89,11 +89,13 @@ describe('requirement lifecycle transitions', () => {
     expect(out).toEqual({});
   });
 
-  it('立项 gate approved advances 立项 → 理解 and dispatches the understand owner', () => {
+  it('立项 gate approved advances 立项 → 理解, dispatches understand owner + 发 intake_finalize effect', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.intake });
     const out = t.onEvent(item, ev('wait_resolved', { decision: { approved: true } }));
     expect(out.phase).toEqual({ to: PHASE.understand, reason: 'checkpoint_approved' });
     expect(out.dispatch?.[0]).toMatchObject({ role: 'owner' });
+    // 立项收尾：落立项书 + 提升 repos（从立项填项历史 fold）。
+    expect(out.effects?.[0]).toMatchObject({ kind: 'intake_finalize' });
   });
 
   it('立项 gate「驳回」(防御，无真驳回语义) 重弹立项 gate 而非卡死无 wait', () => {
