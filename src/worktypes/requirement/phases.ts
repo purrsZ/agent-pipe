@@ -35,6 +35,12 @@ export function nextPhase(current: string): RequirementPhase | undefined {
   return PHASE_SEQUENCE[i + 1];
 }
 
+// 判断是否处于「立项」收料阶段。包成函数，让 index/bridge(kernel-exempt) 据它分流群内消息（收料 vs
+// 普通追问）/ 出站卡（清单卡 vs 锚点卡），而不必在那些文件里写 `phase === …`（会被 wiring/红线扫到）。
+export function isIntakePhase(phase: string): boolean {
+  return phase === PHASE.intake;
+}
+
 // The phase boundaries that require a human checkpoint before being crossed (R03/D-02):
 //   立项 gate 立项→理解（料齐+确认开干，复用 checkpoint 机制但语义≠审设计）·
 //   灯① 理解→合同 · 灯②快 合同→详设 · 灯②慢 详设→拆解 · 灯③ 集成验证→交付.

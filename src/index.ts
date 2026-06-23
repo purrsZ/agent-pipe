@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -49,6 +50,19 @@ import { registerRequirement } from './worktypes/requirement/index.js';
 import { createIntegrationCheckHandler } from './worktypes/requirement/integration.js';
 import { checkpointGateLabel, checkpointRail } from './worktypes/requirement/lights.js';
 import { createRequirementRunStrategy } from './worktypes/requirement/worker-handler.js';
+import { PendingIntakeStore } from './bridge/pending-intake.js';
+import { buildIntakeChecklistCard, type IntakeChecklistView } from './feishu/intake-card.js';
+import {
+  foldIntake,
+  INTAKE_CHECKLIST,
+  isFieldSatisfied,
+  isGateReady,
+  nextRequiredToFill,
+  requiredMissing,
+  requiredProgress,
+} from './worktypes/requirement/intake.js';
+import { createIntakeFinalizeHandler } from './worktypes/requirement/intake-finalize.js';
+import { isIntakePhase } from './worktypes/requirement/phases.js';
 
 const COMPACT_PROMPT = [
   '请把我们到目前为止的完整对话压缩成一份结构化摘要，供新会话继续使用。',
@@ -105,6 +119,51 @@ async function fetchBotOpenId(client: any, logger: Logger): Promise<string> {
 // type-agnostic — it just takes the rendered noun.
 export function anchorNoun(type: string): string {
   return type === 'requirement' ? '需求' : '调查';
+}
+
+// 立项清单事件流 → feishu 清单卡的中性视图。kernel-exempt：index 可 import worktypes 的 intake 纯核心，
+// 把领域状态压成 feishu 层只认的 view（feishu 层不做 fold、不 import worktypes）。
+function foldIntakeState(events: WorkItemEvent[]): ReturnType<typeof foldIntake> {
+  return foldIntake(events.filter((e) => e.kind === 'intake_field_set').map((e) => e.payload));
+}
+
+function buildIntakeView(title: string, state: ReturnType<typeof foldIntake>): IntakeChecklistView {
+  const byKey = new Map(state.fields.map((f) => [f.key, f]));
+  const items = INTAKE_CHECKLIST.map((d) => {
+    const f = byKey.get(d.key);
+    const value = f ? (Array.isArray(f.value) ? f.value.join('、') : f.value) : undefined;
+    return {
+      label: d.label,
+      done: isFieldSatisfied(f),
+      required:
+        d.requirement === 'required' || (d.requirement === 'conditional' && state.uiRequired),
+      pending: f?.filledBy === 'ai-extracted' && !f.confirmed,
+      value,
+    };
+  });
+  const prog = requiredProgress(state);
+  return {
+    title,
+    items,
+    filled: prog.filled,
+    total: prog.total,
+    ready: isGateReady(state),
+    missing: requiredMissing(state).map((d) => d.label),
+  };
+}
+
+// 立项收料的仓库项校验：绝对路径 + 是 git 仓 + 有 HEAD（当场退回不合格项）。副作用（git/fs）放在
+// index(kernel-exempt) 里做，不进 worktype 纯核心。校验失败一律当「不是有效仓库」处理。
+function isGitRepo(repoPath: string): boolean {
+  if (!path.isAbsolute(repoPath)) return false;
+  try {
+    const head = execFileSync('git', ['-C', repoPath, 'rev-parse', '--verify', 'HEAD'], {
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return head.toString().trim().length > 0;
+  } catch {
+    return false;
+  }
 }
 
 export function ensureSingleInstance(pidPath: string, logger: Logger): void {
@@ -179,6 +238,8 @@ async function main() {
     defaultCwd: config.allowedCwdPrefixes[0] ?? process.cwd(),
   });
   const runningTasks = new Set<string>();
+  // /req 后「等群名」的临时待答态（M-I2，keyed by 用户+会话，带 TTL，纯内存）。
+  const pendingIntake = new PendingIntakeStore();
   const botStartTime = Date.now();
 
   // HTML 工作台 (R17/R18): SSR 读视图 + 单写入口（funnels through resolveWait/injectHumanMessage，
@@ -660,57 +721,60 @@ async function main() {
     await sender.reply(msg.messageId, `已关闭调查 ${item.id}。`);
   }
 
-  // /req (D-15): create a managed requirement unit, post its anchor card, and claim the thread
-  // so follow-ups + 灯卡 route into it. Mirrors runProbe's anchor-before-create ordering: the
-  // first owner run reads thread/anchor locators from source the moment it dispatches, so those
-  // locators must exist before createWorkItem. The 4-light checkpoint rail + card.action
-  // consumption land in a later stage (T3); here we only kick the unit off.
-  async function runRequirement(
-    msg: IncomingMessage,
-    opts: { repos?: string[]; description: string },
-  ): Promise<void> {
-    const repos =
-      opts.repos && opts.repos.length > 0
-        ? opts.repos
-        : [config.allowedCwdPrefixes[0] ?? process.cwd()];
+  // /req (立项重塑, M-I2/3): /req 不再直接建单。bridge 先在原会话问群名（临时待答态），用户下一条
+  // 普通消息即群名 → startIntakeGroup 建专属群发起立项。createWorkItem + claim + 清单卡都在
+  // startIntakeGroup 里（建群成功后才建单）。
+  async function runRequirement(msg: IncomingMessage, opts: { description: string }): Promise<void> {
+    pendingIntake.set(msg.userId, msg.chatId, opts.description, Date.now());
+    const tail = opts.description ? `\n需求一句话：${opts.description}` : '';
+    await sender.reply(
+      msg.messageId,
+      `好，咱们给这个需求建个专属群来推进立项。请直接回一条消息作为群名（比如「订单导出」）。${tail}`,
+    );
+  }
 
-    // 1) 先发占位锚点卡建话题，拿 anchorMsgId + threadId（同 runProbe 的时序理由）。
-    const placeholder = buildAnchorCard({
-      id: '创建中…',
-      title: opts.description,
-      stage: 'requirement:理解',
-      status: 'open',
-      noun: anchorNoun('requirement'),
-    });
-    let anchorMsgId: string | null;
-    let threadId: string | undefined;
-    if (msg.chatType === 'group') {
-      const res = await sender.replyCardInThread(msg.messageId, placeholder);
-      anchorMsgId = res?.messageId ?? null;
-      threadId = res?.threadId ?? undefined;
-    } else {
-      anchorMsgId = await sender.replyCard(msg.messageId, placeholder);
-    }
-    if (!anchorMsgId) {
-      await sender.reply(msg.messageId, '锚点卡发送失败，请重试 /req。');
+  // M-I2: 用户回了群名 → 建专属群（拉发起人）→ 群里发立项清单卡 → 建立项单（type=requirement，
+  // 起步阶段=立项）→ claim 群 chatId（群内消息/卡回调据此路由）→ 预填 name(=群名)+summary(=一句话)
+  // → 群里引导收下一项。建群是唯一硬前置（im:chat scope），失败兜底回原会话报错、不建单。
+  async function startIntakeGroup(
+    msg: IncomingMessage,
+    description: string,
+    groupName: string,
+  ): Promise<void> {
+    const groupChatId = await sender.createGroup(groupName, [msg.userId]);
+    if (!groupChatId) {
+      await sender.reply(
+        msg.messageId,
+        '建群失败（多半是未开通 im:chat 权限）。开通后重发 /req 再试。',
+      );
       return;
     }
-
-    // 2) createWorkItem：把 thread/anchor 定位 + 多仓写进 source/repos，随 owner run 下发。
+    // 预置 name(=群名)+summary(=一句话) 的初始清单视图，先把清单卡发进群拿到 anchorMsgId（同 runProbe
+    // 的「建单前先备好出站定位」时序）。
+    const seed: Array<{ key: string; value: string }> = [{ key: 'name', value: groupName }];
+    if (description) seed.push({ key: 'summary', value: description });
+    const view0 = buildIntakeView(groupName, foldIntake(seed));
+    const anchorMsgId = await sender.sendCard(groupChatId, buildIntakeChecklistCard(view0));
+    if (!anchorMsgId) {
+      await sender.reply(
+        msg.messageId,
+        `群「${groupName}」已建好，但清单卡发送失败，请在群里发一条消息或重发 /req。`,
+      );
+      return;
+    }
     let item: WorkItem;
     try {
       item = workitems.api.createWorkItem({
         type: 'requirement',
-        title: opts.description,
+        title: groupName,
         source: {
           kind: 'feishu',
           userId: msg.userId,
-          chatId: msg.chatId,
-          messageId: msg.messageId,
-          threadId,
+          chatId: groupChatId,
+          messageId: anchorMsgId,
           anchorMsgId,
         },
-        repos,
+        repos: [],
         context: {},
       }).item;
     } catch (err) {
@@ -719,26 +783,131 @@ async function main() {
           ? `${err.message}（先用 /done 关掉几个再来）`
           : `需求创建失败: ${(err as Error).message}`;
       if (!(err instanceof OpenLimitError)) logger.error({ err }, 'requirement create failed');
-      await sender.updateCard(anchorMsgId, buildStatusCard(opts.description, 'error', why));
+      await sender.updateCard(anchorMsgId, buildStatusCard(groupName, 'error', why));
       return;
     }
-
-    // 3) 同步建 claim（入站路由）：话题内追问 / 灯卡回调按同一 key 匹配进本单元。
-    const claimKey = threadId ?? msg.rootId ?? msg.messageId;
+    // claim key = 群 chatId（立项群一需求一群；群内消息常无 thread/root/parent，按 chatId 路由）。
+    const claimKey = groupChatId;
     store.claimThread(claimKey, 'managed', item.id, anchorMsgId);
-
-    // 4) 占位锚点卡补全为真实 id / 状态。
-    await sender.updateCard(
-      anchorMsgId,
-      buildAnchorCard({
-        id: item.id,
-        title: item.title,
-        stage: item.phase,
-        status: item.status,
-        noun: anchorNoun(item.type),
-      }),
+    // 预填项进事件流（立项书 fold + gate 判定都靠它）。立项阶段 postStatus 是 no-op，清单卡由本路径就地维护。
+    for (const f of seed) workitems.api.injectIntakeField(item.id, f);
+    logger.info(
+      { workitemId: item.id, groupChatId, anchorMsgId },
+      'requirement intake group started',
     );
-    logger.info({ workitemId: item.id, threadId, anchorMsgId, repos }, 'requirement anchor posted');
+    await sender.reply(msg.messageId, `已建群「${groupName}」并发起立项，请到群里继续把前置料收齐。`);
+    await promptNextIntake(item.id, groupChatId);
+  }
+
+  // M-I3 群内收料：把当前「待填项」的值从群消息里填进去（缺哪项填哪项）。仓库项当场校验 git 仓+HEAD；
+  // 文件附件走 PRD 上传分支。每填一项刷新清单卡 + 引导下一项。
+  async function handleIntakeMessage(item: WorkItem, msg: IncomingMessage): Promise<void> {
+    if (msg.attachments.length > 0) {
+      await handleIntakePrd(item, msg);
+      return;
+    }
+    const text = msg.text.trim();
+    if (!text) return;
+    const state = foldIntakeState(workitems.api.listEvents(item.id));
+    const next = nextRequiredToFill(state);
+    if (!next) {
+      await sender.sendText(msg.chatId, '必填项已齐 ✅ 点上方清单卡「立项完成 · 开始开发」即可开跑。');
+      return;
+    }
+    if (next.key === 'repos') {
+      const repos = text
+        .split(/[\s,，、]+/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 0);
+      const invalid = repos.filter((p) => !isGitRepo(p));
+      if (repos.length === 0 || invalid.length > 0) {
+        const bad = invalid.length > 0 ? invalid : repos;
+        await sender.sendText(
+          msg.chatId,
+          `这些不是有效的 git 仓库（需绝对路径且有 HEAD），请修正后重发：\n${bad
+            .map((p) => `- ${p}`)
+            .join('\n')}`,
+        );
+        return;
+      }
+      workitems.api.injectIntakeField(item.id, { key: 'repos', value: repos });
+    } else {
+      workitems.api.injectIntakeField(item.id, { key: next.key, value: text });
+    }
+    await refreshIntakeCard(item.id);
+    await promptNextIntake(item.id, msg.chatId);
+  }
+
+  // M-I3 PRD：群里上传 MD → 下载 → 存进 artifact 仓 intake/prd.md → 填 prd 项（AI 摘要/预填留后续增强）。
+  async function handleIntakePrd(item: WorkItem, msg: IncomingMessage): Promise<void> {
+    const md = msg.attachments.find(
+      (a) => a.kind === 'file' && /\.(md|markdown|txt)$/i.test(a.name),
+    );
+    if (!md) {
+      await sender.sendText(msg.chatId, '📎 PRD 请上传 .md 文件，或直接发文字描述。');
+      return;
+    }
+    const inbox = path.join(config.dataDir, 'intake-inbox');
+    try {
+      fs.mkdirSync(inbox, { recursive: true });
+    } catch (err) {
+      logger.warn({ err, inbox }, 'mkdir intake-inbox failed');
+    }
+    const tmp = path.join(inbox, `${item.id}-${sanitizeName(md.name)}`);
+    const ok = await sender.downloadAttachment(msg.messageId, md.fileKey, 'file', tmp);
+    if (!ok) {
+      await sender.sendText(msg.chatId, 'PRD 下载失败，请重试。');
+      return;
+    }
+    let content = '';
+    try {
+      content = fs.readFileSync(tmp, 'utf8');
+    } catch (err) {
+      logger.warn({ err, tmp }, 'read prd failed');
+    }
+    workitems.artifacts.writeFile(item.id, 'intake/prd.md', content, '立项上传 PRD');
+    workitems.api.injectIntakeField(item.id, {
+      key: 'prd',
+      value: `见 intake/prd.md（${md.name}）`,
+    });
+    await sender.sendText(msg.chatId, `📄 已收下 PRD「${md.name}」并存档（intake/prd.md）。`);
+    await refreshIntakeCard(item.id);
+    await promptNextIntake(item.id, msg.chatId);
+  }
+
+  // 引导：群里追下一个还缺的必填项；全齐则提示点「立项完成」。
+  async function promptNextIntake(itemId: string, chatId: string): Promise<void> {
+    const state = foldIntakeState(workitems.api.listEvents(itemId));
+    const next = nextRequiredToFill(state);
+    if (next) {
+      await sender.sendText(chatId, `📋 还差「${next.label}」：${next.hint ?? '请补充'}`);
+    } else {
+      await sender.sendText(chatId, '✅ 必填已齐，点上方清单卡「立项完成 · 开始开发」即可开跑。');
+    }
+  }
+
+  // 就地刷新立项清单卡（料齐时带上立项 gate 路由 → 卡上出「立项完成」按钮）。
+  async function refreshIntakeCard(itemId: string): Promise<void> {
+    const it = workitems.api.getWorkItem(itemId);
+    if (!it) return;
+    const anchorMsgId = store.getThreadAnchorByOwner(itemId);
+    if (anchorMsgId) await sender.updateCard(anchorMsgId, buildIntakeCard(itemId, it.title));
+  }
+
+  function buildIntakeCard(itemId: string, title: string): object {
+    const state = foldIntakeState(workitems.api.listEvents(itemId));
+    const view = buildIntakeView(title, state);
+    if (!view.ready) return buildIntakeChecklistCard(view);
+    // 料齐：找立项 gate 的 open human wait（立项阶段仅此一种 checkpoint wait），把路由带进按钮。
+    const wait = workitems.store
+      .listOpenWaits(itemId)
+      .find((w) => w.kind === 'human' && checkpointBoundaryOf(w.reason) !== undefined);
+    if (!wait) return buildIntakeChecklistCard(view);
+    return buildIntakeChecklistCard(view, {
+      itemId,
+      waitId: wait.id,
+      boundary: checkpointBoundaryOf(wait.reason)!,
+    });
   }
 
   const commands = new CommandHandler(
@@ -846,7 +1015,10 @@ async function main() {
     });
     const title = workitems.api.getWorkItem(itemId)?.title ?? itemId;
     const gateLabel = boundary ? checkpointGateLabel(boundary) : '检查点';
-    if (action.messageId) {
+    // 立项 gate 的「立项完成」按钮就在清单卡（= 单元锚点卡）上：点完不在此就地打补丁，交给 postStatus
+    // 把它 morph 成锚点卡（进理解），避免对同一张卡双改打架。独立 灯卡（≠锚点卡）才就地补「已通过/打回」。
+    const anchorId = store.getThreadAnchorByOwner(itemId);
+    if (action.messageId && action.messageId !== anchorId) {
       await sender.updateCard(
         action.messageId,
         buildCheckpointAnsweredCard(title, gateLabel, r.ok ? approved : null),
@@ -860,7 +1032,11 @@ async function main() {
     botStartTime,
     async (msg) => {
       if (msg.chatType === 'group' && !msg.isMentioned) {
-        return;
+        // 已被 managed 认领的群（立项群：一需求一群，bot 是群成员）内的消息不强制 @bot——收料/追问是
+        // 高频多轮，逐条 @ 体验差，且文件消息（PRD）无法附带 @。其它群仍需 @bot 才响应；下方白名单门仍生效。
+        if (store.getThreadClaim(msg.chatId)?.owner_kind !== 'managed') {
+          return;
+        }
       }
       const isAdmin = config.allowedOpenIds.has(msg.userId);
       if (!isAdmin && !store.isAllowed(msg.userId)) {
@@ -880,40 +1056,65 @@ async function main() {
         return;
       }
 
-      // WI-D/WI-5: consult the thread-claim registry BEFORE the bridge task fallback. A
-      // thread claimed by the managed (workitems) layer must not be swallowed by the bridge's
-      // root→task / recent-task fallback — the follow-up is routed into the owning work
-      // item's next round instead.
-      // 话题路由优先：话题里的追问带 thread_id（= 锚点卡创建话题时的 claim key）；回退到回复根。
+      // M-I2: /req 后「等群名」待答——用户下一条普通消息即群名 → 建专属群发起立项。先于一切路由，
+      // 因为此刻还没有 claim/任务可路由。空群名（如发了张图）→ 保留待答、回提示。
+      if (pendingIntake.has(msg.userId, msg.chatId, Date.now())) {
+        const groupName = msg.text.trim();
+        if (!groupName) {
+          await sender.reply(msg.messageId, '群名不能为空，请回一条文字作为群名（比如「订单导出」）。');
+          return;
+        }
+        const naming = pendingIntake.take(msg.userId, msg.chatId, Date.now());
+        await startIntakeGroup(msg, naming?.description ?? '', groupName);
+        return;
+      }
+
+      // WI-D/WI-5 + M-I2/3: consult the thread-claim registry BEFORE the bridge task fallback. A
+      // managed (workitems) claim must not be swallowed by the bridge's root→task / recent-task
+      // fallback. probe 按飞书话题 thread 认领；立项群按群 chatId 认领（群内消息常无 thread/root/
+      // parent，故 thread 找不到再按 chatId 找）。
       const threadRoot = msg.threadId ?? msg.rootId ?? msg.parentId;
-      if (threadRoot) {
-        const claim = store.getThreadClaim(threadRoot);
-        if (claim?.owner_kind === 'managed') {
-          const item = workitems.api.getWorkItem(claim.owner_id);
-          if (item) {
-            // WI-7 P1: a terminal item (e.g. failed) keeps its claim until /done. Injecting a
-            // follow-up would hit the reducer terminal short-circuit (recorded, never
-            // dispatched) — so reply honestly instead of "已转交…稍候进展", which would promise
-            // a report that never comes. /done still releases the claim and closes the card.
-            if (isTerminalStatus(item.status)) {
-              await sender.reply(
-                msg.messageId,
-                '该调查已结束，回复 `/done` 关闭后可重新发起 `/probe`。',
-              );
-              return;
-            }
-            workitems.api.injectHumanMessage(item.id, {
-              text: msg.text,
-              feishuMsgId: msg.messageId,
-            });
-            await sender.reply(msg.messageId, '已转交给调查，稍候进展会在本话题更新。');
+      let managedKey: string | undefined;
+      let claim = threadRoot ? store.getThreadClaim(threadRoot) : undefined;
+      if (claim?.owner_kind === 'managed') {
+        managedKey = threadRoot;
+      } else if (msg.chatType === 'group') {
+        const byChat = store.getThreadClaim(msg.chatId);
+        if (byChat?.owner_kind === 'managed') {
+          claim = byChat;
+          managedKey = msg.chatId;
+        }
+      }
+      if (claim?.owner_kind === 'managed' && managedKey) {
+        const item = workitems.api.getWorkItem(claim.owner_id);
+        if (item) {
+          // WI-7 P1: a terminal item (e.g. failed) keeps its claim until /done. Injecting a
+          // follow-up would hit the reducer terminal short-circuit (recorded, never dispatched)
+          // — so reply honestly instead of promising a report that never comes.
+          if (isTerminalStatus(item.status)) {
+            await sender.reply(
+              msg.messageId,
+              '该单元已结束，回复 `/done` 关闭后可重新发起。',
+            );
             return;
           }
-          // Owner vanished but the claim lingered — release it and fall through to normal
-          // bridge routing instead of swallowing the message forever.
-          logger.warn({ threadRoot, ownerId: claim.owner_id }, 'managed claim with missing owner');
-          store.releaseThreadClaim(threadRoot);
+          // 立项收料：群内普通消息当作「当前待填项」的值（缺哪项填哪项），写 intake_field_set 事件并
+          // 刷新清单卡；非立项阶段才走普通追问注入。
+          if (isIntakePhase(item.phase)) {
+            await handleIntakeMessage(item, msg);
+            return;
+          }
+          workitems.api.injectHumanMessage(item.id, {
+            text: msg.text,
+            feishuMsgId: msg.messageId,
+          });
+          await sender.reply(msg.messageId, '已转交，稍候进展会在本话题/群更新。');
+          return;
         }
+        // Owner vanished but the claim lingered — release it and fall through to normal bridge
+        // routing instead of swallowing the message forever.
+        logger.warn({ managedKey, ownerId: claim.owner_id }, 'managed claim with missing owner');
+        store.releaseThreadClaim(managedKey);
       }
 
       const candidates = [msg.rootId, msg.parentId].filter((v): v is string => !!v);
@@ -1130,6 +1331,9 @@ export function createWorkitemsRuntime(deps: {
       try {
         const item = workitems.api.getWorkItem(workitemId);
         if (!item) return;
+        // 立项阶段：清单卡由 bridge 收料路径就地刷新（含立项 gate 按钮），观察者不插手，否则会用锚点卡
+        // 覆盖清单卡。立项 gate 通过 → 进理解（非立项）→ 下面常规锚点刷新接管（卡 morph 成锚点卡）。
+        if (isIntakePhase(item.phase)) return;
         // WI-8: anchor / 灯卡 both target the anchor card's own message id, not the thread root
         // (which keys routing / report replies).
         const anchorMsgId = deps.kernelStore.getThreadAnchorByOwner(workitemId);
@@ -1194,6 +1398,9 @@ export function createWorkitemsRuntime(deps: {
   );
   // requirement 集成验证: static contract对账 effect (emits integration_check_passed/failed).
   workitems.effects.registerHandler(createIntegrationCheckHandler());
+  // 立项收尾 effect: 立项 gate 通过 → fold 立项填项历史 → 落立项书 intake/intake.md + 提升 repos
+  // (emit repos_set)。注册在这里，与 agent-run / integration_check 同批，进理解时由 worktype 发起。
+  workitems.effects.registerHandler(createIntakeFinalizeHandler());
   workitems.start();
   return workitems;
 }

@@ -80,6 +80,29 @@ describe('index workitems wiring', () => {
     expect(source).toContain('void runRequirement(msg, opts)');
   });
 
+  it('wires the 立项 live flow: /req 问群名 → 建群 → 清单卡收料 → 立项 gate → finalize (M-I2/3)', () => {
+    const source = indexSource();
+
+    // B1: /req 后「等群名」的临时待答态实例。
+    expect(source).toContain('new PendingIntakeStore');
+    expect(source).toContain('pendingIntake.set');
+    expect(source).toContain('pendingIntake.has');
+    expect(source).toContain('pendingIntake.take');
+    // B2/B3: 用户回群名 → 建专属群（im:chat）→ 发立项清单卡 → 建单 + claim 群 chatId。
+    expect(source).toContain('async function startIntakeGroup');
+    expect(source).toContain('sender.createGroup');
+    expect(source).toContain('buildIntakeChecklistCard');
+    // B4: 群内收料：当前待填项 → intake_field_set；仓库项当场校验 git 仓 + HEAD；PRD MD 落 artifact。
+    expect(source).toContain('handleIntakeMessage');
+    expect(source).toContain('workitems.api.injectIntakeField');
+    expect(source).toContain('isGitRepo');
+    expect(source).toContain("writeFile(item.id, 'intake/prd.md'");
+    // 群内消息分流靠 isIntakePhase（避免裸写 phase === …，也被 wiring 红线扫到）。
+    expect(source).toContain('isIntakePhase(item.phase)');
+    // B5: 立项收尾 effect 注册进容器（立项 gate 通过 → 落立项书 + 提升 repos）。
+    expect(source).toContain('createIntakeFinalizeHandler()');
+  });
+
   it('wires repo-knowledge selective injection into the requirement worker strategy (T5)', () => {
     const source = indexSource();
 
