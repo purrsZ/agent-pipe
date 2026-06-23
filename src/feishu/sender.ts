@@ -319,4 +319,43 @@ export class Sender {
       return null;
     }
   }
+
+  /**
+   * 建专属群并拉人（立项域唯一新增能力）。两步：im.chat.create 建群（bot 为群主，拿 chat_id）→
+   * im.chatMembers.create 把成员按 open_id 拉进来（v1 = 发起人）。需 app 授 `im:chat` scope，未授则
+   * chat.create 直接 401（建群失败返 null，bridge 兜底回原会话报错、不创建单元）。拉人失败不致命：
+   * 群已建好，发起人可手动加——记录 warn 但仍返回 chatId，让立项流程继续。
+   */
+  async createGroup(name: string, members: string[]): Promise<string | null> {
+    let chatId: string | null;
+    try {
+      const resp: any = await this.client.im.chat.create({
+        data: { name, chat_mode: 'group' } as any,
+      });
+      chatId = resp?.data?.chat_id ?? null;
+    } catch (err) {
+      this.logger.error({ err, name }, 'createGroup: chat.create failed (check im:chat scope)');
+      return null;
+    }
+    if (!chatId) {
+      this.logger.error({ name }, 'createGroup: no chat_id returned');
+      return null;
+    }
+    const ids = members.filter((m) => typeof m === 'string' && m.length > 0);
+    if (ids.length > 0) {
+      try {
+        await this.client.im.chatMembers.create({
+          path: { chat_id: chatId },
+          params: { member_id_type: 'open_id' },
+          data: { id_list: ids },
+        } as any);
+      } catch (err) {
+        this.logger.warn(
+          { err, chatId, members: ids },
+          'createGroup: chatMembers.create failed (group created; member can self-join)',
+        );
+      }
+    }
+    return chatId;
+  }
 }

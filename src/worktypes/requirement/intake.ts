@@ -176,6 +176,12 @@ export function requiredMissing(state: IntakeState): IntakeFieldDef[] {
   return requiredDefs(state).filter((d) => !isFieldSatisfied(byKey.get(d.key)));
 }
 
+// 引导式收料：下一个还没齐的必填项（bridge 据它主动逐项追问，并把群内来的普通消息填进这一项）。
+// 全齐 → undefined（此时该弹立项 gate，不再追问）。
+export function nextRequiredToFill(state: IntakeState): IntakeFieldDef | undefined {
+  return requiredMissing(state)[0];
+}
+
 // 立项 gate 是否可放行：所有当前生效的必填项都已齐。
 export function isGateReady(state: IntakeState): boolean {
   return requiredMissing(state).length === 0;

@@ -8,6 +8,7 @@ import {
   intakeReposOf,
   isFieldSatisfied,
   isGateReady,
+  nextRequiredToFill,
   requiredMissing,
   requiredProgress,
 } from '../../src/worktypes/requirement/intake.js';
@@ -133,6 +134,18 @@ describe('isGateReady / requiredMissing', () => {
 
   it('未勾 UI 时 ui 项不影响 gate', () => {
     expect(isGateReady(fillAllRequired())).toBe(true);
+  });
+
+  it('nextRequiredToFill 顺序给出下一个缺的必填项；全齐 → undefined', () => {
+    let s = initialIntakeState();
+    expect(nextRequiredToFill(s)?.key).toBe('name'); // 第一个必填
+    s = applyFieldInput(s, { key: 'name', value: 'n' });
+    expect(nextRequiredToFill(s)?.key).toBe('summary');
+    expect(nextRequiredToFill(fillAllRequired())).toBeUndefined();
+    // 勾 UI 后 ui 成为下一个待填
+    expect(nextRequiredToFill(applyFieldInput(fillAllRequired(), { uiRequired: true }))?.key).toBe(
+      'ui',
+    );
   });
 
   it('空 repos 数组（去空白后为空）建了字段但不算齐 → 未 ready，requiredMissing 含 repos', () => {
