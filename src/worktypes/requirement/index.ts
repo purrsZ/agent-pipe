@@ -219,6 +219,11 @@ function enterPhase(
 function redoPhase(item: WorkItem): Transition {
   // Re-run the current phase's work after a rejection. design phases re-run the owner;
   // 集成验证 re-runs the static对账 effect (灯③ 打回 → 回集成验证重核).
+  // 立项 gate 没有「审设计」式的真驳回（立项卡只有「立项完成」按钮）。防御性处理 approved=false
+  // （只可能来自工作台/API）：料已齐，重弹立项 gate 让用户可再确认/继续补料，杜绝「gate 被 resolve 后
+  // 停在立项却无 open wait」的死状态。
+  if (item.phase === PHASE.intake)
+    return raiseCheckpoint(PHASE.understand, CHECKPOINT_WAIT_TTL_SEC);
   if (item.phase === PHASE.understand) return { dispatch: [ownerSpec(item, 'understand')] };
   if (item.phase === PHASE.contract) return { dispatch: [ownerSpec(item, 'contract')] };
   if (item.phase === PHASE.design) return { dispatch: [ownerSpec(item, 'design')] };

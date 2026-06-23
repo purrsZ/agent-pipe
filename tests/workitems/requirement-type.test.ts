@@ -96,9 +96,15 @@ describe('requirement lifecycle transitions', () => {
     expect(out.dispatch?.[0]).toMatchObject({ role: 'owner' });
   });
 
-  it('立项 gate rejected stays in 立项 (keep collecting), no dispatch', () => {
+  it('立项 gate「驳回」(防御，无真驳回语义) 重弹立项 gate 而非卡死无 wait', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.intake });
-    expect(t.onEvent(item, ev('wait_resolved', { decision: { approved: false } }))).toEqual({});
+    const out = t.onEvent(item, ev('wait_resolved', { decision: { approved: false } }));
+    // 料已齐：重弹立项 gate（不留下「停在立项却无 open wait」的死状态）。
+    expect(out.phase).toBeUndefined();
+    expect(out.waits?.[0]).toMatchObject({
+      kind: 'human',
+      reason: `checkpoint:${PHASE.understand}`,
+    });
   });
 
   it('intake_field_set outside the 立项 phase is inert', () => {

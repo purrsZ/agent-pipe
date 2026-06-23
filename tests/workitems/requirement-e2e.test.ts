@@ -224,6 +224,47 @@ describe('requirement skeleton end-to-end', () => {
     expect(intakeGates()).toHaveLength(1);
   });
 
+  it('立项: 工作台「驳回」立项 gate 不卡死——重弹 gate，仍可立项完成进理解', async () => {
+    const { store, api } = harness();
+    const item = api.createWorkItem({
+      type: 'requirement',
+      title: '驳回立项',
+      source: {},
+      repos: ['repo-a'],
+    }).item;
+    for (const f of [
+      { key: 'name', value: 'n' },
+      { key: 'summary', value: 's' },
+      { key: 'repos', value: ['repo-a'] },
+      { key: 'prd', value: 'p' },
+      { key: 'acceptance', value: 'a' },
+    ]) {
+      api.injectIntakeField(item.id, f);
+    }
+    const openGate = () =>
+      store.listOpenWaits(item.id).find((w) => w.reason === `checkpoint:${PHASE.understand}`);
+    await waitFor(() => expect(openGate()).toBeDefined());
+
+    // 工作台驳回（approved=false）→ 不卡死：旧 wait resolved，立即重弹一个新立项 gate，item 留在立项。
+    api.resolveWait(openGate()!.id, {
+      operator: 'lichao',
+      reason: 'hold',
+      decision: { approved: false },
+    });
+    await waitFor(() => {
+      expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.intake);
+      expect(openGate()).toBeDefined();
+    });
+
+    // 再点立项完成 → 进理解（恢复路径完好）。
+    api.resolveWait(openGate()!.id, {
+      operator: 'lichao',
+      reason: 'go',
+      decision: { approved: true },
+    });
+    await waitFor(() => expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.understand));
+  });
+
   it('a rejected 灯① keeps the item in 理解 and re-runs the owner', async () => {
     const { store, api } = harness();
     const item = api.createWorkItem({

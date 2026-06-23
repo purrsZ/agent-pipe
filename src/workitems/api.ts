@@ -85,7 +85,10 @@ export class WorkitemsApi {
    * and raise the 立项 gate once the required fields are in. Routed from the bridge (群内收料 / 清单
    * 卡补填) on a managed-claimed 立项 group; the sandbox e2e injects directly. The container only
    * carries the payload (constructed by the caller, which owns the intake 纯核心) — it never
-   * interprets the field semantics, same as injectHumanMessage.
+   * interprets the field semantics, same as injectHumanMessage. The caller must pass a clean
+   * field fact (key/value/filledBy/confirmed/uiRequired/prdSummary); `priorIntakeEvents` /
+   * `openWaitReasons` are container-injected enrich fields — never put them in the payload (the
+   * work type's coerce/fold ignores them regardless, but they don't belong in the persisted event).
    */
   injectIntakeField(workitemId: string, payload: unknown): void {
     this.deps.reducer.enqueue(workitemId, { kind: 'intake_field_set', payload });
