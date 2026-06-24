@@ -46,6 +46,38 @@ export function parseCardAction(data: unknown): CardAction | null {
   };
 }
 
+/**
+ * 把飞书富文本（post）消息正文拍平成纯文本。受信 post 一般是 {title, content:[[{tag,text/href}]]}；
+ * 防御性兼容语言键包裹 {zh_cn:{...}} 形态。text 段取文字、链接(a)取「文字（URL）」，@/图片等忽略。
+ * 永不抛：坏结构当空内容。让群里粘带格式/文档链接的收料消息也能进（否则 post 类型被入站直接丢弃）。
+ */
+export function extractPostText(raw: any): string {
+  const post =
+    raw && typeof raw === 'object'
+      ? Array.isArray(raw.content) || typeof raw.title === 'string'
+        ? raw
+        : (raw.zh_cn ?? raw.en_us ?? {})
+      : {};
+  const title = typeof post.title === 'string' ? post.title.trim() : '';
+  const body = Array.isArray(post.content) ? post.content : [];
+  const lines: string[] = [];
+  for (const para of body) {
+    if (!Array.isArray(para)) continue;
+    const parts: string[] = [];
+    for (const el of para) {
+      if (!el || typeof el !== 'object') continue;
+      if (el.tag === 'text' && typeof el.text === 'string') parts.push(el.text);
+      else if (el.tag === 'a') {
+        const t = typeof el.text === 'string' ? el.text : '';
+        const href = typeof el.href === 'string' ? el.href : '';
+        parts.push(t && href ? `${t}（${href}）` : t || href);
+      }
+    }
+    if (parts.length > 0) lines.push(parts.join(''));
+  }
+  return [title, ...lines].filter((s) => s.length > 0).join('\n');
+}
+
 export function createDispatcher(
   botOpenId: string,
   logger: Logger,
@@ -88,7 +120,13 @@ export function createDispatcher(
         const chatType = message.chat_type as 'p2p' | 'group';
         if (chatType !== 'p2p' && chatType !== 'group') return;
         const msgType = message.message_type as string;
-        if (msgType !== 'text' && msgType !== 'file' && msgType !== 'image') return;
+        if (
+          msgType !== 'text' &&
+          msgType !== 'post' &&
+          msgType !== 'file' &&
+          msgType !== 'image'
+        )
+          return;
 
         const rawMentions = (message.mentions ?? []) as Array<{
           id?: { open_id?: string };
@@ -108,6 +146,10 @@ export function createDispatcher(
 
         if (msgType === 'text') {
           text = (content.text ?? '').replace(/@_user_\w+/g, '').trim();
+          if (!text) return;
+        } else if (msgType === 'post') {
+          // 富文本（post）：拍平正文为纯文本（含链接 URL），让群里粘带格式/文档链接的收料也能进。
+          text = extractPostText(content).replace(/@_user_\w+/g, '').trim();
           if (!text) return;
         } else if (msgType === 'file') {
           const fk = content.file_key;

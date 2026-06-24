@@ -98,7 +98,8 @@ describe('buildIntakeChecklistCard', () => {
     );
     const text = textOf(card);
     expect(text).toContain('🟡 验收标准 / 完成定义');
-    expect(text).toContain('*'); // 必填星标
+    expect(text).toContain('＊'); // 必填星标（全角，避开 markdown 斜体把 <font> 吞掉）
+    expect(text).not.toContain('<font color="red">*</font>'); // 不再用半角 * 星标
     expect(text).toContain('AI 抽的草稿');
   });
 

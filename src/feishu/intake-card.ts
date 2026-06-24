@@ -40,7 +40,9 @@ export function buildIntakeChecklistCard(
   const title = view.title.length > 40 ? `${view.title.slice(0, 40)}…` : view.title;
   const rows = view.items.map((it) => {
     const box = it.done ? '✅' : it.pending ? '🟡' : '⬜';
-    const star = it.required ? ' <font color="red">*</font>' : '';
+    // 必填星标用全角＊：半角 * 是 markdown 斜体标记，多行各带一个会跨行配对成斜体、把 <font> 标签
+    // 吞掉并泄漏出裸 </font>（真机实测的渲染 bug）。全角＊不触发 markdown，红色 <font> 正常渲染。
+    const star = it.required ? ' <font color="red">＊</font>' : '';
     const val = it.value ? ` — <font color="grey">${truncate(it.value, 24)}</font>` : '';
     return `${box} ${it.label}${star}${val}`;
   });
