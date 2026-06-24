@@ -94,8 +94,13 @@ export function createDispatcher(
       try {
         const action = parseCardAction(data);
         if (action && onCardAction) {
-          Promise.resolve(onCardAction(action)).catch((err) => {
-            logger.error({ err }, 'card action handler error');
+          // 卡回调有 3s 超时。点「立项完成/灯卡拍板」会同步触发落立项书 + 建 worktree 等 git 操作，
+          // 可能 >3s 阻塞事件循环 → 飞书「目标回调服务超时未响应」。把实际处理推到下一轮 event loop，
+          // 让本函数立刻返回 toast（动作照常执行，只是不再卡回调响应）。
+          setImmediate(() => {
+            Promise.resolve(onCardAction(action)).catch((err) => {
+              logger.error({ err }, 'card action handler error');
+            });
           });
         }
       } catch (err) {
