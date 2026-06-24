@@ -101,6 +101,12 @@ describe('index workitems wiring', () => {
     expect(source).toContain('isIntakePhase(item.phase)');
     // B5: 立项收尾 effect 注册进容器（立项 gate 通过 → 落立项书 + 提升 repos）。
     expect(source).toContain('createIntakeFinalizeHandler()');
+    // M-I3 step8: 群内自由描述 → 一次性 AI run 抽多字段（composeIntakeExtractPrompt + parseIntakeExtraction），
+    // 仓库项 isGitRepo 校验；AI 不可用回退确定性逐项填。
+    expect(source).toContain('aiExtractIntake');
+    expect(source).toContain('composeIntakeExtractPrompt');
+    expect(source).toContain('parseIntakeExtraction');
+    expect(source).toContain('fillIntakeDeterministic');
   });
 
   it('wires repo-knowledge selective injection into the requirement worker strategy (T5)', () => {

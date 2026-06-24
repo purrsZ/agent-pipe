@@ -53,11 +53,13 @@ import { createRequirementRunStrategy } from './worktypes/requirement/worker-han
 import { PendingIntakeStore } from './bridge/pending-intake.js';
 import { buildIntakeChecklistCard, type IntakeChecklistView } from './feishu/intake-card.js';
 import {
+  composeIntakeExtractPrompt,
   foldIntake,
   INTAKE_CHECKLIST,
   isFieldSatisfied,
   isGateReady,
   nextRequiredToFill,
+  parseIntakeExtraction,
   requiredMissing,
   requiredProgress,
 } from './worktypes/requirement/intake.js';
@@ -799,8 +801,9 @@ async function main() {
     await promptNextIntake(item.id, groupChatId);
   }
 
-  // M-I3 群内收料：把当前「待填项」的值从群消息里填进去（缺哪项填哪项）。仓库项当场校验 git 仓+HEAD；
-  // 文件附件走 PRD 上传分支。每填一项刷新清单卡 + 引导下一项。
+  // M-I3 群内收料（AI 抽取版）：用户在群里发的自由描述喂给一次性 AI run，让它**一次抽多个字段**——这样
+  // 一条消息把仓库/PRD/验收都甩进来也能拆开。仓库项仍当场校验 git 仓+HEAD；文本项落为 ai-extracted
+  // （「立项完成」这一步就是人工兜底确认）。AI 没起来/没抽到 → 回退确定性逐项填。文件附件走 PRD 分支。
   async function handleIntakeMessage(item: WorkItem, msg: IncomingMessage): Promise<void> {
     if (msg.attachments.length > 0) {
       await handleIntakePrd(item, msg);
@@ -808,6 +811,106 @@ async function main() {
     }
     const text = msg.text.trim();
     if (!text) return;
+    await sender.sendText(msg.chatId, '🤔 正在从你的描述里提取立项信息…');
+    const ex = await aiExtractIntake(item.id, item.title, text);
+    if (!ex || ex.fields.length === 0) {
+      if (ex?.uiRequired !== undefined) {
+        workitems.api.injectIntakeField(item.id, { uiRequired: ex.uiRequired });
+      }
+      await fillIntakeDeterministic(item, msg, text);
+      return;
+    }
+    const applied: string[] = [];
+    const badRepos: string[] = [];
+    if (ex.uiRequired !== undefined) {
+      workitems.api.injectIntakeField(item.id, { uiRequired: ex.uiRequired });
+    }
+    for (const f of ex.fields) {
+      if (f.key === 'repos') {
+        const paths = (Array.isArray(f.value) ? f.value : [f.value])
+          .map((s) => String(s).trim())
+          .filter((s) => s.length > 0);
+        const good = paths.filter((p) => isGitRepo(p));
+        for (const p of paths) if (!isGitRepo(p)) badRepos.push(p);
+        if (good.length > 0) {
+          workitems.api.injectIntakeField(item.id, { key: 'repos', value: good });
+          applied.push(`涉及代码仓库（${good.length} 个）`);
+        }
+      } else {
+        const value = Array.isArray(f.value) ? f.value.join('、') : f.value;
+        workitems.api.injectIntakeField(item.id, {
+          key: f.key,
+          value,
+          filledBy: 'ai-extracted',
+          confirmed: true,
+        });
+        applied.push(INTAKE_CHECKLIST.find((d) => d.key === f.key)?.label ?? f.key);
+      }
+    }
+    await refreshIntakeCard(item.id);
+    const lines: string[] = [];
+    if (applied.length > 0) lines.push(`✅ 已从你的描述里填入：${applied.join('、')}`);
+    if (badRepos.length > 0) {
+      lines.push(
+        `⚠️ 这些仓库路径无效（需绝对路径 + 是 git 仓）：\n${badRepos.map((p) => `- ${p}`).join('\n')}`,
+      );
+    }
+    const after = foldIntakeState(workitems.api.listEvents(item.id));
+    const miss = requiredMissing(after).map((d) => d.label);
+    lines.push(
+      miss.length > 0
+        ? `还差：${miss.join('、')}`
+        : '必填已齐 ✅ 核对清单卡无误后点「立项完成 · 开始开发」开跑。',
+    );
+    await sender.sendText(msg.chatId, lines.join('\n'));
+  }
+
+  // 起一次性 readonly AI run 把自由描述抽成立项字段（managed 影子 task，每次清会话保持独立）。失败返 null。
+  async function aiExtractIntake(
+    itemId: string,
+    title: string,
+    text: string,
+  ): Promise<ReturnType<typeof parseIntakeExtraction>> {
+    const state = foldIntakeState(workitems.api.listEvents(itemId));
+    const filled = state.fields.map(
+      (f) => INTAKE_CHECKLIST.find((d) => d.key === f.key)?.label ?? f.key,
+    );
+    const missing = requiredMissing(state).map((d) => d.label);
+    const prompt = composeIntakeExtractPrompt(text, filled, missing);
+    const taskId = `managed:intake-extract:${itemId}`;
+    const task = store.upsertTask({
+      id: taskId,
+      display_name: `立项抽取:${title}`.slice(0, 60),
+      agent_kind: 'claude',
+      owner_kind: 'managed',
+      mode: 'project',
+      cwd: config.allowedCwdPrefixes[0] ?? process.cwd(),
+      root_msg_id: null,
+      root_chat_id: null,
+      agent_session_id: null,
+      status: 'suspended',
+      model: null,
+    });
+    store.clearAgentSessionId(taskId); // 每次抽取独立、无上轮串扰
+    try {
+      const r = await pool.send(task, prompt, undefined, { permission: { mode: 'readonly' } });
+      if (r.error) {
+        logger.warn({ err: r.error, itemId }, 'intake extract run error');
+        return null;
+      }
+      return parseIntakeExtraction(r.fullText ?? '');
+    } catch (err) {
+      logger.warn({ err, itemId }, 'intake extract failed');
+      return null;
+    }
+  }
+
+  // 回退：AI 不可用时按「当前待填项」确定性填。仓库项只认绝对路径 token（杜绝把整段话当路径刷垃圾列表）。
+  async function fillIntakeDeterministic(
+    item: WorkItem,
+    msg: IncomingMessage,
+    text: string,
+  ): Promise<void> {
     const state = foldIntakeState(workitems.api.listEvents(item.id));
     const next = nextRequiredToFill(state);
     if (!next) {
@@ -815,22 +918,26 @@ async function main() {
       return;
     }
     if (next.key === 'repos') {
-      const repos = text
+      const paths = text
         .split(/[\s,，、]+/)
         .map((s) => s.trim())
-        .filter((s) => s.length > 0);
-      const invalid = repos.filter((p) => !isGitRepo(p));
-      if (repos.length === 0 || invalid.length > 0) {
-        const bad = invalid.length > 0 ? invalid : repos;
+        .filter((s) => s.startsWith('/'));
+      const good = paths.filter((p) => isGitRepo(p));
+      const bad = paths.filter((p) => !isGitRepo(p));
+      if (good.length === 0) {
         await sender.sendText(
           msg.chatId,
-          `这些不是有效的 git 仓库（需绝对路径且有 HEAD），请修正后重发：\n${bad
-            .map((p) => `- ${p}`)
-            .join('\n')}`,
+          '没识别到有效仓库——请发仓库的**绝对路径**（一行或空格分隔一个，需是 git 仓）。',
         );
         return;
       }
-      workitems.api.injectIntakeField(item.id, { key: 'repos', value: repos });
+      workitems.api.injectIntakeField(item.id, { key: 'repos', value: good });
+      if (bad.length > 0) {
+        await sender.sendText(
+          msg.chatId,
+          `已收 ${good.length} 个仓库；这些路径无效已跳过：\n${bad.map((p) => `- ${p}`).join('\n')}`,
+        );
+      }
     } else {
       workitems.api.injectIntakeField(item.id, { key: next.key, value: text });
     }

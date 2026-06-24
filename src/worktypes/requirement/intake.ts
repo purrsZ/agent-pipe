@@ -259,6 +259,99 @@ function sortByChecklist(fields: IntakeField[]): IntakeField[] {
   return [...fields].sort((a, b) => (order.get(a.key) ?? 0) - (order.get(b.key) ?? 0));
 }
 
+// ── AI 抽取（M-I3 step8 的 live 版）：把用户在立项群发的自由描述喂给 AI，让它一次抽多个字段回 JSON。
+// 下面是「prompt 组装」+「输出解析」的纯核心（可单测，不 async/不 fs）；真正起 AI run 在 bridge。
+
+export interface IntakeExtraction {
+  fields: Array<{ key: IntakeFieldKey; value: string | string[] }>;
+  uiRequired?: boolean;
+}
+
+// 组装抽取 prompt：给 AI 字段菜单 + 当前已填/还缺，约束「只抽明确表达的、repos 只放绝对路径、只输出 JSON」。
+export function composeIntakeExtractPrompt(
+  userText: string,
+  filledLabels: string[],
+  missingRequiredLabels: string[],
+): string {
+  const menu = INTAKE_CHECKLIST.map(
+    (d) => `- ${d.key}：${d.label}${d.hint ? `（${d.hint}）` : ''}`,
+  );
+  return [
+    '你是「立项收料」助手。用户在需求立项群里发来一段话，请只做**信息抽取**：从这段话里识别能确定的',
+    '立项字段值，输出 JSON。不要执行任何任务、不要读写文件、不要追问、不要解释。',
+    '',
+    '可填字段（key：含义）：',
+    ...menu,
+    '',
+    `当前已填：${filledLabels.length ? filledLabels.join('、') : '（无）'}`,
+    `还缺必填：${missingRequiredLabels.length ? missingRequiredLabels.join('、') : '（无）'}`,
+    '',
+    '规则：',
+    '- 只抽用户**明确表达**了的字段；没提到的别编、别输出该 key。',
+    '- repos 只放**绝对路径**（以 / 开头）进字符串数组；别把说明文字/编号/“仓库:”当路径。',
+    '- 文档链接（PRD/UI 设计稿）按原样作为对应字段的值。',
+    '- 用户表达“涉及 UI 改动/要做 UI”时置 uiRequired=true。',
+    '- 只输出一个 JSON，无任何额外文字：',
+    '  {"fields":[{"key":"summary","value":"…"},{"key":"repos","value":["/abs/a","/abs/b"]}],"uiRequired":false}',
+    '',
+    '用户这段话：',
+    '"""',
+    userText,
+    '"""',
+  ].join('\n');
+}
+
+// 解析 AI 输出为抽取结果（永不抛）：兼容围栏块 / 裸 JSON / 前后带话术。非清单 key、空值、坏类型一律丢。
+export function parseIntakeExtraction(raw: string): IntakeExtraction | null {
+  for (const candidate of jsonCandidates(raw)) {
+    let obj: unknown;
+    try {
+      obj = JSON.parse(candidate);
+    } catch {
+      continue;
+    }
+    const ex = coerceExtraction(obj);
+    if (ex) return ex;
+  }
+  return null;
+}
+
+function jsonCandidates(raw: string): string[] {
+  if (typeof raw !== 'string') return [];
+  const out: string[] = [];
+  const fence = /```(?:json)?\s*([\s\S]*?)```/gi;
+  let m: RegExpExecArray | null;
+  while ((m = fence.exec(raw)) !== null) {
+    if (m[1]) out.push(m[1].trim());
+  }
+  const first = raw.indexOf('{');
+  const last = raw.lastIndexOf('}');
+  if (first >= 0 && last > first) out.push(raw.slice(first, last + 1));
+  out.push(raw.trim());
+  return out;
+}
+
+function coerceExtraction(obj: unknown): IntakeExtraction | null {
+  if (typeof obj !== 'object' || obj === null) return null;
+  const o = obj as Record<string, unknown>;
+  const fields: Array<{ key: IntakeFieldKey; value: string | string[] }> = [];
+  const rawFields = Array.isArray(o.fields) ? o.fields : [];
+  for (const rf of rawFields) {
+    if (typeof rf !== 'object' || rf === null) continue;
+    const r = rf as Record<string, unknown>;
+    if (typeof r.key !== 'string' || !CHECKLIST_BY_KEY.has(r.key as IntakeFieldKey)) continue;
+    const key = r.key as IntakeFieldKey;
+    let value: string | string[] | undefined;
+    if (Array.isArray(r.value)) value = r.value.filter((v): v is string => typeof v === 'string');
+    else if (typeof r.value === 'string') value = r.value;
+    if (value === undefined) continue;
+    if (Array.isArray(value) ? value.length > 0 : value.trim().length > 0) fields.push({ key, value });
+  }
+  const uiRequired = typeof o.uiRequired === 'boolean' ? o.uiRequired : undefined;
+  if (fields.length === 0 && uiRequired === undefined) return null;
+  return uiRequired === undefined ? { fields } : { fields, uiRequired };
+}
+
 function coerceInput(raw: unknown): IntakeFieldInput | undefined {
   if (typeof raw !== 'object' || raw === null) return undefined;
   const o = raw as Record<string, unknown>;
