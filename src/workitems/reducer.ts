@@ -338,6 +338,10 @@ export class ReducerRuntime {
         createdAt: now,
         updatedAt: now,
       });
+      // 纯 effect（无 dispatch）的 transition 也要 post-commit poke 来驱动——否则 effect 插入后无人启动。
+      // dispatch 路径自带 pokeNeeded；effect-only 情形（如立项 gate 通过 → 进理解只起 intake_finalize）此前
+      // 靠不上任何 poke（非 run 完成触发），会一直 pending。poke 幂等，对已有 dispatch 的 transition 无影响。
+      this.pokeNeeded = true;
     }
   }
 

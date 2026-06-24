@@ -89,13 +89,26 @@ describe('requirement lifecycle transitions', () => {
     expect(out).toEqual({});
   });
 
-  it('立项 gate approved advances 立项 → 理解, dispatches understand owner + 发 intake_finalize effect', () => {
+  it('立项 gate approved advances 立项 → 理解 + 发 intake_finalize effect（owner run 不在此派，改由 repos_set 触发）', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.intake });
     const out = t.onEvent(item, ev('wait_resolved', { decision: { approved: true } }));
     expect(out.phase).toEqual({ to: PHASE.understand, reason: 'checkpoint_approved' });
-    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner' });
-    // 立项收尾：落立项书 + 提升 repos（从立项填项历史 fold）。
+    // 不在此 dispatch owner——否则与 repos 提升抢跑，run 会用空 repos 落到 defaultCwd 跑错仓（真机暴露）。
+    expect(out.dispatch ?? []).toHaveLength(0);
+    // 立项收尾：落立项书 + 提升 repos（emit repos_set，从立项填项历史 fold）。
     expect(out.effects?.[0]).toMatchObject({ kind: 'intake_finalize' });
+  });
+
+  it('repos_set（立项收尾提升 repos 后）在理解阶段 → dispatch 首个 owner understand run', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.understand });
+    const out = t.onEvent(item, ev('repos_set', { repos: ['/abs/a'] }));
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner' });
+  });
+
+  it('repos_set 在非理解阶段不触发 run（防御，避免重复派）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.contract });
+    const out = t.onEvent(item, ev('repos_set', { repos: ['/abs/a'] }));
+    expect(out.dispatch ?? []).toHaveLength(0);
   });
 
   it('立项 gate「驳回」(防御，无真驳回语义) 重弹立项 gate 而非卡死无 wait', () => {

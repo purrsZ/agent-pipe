@@ -68,6 +68,9 @@ export function requirementTransition(item: WorkItem, ev: WorkItemEvent): Transi
       // Stage 5 emits this from the spec-design run; treat like the contract/design owner run
       // finishing for the current phase.
       return onRunCompleted(item, { ...ev, payload: { ...asObject(ev.payload), role: 'owner' } });
+    case 'repos_set':
+      // 立项收尾把 repos 提升进 workitem 后才触发首个 owner understand run（确保 run 读到的 repos 已就位）。
+      return onReposSet(item);
     case 'integration_check_passed':
       return requestAdvance(item, PHASE.integrate, PHASE.deliver, 'integration_passed');
     case 'integration_check_failed':
@@ -161,6 +164,15 @@ function onIntakeFieldSet(item: WorkItem, ev: WorkItemEvent): Transition {
   return requestAdvance(item, PHASE.intake, PHASE.understand, 'intake_ready');
 }
 
+// 立项收尾把立项收齐的 repos 提升进 workitem.repos（repos_set，由 intake_finalize emit）后，才 dispatch
+// 首个 owner understand run——保证 run 的 resolveCwd 读到的 workitem.repos[0] 是用户的仓库，而非 run 与
+// 提升抢跑时落到的 defaultCwd（bot 自己的 cwd）。仅理解阶段触发；owner 单飞门挡掉任何重复（如 finalize
+// rerun）。repos 是立项必填项，故 repos_set 必发，owner run 不会漏派。
+function onReposSet(item: WorkItem): Transition {
+  if (item.phase !== PHASE.understand) return {};
+  return { dispatch: [ownerSpec(item, 'understand')] };
+}
+
 // Phase-work done → either gate (raise the human wait, stay) or advance + run entry work.
 function requestAdvance(item: WorkItem, expected: string, to: string, reason: string): Transition {
   if (item.phase !== expected) return {};
@@ -196,14 +208,11 @@ function enterPhase(
   const base: Transition = { phase: { to, reason } };
   switch (to) {
     case PHASE.understand:
-      // 立项 gate 通过 → 进理解：① intake_finalize effect 落立项书 intake/intake.md + 把立项收齐的仓库
-      // 提升为 workitem.repos（从立项填项历史 fold）；② dispatch 首个 owner understand run（原
-      // workitem_created 的动作后移一格）。
-      return {
-        ...base,
-        dispatch: [ownerSpec(item, stageKey(to))],
-        effects: [{ kind: 'intake_finalize' }],
-      };
+      // 立项 gate 通过 → 进理解：先只起 intake_finalize effect（落立项书 intake/intake.md + 把立项收齐的
+      // 仓库提升为 workitem.repos，emit repos_set）。**不在此 dispatch owner run**——否则 run 与 repos 提升
+      // 抢跑，run 先读到空 repos → resolveCwd 落到 defaultCwd（bot 自己的目录）跑错仓（真机暴露：理解 run
+      // 在读 agent-pipe 自身）。owner understand run 改由 repos_set（提升完成）触发，见 onReposSet。
+      return { ...base, effects: [{ kind: 'intake_finalize' }] };
     case PHASE.contract:
     case PHASE.design:
     case PHASE.split:
