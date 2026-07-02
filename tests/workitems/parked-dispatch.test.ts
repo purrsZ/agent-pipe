@@ -223,4 +223,35 @@ describe('WS-1.4 补派', () => {
     expect(store.getWorkItem(item.id)!.status).toBe('cancelled');
     expect(store.listParked(item.id)).toHaveLength(0);
   });
+
+  it('去重：同 repo 已有 running worker 时重复 dispatch 被跳过（防 retry × 残留 parked 双写）', async () => {
+    const onEvent: OnEvent = (_item, ev) => {
+      if (ev.kind === 'workitem_created') {
+        return {
+          dispatch: [
+            { role: 'worker', repo: '/abs/repo-a', deadlineTtlSec: 60, wallclockCapSec: 30 },
+          ],
+        };
+      }
+      // 模拟 retryCurrentPhase 重派同一 repo（此时 repo-a 已有 running worker）。
+      if (ev.kind === 'human_message') {
+        return {
+          dispatch: [
+            { role: 'worker', repo: '/abs/repo-a', deadlineTtlSec: 60, wallclockCapSec: 30 },
+          ],
+        };
+      }
+      return {};
+    };
+    const { api, store, reducer } = harness(onEvent, 2);
+    const item = api.createWorkItem({ type: 'ow', title: 't', source: {} }).item;
+    await waitFor(() => expect(store.countRunningWorkers(item.id)).toBe(1));
+    reducer.enqueue(item.id, { kind: 'human_message', payload: { text: 'retry' } });
+    // repo-a 已 running → 第二次 dispatch 被去重跳过：既不双开也不落 parked。
+    const repoAWorkers = store
+      .listAssignments(item.id)
+      .filter((a) => a.role === 'worker' && a.repo === '/abs/repo-a');
+    expect(repoAWorkers).toHaveLength(1);
+    expect(store.listParked(item.id)).toHaveLength(0);
+  });
 });

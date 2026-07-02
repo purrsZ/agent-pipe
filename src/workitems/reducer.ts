@@ -629,6 +629,26 @@ export class ReducerRuntime {
       this.deps.logger?.warn?.({ workitemId: item.id }, 'skipped dispatch on terminal workitem');
       return;
     }
+    // WS-1.4 去重（对抗审查 Important#1）：owner-workers 下同一 repo 不并发双开 worker——防
+    // retryCurrentPhase 无条件重派全部 repos 与 stall 路径（assignment_stalled → redispatchOrEscalate，
+    // 不走 releaseWakePending）滞留的 parked 叠加，导致同仓两个 worker 并发写（git 冲突/互相覆盖）。
+    // replacesAssignmentId（stall/abort 重派接替）豁免：原 assignment 已 superseded，非并发。补派消化
+    // parked 时同样经此去重（w-c旧 补成 running 后，重复的 w-c 在此被跳过）。
+    if (
+      this.topologyOf(item) === 'owner-workers' &&
+      spec.role === 'worker' &&
+      spec.repo &&
+      !spec.replacesAssignmentId &&
+      this.deps.store
+        .listAssignments(item.id)
+        .some((a) => a.status === 'running' && a.role === 'worker' && a.repo === spec.repo)
+    ) {
+      this.deps.logger?.info?.(
+        { workitemId: item.id, repo: spec.repo },
+        '同 repo 已有 running worker → 跳过重复 dispatch（去重防同仓双写）',
+      );
+      return;
+    }
     if (this.shouldWakePending(item, spec)) {
       // WS-1.4：owner-workers 超 worker 并发上限的 dispatch 不再静默丢弃——完整 spec 序列化落
       // workitem_parked，一个 worker 收尾时 releaseWakePending 反序列化补派（强一致计数保证不超发）。
