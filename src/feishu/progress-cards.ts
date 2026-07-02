@@ -1,4 +1,11 @@
-import { buildCancelledCard, buildErrorCard, buildReportCard, buildStreamingCard } from './card.js';
+import type { AskUserQuestionItem } from '../agents/types.js';
+import {
+  buildCancelledCard,
+  buildErrorCard,
+  buildReportCard,
+  buildStreamingCard,
+  buildWorkitemQuestionCard,
+} from './card.js';
 import type { Sender } from './sender.js';
 import { StreamingCard } from './stream-card.js';
 
@@ -35,6 +42,8 @@ interface RunEntry {
   cardId: string | null;
   streaming: StreamingCard | null;
   title: string;
+  // WS-9：留存出站定位，供 onAskUser 把问题卡贴到同一话题 / 锚点下（与流式卡同一 loc）。
+  loc: CardLocator;
 }
 
 /**
@@ -66,7 +75,7 @@ export class ProgressCards {
       anchorMsgId: info.anchorMsgId,
     };
     // ★同步占位：先于任何 onText/onRunEnd 落 Map，消灭「run 结束早于发卡」竞态。
-    const entry: RunEntry = { ready: Promise.resolve(), cardId: null, streaming: null, title };
+    const entry: RunEntry = { ready: Promise.resolve(), cardId: null, streaming: null, title, loc };
     this.runs.set(info.assignmentId, entry);
     // 异步发卡，句柄存进 entry.ready 供 onRunEnd 等待。
     entry.ready = this.postStreamingCard(entry, info.workitemId, loc);
@@ -122,6 +131,30 @@ export class ProgressCards {
 
   onToolUse(info: { assignmentId: string; toolName: string }): void {
     this.runs.get(info.assignmentId)?.streaming?.onToolUse(info.toolName);
+  }
+
+  // WS-9：run 中途 AskUserQuestion → 在流式卡同一 loc（话题/锚点下）并行贴一张问题表单卡。fire-and-forget，
+  // 失败只 log（组件既有纪律）。提交后 handleCardAction 的 auq-wi 分支把答案 injectHumanMessage 回灌下一轮。
+  onAskUser(info: {
+    assignmentId: string;
+    workitemId: string;
+    title: string;
+    questions: AskUserQuestionItem[];
+  }): void {
+    const entry = this.runs.get(info.assignmentId);
+    if (!entry) return; // 未知 run（已收尾或从未 onRunStart）→ 安全 no-op。
+    void (async () => {
+      try {
+        const card = buildWorkitemQuestionCard(
+          info.title,
+          { toolUseId: '', questions: info.questions },
+          { workitemId: info.workitemId },
+        );
+        await this.postInitial(entry.loc, card);
+      } catch (err) {
+        this.deps.logger?.error?.({ err }, 'progress card: post question card failed');
+      }
+    })();
   }
 
   // 返回 Promise（仍结构兼容 RunProgressSink 的 void）：run-handler fire-and-forget（不 await，

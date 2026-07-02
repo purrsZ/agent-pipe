@@ -214,4 +214,33 @@ describe('ProgressCards (M2 progress visibility)', () => {
     expect(f.threadReplies).toHaveLength(0);
     expect(f.updates).toHaveLength(0);
   });
+
+  it('WS-9 onAskUser: 在流式卡同一 loc 并行贴问题表单卡（auq-wi）', async () => {
+    const f = fakeSender();
+    const pc = new ProgressCards({ sender: f.sender });
+    pc.onRunStart({ workitemId: 'wi', assignmentId: 'a1', title: 'T', ...P2P });
+    await flush();
+    pc.onAskUser({
+      assignmentId: 'a1',
+      workitemId: 'wi',
+      title: 'T',
+      questions: [{ question: 'A 还是 B？', options: [{ label: 'A' }, { label: 'B' }] }],
+    });
+    await flush();
+    // p2p：问题卡也 replyCard(anchor)。第一张流式卡，第二张问题卡。
+    expect(f.replies.length).toBeGreaterThanOrEqual(2);
+    const qCard = json(f.replies[f.replies.length - 1]!.card);
+    expect(qCard).toContain('auq-wi');
+    expect(qCard).toContain('A 还是 B？');
+    expect(qCard).toContain('wi'); // workitemId 随提交 value
+  });
+
+  it('WS-9 onAskUser: 未知 run（未 onRunStart）→ 安全 no-op', async () => {
+    const f = fakeSender();
+    const pc = new ProgressCards({ sender: f.sender });
+    pc.onAskUser({ assignmentId: 'unknown', workitemId: 'wi', title: 'T', questions: [] });
+    await flush();
+    expect(f.replies).toHaveLength(0);
+    expect(f.sends).toHaveLength(0);
+  });
 });

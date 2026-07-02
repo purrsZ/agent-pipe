@@ -465,10 +465,15 @@ export function buildQuestionAnsweredCard(taskName: string, answer: string): obj
  * text, so they travel in value); per-question answers come back in `form_value` keyed q{i}_pick /
  * q{i}_custom. 2.0 schema (form / select_static / form_action_type) — verify on first real run.
  */
-export function buildQuestionFormCard(
+// WS-9：managed run（非 bridge task）里 AskUserQuestion 的提交按钮 kind（区别于 bridge task 的 'auq'）。
+export const AUQ_WORKITEM_ACTION_KIND = 'auq-wi';
+
+// 共享的 AUQ 表单卡构建：每题一个 select（预设）+ input（自定义）+ 一个提交按钮。submit 按钮 value 由调用方
+// 决定（bridge task 走 auq / managed run 走 auq-wi），其余结构完全一致——WS-9 抽此私有 helper 避免两份表单漂移。
+function buildQuestionCardWith(
   taskName: string,
   q: AskUserQuestion,
-  routing: QuestionCardRouting,
+  makeSubmitValue: (headers: string[], total: number) => object,
 ): object {
   const formElements: object[] = [];
   const headers: string[] = [];
@@ -513,18 +518,7 @@ export function buildQuestionFormCard(
     width: 'default',
     form_action_type: 'submit',
     name: 'auq_submit',
-    behaviors: [
-      {
-        type: 'callback',
-        value: {
-          kind: AUQ_ACTION_KIND,
-          taskId: routing.taskId,
-          chatId: routing.chatId,
-          total: q.questions.length,
-          headers,
-        },
-      },
-    ],
+    behaviors: [{ type: 'callback', value: makeSubmitValue(headers, q.questions.length) }],
   });
   return {
     schema: '2.0',
@@ -545,6 +539,35 @@ export function buildQuestionFormCard(
       ],
     },
   };
+}
+
+export function buildQuestionFormCard(
+  taskName: string,
+  q: AskUserQuestion,
+  routing: QuestionCardRouting,
+): object {
+  return buildQuestionCardWith(taskName, q, (headers, total) => ({
+    kind: AUQ_ACTION_KIND,
+    taskId: routing.taskId,
+    chatId: routing.chatId,
+    total,
+    headers,
+  }));
+}
+
+// WS-9：managed run 中途 AskUserQuestion 的表单卡（贴在需求群 / 话题里）。提交 → handleCardAction 的 auq-wi
+// 分支组装答案 → injectHumanMessage 回灌下一轮 run（提问的那个 run 多半已收尾，答案自然进下一轮）。
+export function buildWorkitemQuestionCard(
+  taskName: string,
+  q: AskUserQuestion,
+  routing: { workitemId: string },
+): object {
+  return buildQuestionCardWith(taskName, q, (headers, total) => ({
+    kind: AUQ_WORKITEM_ACTION_KIND,
+    workitemId: routing.workitemId,
+    total,
+    headers,
+  }));
 }
 
 /** Callback-button payload value for a checkpoint 灯卡 (通过/打回). */

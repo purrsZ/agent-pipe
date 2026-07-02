@@ -12,6 +12,7 @@ import { loadConfig, type Config } from './config.js';
 import {
   anchorAction,
   AUQ_ACTION_KIND,
+  AUQ_WORKITEM_ACTION_KIND,
   buildAnchorCard,
   buildCaseFileAnsweredCard,
   buildCaseFileCard,
@@ -321,6 +322,43 @@ export function deliverGateNote(events: WorkItemEvent[]): string | undefined {
     return '⚠️ 静态跨仓对账未生效（各仓未声明改动）——请以下方交付清单人工验收';
   }
   return '✅ 静态跨仓对账通过';
+}
+
+// WS-9：AUQ 表单答案组装（bridge task 与 workitem run 两条回灌路径共用，避免两份逻辑漂移）。每题 input
+// 自定义优先、否则下拉 select、都空则占位；lines = 喂回 agent 的完整文本，brief = 卡片补丁的简报。纯函数。
+export function assembleAuqAnswers(
+  formValue: Record<string, unknown>,
+  total: number,
+  headers: unknown[],
+): { lines: string[]; brief: string[] } {
+  const selVal = (raw: unknown): string => {
+    if (typeof raw === 'string') return raw;
+    if (raw && typeof raw === 'object') {
+      const o = raw as Record<string, unknown>;
+      if (typeof o.value === 'string') return o.value;
+      if (typeof o.option === 'string') return o.option;
+    }
+    return '';
+  };
+  const lines: string[] = [];
+  const brief: string[] = [];
+  for (let i = 0; i < total; i++) {
+    const customRaw = formValue[`q${i}_custom`];
+    const custom = typeof customRaw === 'string' ? customRaw.trim() : '';
+    const picked = selVal(formValue[`q${i}_pick`]);
+    const hdr = typeof headers[i] === 'string' ? (headers[i] as string) : `问题${i + 1}`;
+    if (custom) {
+      lines.push(`${i + 1}. 【${hdr}】→ ${custom}（自定义回答，请按字面采纳，不要套到预设选项上）`);
+      brief.push(`${hdr}：${custom}`);
+    } else if (picked) {
+      lines.push(`${i + 1}. 【${hdr}】→ ${picked}（选自预设）`);
+      brief.push(`${hdr}：${picked}`);
+    } else {
+      lines.push(`${i + 1}. 【${hdr}】→ (未作答)`);
+      brief.push(`${hdr}：(未作答)`);
+    }
+  }
+  return { lines, brief };
 }
 
 // 立项清单事件流 → feishu 清单卡的中性视图。kernel-exempt：index 可 import worktypes 的 intake 纯核心，
@@ -1316,6 +1354,33 @@ async function main() {
       await handleCheckpointAction(action, value);
       return;
     }
+    // WS-9：workitem run 的 AskUserQuestion 表单提交——组装答案 → injectHumanMessage 回灌下一轮 run
+    // （提问的那个 run 多半已收尾，答案自然进下一轮：reconcile 重跑 / steer / rework）。
+    if (value.kind === AUQ_WORKITEM_ACTION_KIND) {
+      const workitemId = typeof value.workitemId === 'string' ? value.workitemId : '';
+      const total = typeof value.total === 'number' ? value.total : 0;
+      const headers = Array.isArray(value.headers) ? (value.headers as unknown[]) : [];
+      if (!workitemId || total <= 0) {
+        logger.warn({ workitemId, total }, 'auq-wi form submit missing workitemId/total');
+        return;
+      }
+      const item = workitems.api.getWorkItem(workitemId);
+      const { lines, brief } = assembleAuqAnswers(
+        (action.formValue ?? {}) as Record<string, unknown>,
+        total,
+        headers,
+      );
+      if (action.messageId) {
+        await sender.updateCard(
+          action.messageId,
+          buildQuestionAnsweredCard(item?.title ?? workitemId, brief.join('；')),
+        );
+      }
+      workitems.api.injectHumanMessage(workitemId, {
+        text: `这是对你上一轮提问的回答：\n${lines.join('\n')}`,
+      });
+      return;
+    }
     if (value.kind !== AUQ_ACTION_KIND) {
       logger.warn({ kind: value.kind }, 'unhandled card action kind');
       return;
@@ -1334,40 +1399,11 @@ async function main() {
       logger.warn({ taskId }, 'auq form submit for unknown task');
       return;
     }
-    const fv = action.formValue ?? {};
-    // select_static value may arrive as a plain string or as { value } / { option }.
-    const selVal = (raw: unknown): string => {
-      if (typeof raw === 'string') return raw;
-      if (raw && typeof raw === 'object') {
-        const o = raw as Record<string, unknown>;
-        if (typeof o.value === 'string') return o.value;
-        if (typeof o.option === 'string') return o.option;
-      }
-      return '';
-    };
-    const lines: string[] = [];
-    const brief: string[] = [];
-    for (let i = 0; i < total; i++) {
-      const customRaw = fv[`q${i}_custom`];
-      const custom = typeof customRaw === 'string' ? customRaw.trim() : '';
-      const picked = selVal(fv[`q${i}_pick`]);
-      const hdr = typeof headers[i] === 'string' ? (headers[i] as string) : `问题${i + 1}`;
-      // Free-text wins over the dropdown, and is flagged so the agent takes it verbatim instead
-      // of snapping it back to one of its preset options (AskUserQuestion is a choice tool, so
-      // by default the model maps the reply onto its options — the flag overrides that).
-      if (custom) {
-        lines.push(
-          `${i + 1}. 【${hdr}】→ ${custom}（自定义回答，请按字面采纳，不要套到预设选项上）`,
-        );
-        brief.push(`${hdr}：${custom}`);
-      } else if (picked) {
-        lines.push(`${i + 1}. 【${hdr}】→ ${picked}（选自预设）`);
-        brief.push(`${hdr}：${picked}`);
-      } else {
-        lines.push(`${i + 1}. 【${hdr}】→ (未作答)`);
-        brief.push(`${hdr}：(未作答)`);
-      }
-    }
+    const { lines, brief } = assembleAuqAnswers(
+      (action.formValue ?? {}) as Record<string, unknown>,
+      total,
+      headers,
+    );
     // Patch the form card to a terminal "已选 …" so it can't be submitted twice.
     if (action.messageId) {
       await sender.updateCard(

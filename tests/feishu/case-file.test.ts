@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkItemEvent } from '../../src/workitems/types.js';
-import { caseFileDetail, caseFileLabel, humanizeMs } from '../../src/index.js';
+import { assembleAuqAnswers, caseFileDetail, caseFileLabel, humanizeMs } from '../../src/index.js';
 
 // 病历(非 checkpoint 的 human wait)→ 飞书卡标签/详情的桥层纯核心（B：病历飞书出口）。
 
@@ -22,6 +22,27 @@ describe('caseFileLabel', () => {
     expect(caseFileLabel('stalled_no_path')).toContain('卡死');
     expect(caseFileLabel('retry_exhausted')).toContain('重试');
     expect(caseFileLabel('thrash')).toContain('震荡');
+  });
+});
+
+describe('assembleAuqAnswers (WS-9 AUQ 答案组装)', () => {
+  it('自定义优先于下拉、未作答占位；lines 给 agent、brief 给卡片', () => {
+    const { lines, brief } = assembleAuqAnswers(
+      { q0_custom: '  莫兰迪色  ', q1_pick: '面包', q2_custom: '' },
+      3,
+      ['配色', '主食', '甜点'],
+    );
+    expect(lines[0]).toContain('莫兰迪色');
+    expect(lines[0]).toContain('自定义回答');
+    expect(lines[1]).toContain('面包');
+    expect(lines[1]).toContain('选自预设');
+    expect(lines[2]).toContain('(未作答)');
+    expect(brief).toEqual(['配色：莫兰迪色', '主食：面包', '甜点：(未作答)']);
+  });
+
+  it('select_static value 可为 { value } 对象形态', () => {
+    const { brief } = assembleAuqAnswers({ q0_pick: { value: '粥' } }, 1, ['主食']);
+    expect(brief[0]).toBe('主食：粥');
   });
 });
 

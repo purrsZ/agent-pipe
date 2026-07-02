@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import type { AgentPool } from '../../agents/pool.js';
-import type { ProgressCallbacks, RunOptions } from '../../agents/types.js';
+import type { AskUserQuestionItem, ProgressCallbacks, RunOptions } from '../../agents/types.js';
 import type { Store } from '../../store.js';
 import type { EffectContext, EffectHandler } from '../../workitems/effects.js';
 import type { Assignment, WorkItem, WorkItemEvent } from '../../workitems/types.js';
@@ -93,6 +93,16 @@ export interface RunProgressSink {
     outcome: 'success' | 'failed' | 'aborted';
     report?: string;
     error?: string;
+  }): void;
+  /**
+   * WS-9：run 中途 agent 调用 AskUserQuestion 提问。以按钮/表单卡贴回群，答案经 WS-2 通道回灌下一轮。
+   * headless CLI 会自动关掉该 tool 并跑完本轮（agents/types.ts），所以 run 照常收尾；问题卡是并行贴出的。
+   */
+  onAskUser?(info: {
+    assignmentId: string;
+    workitemId: string;
+    title: string;
+    questions: AskUserQuestionItem[];
   }): void;
 }
 
@@ -228,6 +238,14 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
     onText: (_id, full) => deps.progress?.onText({ assignmentId: assignment.id, fullText: full }),
     onToolUse: (_id, tool) =>
       deps.progress?.onToolUse({ assignmentId: assignment.id, toolName: tool.name }),
+    // WS-9：agent 中途 AskUserQuestion → 转交进度 sink 贴问题卡（并行，run 照常收尾；答案走下一轮）。
+    onAskUser: (_id, q) =>
+      deps.progress?.onAskUser?.({
+        assignmentId: assignment.id,
+        workitemId: workitem.id,
+        title: workitemTitle(workitem),
+        questions: q.questions,
+      }),
   };
 
   // 4) Permission/options come from the strategy: probe → readonly; requirement worker →

@@ -11,6 +11,7 @@ import {
   buildClosureCard,
   buildErrorCard,
   buildGatekeeperBigCard,
+  buildWorkitemQuestionCard,
   buildQuestionAnsweredCard,
   buildQuestionCard,
   buildQuestionFormCard,
@@ -560,5 +561,35 @@ describe('buildQuestionFormCard (AUQ 表单卡：凑齐 + 自定义)', () => {
     const form = card.body.elements.find((e) => e.tag === 'form');
     const sel = form?.elements?.find((e) => e.tag === 'select_static');
     expect(sel?.options?.map((o) => o.value)).toEqual(['面包', '粥']);
+  });
+});
+
+describe('buildWorkitemQuestionCard (WS-9 workitem run AskUserQuestion)', () => {
+  it('提交按钮 value = { kind: auq-wi, workitemId, total, headers }', () => {
+    const q = {
+      toolUseId: 'tu',
+      questions: [
+        {
+          question: '实现前先问：A 还是 B？',
+          header: '方案',
+          options: [{ label: 'A' }, { label: 'B' }],
+        },
+      ],
+    };
+    const card = buildWorkitemQuestionCard('订单导出', q, { workitemId: 'wi-1' }) as {
+      body: { elements: Array<Record<string, unknown>> };
+    };
+    const form = card.body.elements.find((e) => e.tag === 'form') as {
+      elements: Array<Record<string, unknown>>;
+    };
+    const submit = form.elements.find((e) => e.tag === 'button') as {
+      behaviors: Array<{ value: Record<string, unknown> }>;
+    };
+    expect(submit.behaviors[0]!.value).toMatchObject({
+      kind: 'auq-wi',
+      workitemId: 'wi-1',
+      total: 1,
+      headers: ['方案'],
+    });
   });
 });
