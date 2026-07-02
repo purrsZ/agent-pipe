@@ -46,6 +46,17 @@ describe('composeWorkerPrompt (D-23: no readonly system句)', () => {
     expect(p).toContain('amount 改成了分');
   });
 
+  it('WS-2.5 织入 steeringNote（用户中途给本仓的指示，最高优先级）', () => {
+    const p = composeWorkerPrompt({
+      title: 't',
+      repo: 'backend',
+      contract,
+      steeringNote: '把金额单位改成分',
+    });
+    expect(p).toContain('用户中途给本仓的指示');
+    expect(p).toContain('把金额单位改成分');
+  });
+
   it('renderContractForRepo labels provide vs consume', () => {
     expect(renderContractForRepo(contract, 'backend')).toContain('[提供]');
     expect(renderContractForRepo(contract, 'frontend')).toContain('[调用]');

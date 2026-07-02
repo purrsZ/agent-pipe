@@ -12,6 +12,7 @@ export interface WorkerPromptInput {
   contract?: ContractSnapshot; // frozen对接合同 — the worker codes against it
   knowledge?: string; // selective repo knowledge injection (R16, Stage 5)
   reworkNote?: string; // when this is a replacement: 原活 + 接口改了哪 + 为何
+  steeringNote?: string; // WS-2.5：用户中途经 steer 给本仓的指示（steering/<repo>.md），最高优先级
 }
 
 // D-23: the system句 must be rewritten — probe says "只读、不要修改任何文件", which contradicts
@@ -35,6 +36,10 @@ export function composeWorkerPrompt(input: WorkerPromptInput): string {
   }
   if (input.reworkNote && input.reworkNote.trim()) {
     lines.push('', '# 返工说明（在原活基础上改，不要从零重来）', input.reworkNote.trim());
+  }
+  // WS-2.5：用户在推进中途经 steer 给本仓的指示（steer_apply 落 steering/<repo>.md）——优先级最高，按此调整。
+  if (input.steeringNote?.trim()) {
+    lines.push('', '# 用户中途给本仓的指示（最高优先级，按此调整）', input.steeringNote.trim());
   }
   // 监工科层（C，rule #5 疑则上报）：冻结的跨仓契约由系统冻结、**不可擅改**。如你必须偏离契约、或你的
   // 改动会外溢到别仓依赖的接口、或你拿不准是否碰了跨仓约束——别自己拍板改契约，在报告**最末尾**输出一个

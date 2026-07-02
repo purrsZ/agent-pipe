@@ -15,6 +15,7 @@ import { createIntakeFinalizeHandler } from '../../src/worktypes/requirement/int
 import { createIntegrationCheckHandler } from '../../src/worktypes/requirement/integration.js';
 import { PHASE } from '../../src/worktypes/requirement/phases.js';
 import { createReconcileCheckHandler } from '../../src/worktypes/requirement/reconcile.js';
+import { createSteerApplyHandler } from '../../src/worktypes/requirement/steering.js';
 
 // PIVOT《设计外置·实现聚焦》：设计已摘出 agent-pipe。Drive the full 5-phase lifecycle through the real
 // container (single-flight gate, checkpoint waits, owner 跨仓对账, worker fan-out) with a generic
@@ -50,6 +51,7 @@ function harness(
     reconcileJson?: string;
     failRepo?: string;
     raiseRepo?: string; // 该仓 worker 在报告里输出一个跨仓 ```gatekeeper 上报（→ 监工判大）
+    steerJson?: string; // owner steer run 报告末尾输出的 ```steer 结构化指令（WS-2）
   } = {},
 ) {
   seq += 1;
@@ -103,11 +105,19 @@ function harness(
         repo && opts.raiseRepo && repo === opts.raiseRepo
           ? `\n\`\`\`gatekeeper\n${JSON.stringify({ raises: [{ interfaceId: 'createOrder', question: '要给 createOrder 加字段', repo }] })}\n\`\`\`\n`
           : '';
-      ctx.writeArtifact(`assignments/${aid}/report.md`, `ok ${aid}${raise}`, 'report');
+      // WS-2：owner steer run 产带 ```steer 块的报告（模拟包工头结构化指令）。
+      const stage = (ctx.effect.payload as { stage?: string } | undefined)?.stage;
+      const steer =
+        ctx.assignment?.role === 'owner' && stage === 'steer' && opts.steerJson
+          ? `\n\`\`\`steer\n${opts.steerJson}\n\`\`\`\n`
+          : '';
+      ctx.writeArtifact(`assignments/${aid}/report.md`, `ok ${aid}${raise}${steer}`, 'report');
     },
   });
   // 拆解阶段 owner 跨仓对账判定 effect。
   effects.registerHandler(createReconcileCheckHandler());
+  // WS-2：steer_apply effect（解析包工头 steer 报告 → emit steer_directive）。
+  effects.registerHandler(createSteerApplyHandler());
   // 并行实现阶段监工科层判定 effect（扫工人上报；stub 工人无 ```gatekeeper 块 → 放行）。
   effects.registerHandler(createGatekeeperReviewHandler());
   // 集成验证 effect: with no cross-repo contract in this skeleton run it emits passed (no_contract).
@@ -538,5 +548,29 @@ describe('requirement skeleton end-to-end', () => {
       expect(done).toEqual(['repo-a', 'repo-b', 'repo-c']);
     });
     expect(store.listParked(item.id)).toHaveLength(0);
+  });
+
+  it('WS-2 消息必达：implement 相位中途插群消息 → steer run → raise_human → steer_escalated 病历', async () => {
+    // worker 一直跑（delay 长）→ implement 相位不 fan-in 推进、owner 空闲，模拟「工人跑动时人插话」。
+    const { store, api } = harness({
+      workerDelayMs: { 'repo-a': 3000 },
+      steerJson: JSON.stringify({ action: 'raise_human', note: '用户要求超出范围，请裁决' }),
+    });
+    const item = api.createWorkItem({
+      type: 'requirement',
+      title: '插话',
+      source: {},
+      repos: ['repo-a'],
+    }).item;
+    await walkToImplement(store, api, item.id, ['repo-a']);
+    await waitFor(() => expect(store.countRunningByRole(item.id, 'worker')).toBe(1));
+
+    // 群消息（owner 空闲）→ onHumanMessage 派 steer owner run → steer_apply → steer_directive(raise_human)
+    // → onSteerDirective raise 病历。整条链在真容器里跑通。
+    api.injectHumanMessage(item.id, { text: '这个能不能也支持导出？' });
+    await waitFor(() =>
+      expect(store.listOpenWaits(item.id).some((w) => w.reason === 'steer_escalated')).toBe(true),
+    );
+    expect(store.listEvents(item.id).some((e) => e.kind === 'steer_directive')).toBe(true);
   });
 });

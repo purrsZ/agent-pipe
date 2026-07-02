@@ -20,7 +20,7 @@ describe('anchorAction ⇄ REQUIREMENT_EVENT_KINDS (no drift)', () => {
     }
   });
 
-  it('the authoritative list is non-empty and matches the PIVOT count (8 + 监工 gatekeeper_passed/_big = 10)', () => {
-    expect(REQUIREMENT_EVENT_KINDS.length).toBe(10);
+  it('the authoritative list is non-empty and matches the count (PIVOT 10 + OVERHAUL steer_directive = 11)', () => {
+    expect(REQUIREMENT_EVENT_KINDS.length).toBe(11);
   });
 });

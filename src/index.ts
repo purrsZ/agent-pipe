@@ -54,6 +54,7 @@ import { registerRequirement } from './worktypes/requirement/index.js';
 import { createIntegrationCheckHandler } from './worktypes/requirement/integration.js';
 import { createGatekeeperReviewHandler } from './worktypes/requirement/gatekeeper.js';
 import { createReconcileCheckHandler } from './worktypes/requirement/reconcile.js';
+import { createSteerApplyHandler } from './worktypes/requirement/steering.js';
 import { checkpointGateLabel, checkpointRail } from './worktypes/requirement/lights.js';
 import { createRequirementRunStrategy } from './worktypes/requirement/worker-handler.js';
 import { PendingIntakeStore } from './bridge/pending-intake.js';
@@ -148,6 +149,8 @@ export function caseFileLabel(reason: string): string | undefined {
       return '重试用尽（stall/超时连续失败）';
     case 'thrash':
       return '决策震荡（连续被判过期）';
+    case 'steer_escalated':
+      return '包工头上报（需你裁决）';
     default:
       return undefined;
   }
@@ -155,7 +158,12 @@ export function caseFileLabel(reason: string): string | undefined {
 
 // 从事件历史里抽一句人类可读的病历详情(为什么卡住),喂进病历卡。永不抛,抽不到 → undefined。
 export function caseFileDetail(events: WorkItemEvent[], reason: string): string | undefined {
-  const kind = reason === 'integration_unresolved' ? 'integration_check_failed' : reason;
+  const kind =
+    reason === 'integration_unresolved'
+      ? 'integration_check_failed'
+      : reason === 'steer_escalated'
+        ? 'steer_directive' // 包工头上报的详情来自最近一条 steer_directive 的 note
+        : reason;
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i];
     if (!ev || ev.kind !== kind) continue;
@@ -173,6 +181,9 @@ export function caseFileDetail(events: WorkItemEvent[], reason: string): string 
     };
     if (reason === 'reconcile_conflict') return pick(p.unresolved, 'detail');
     if (reason === 'gatekeeper_big') return pick(p.raises, 'question');
+    if (reason === 'steer_escalated') {
+      return typeof p.note === 'string' && p.note.length > 0 ? p.note : undefined;
+    }
     if (reason === 'integration_unresolved') {
       return Array.isArray(p.breaking) ? `破坏性变更 ${p.breaking.length} 处` : undefined;
     }
@@ -1357,7 +1368,10 @@ async function main() {
             text: msg.text,
             feishuMsgId: msg.messageId,
           });
-          await sender.reply(msg.messageId, '已转交，稍候进展会在本话题/群更新。');
+          await sender.reply(
+            msg.messageId,
+            '已收到，交给包工头处理；他的回应稍后会以卡片形式出现在本群。',
+          );
           return;
         }
         // Owner vanished but the claim lingered — release it and fall through to normal bridge
@@ -1673,6 +1687,8 @@ export function createWorkitemsRuntime(deps: {
   // requirement 拆解阶段 owner 跨仓对账: static reconcile_check effect (PIVOT §3.1)。读 owner 对账产物
   // contract/reconcile.json + workitem.repos → emit reconcile_passed / reconcile_conflict（病历）。
   workitems.effects.registerHandler(createReconcileCheckHandler());
+  // WS-2 消息必达: steer_apply effect——解析包工头 steer run 报告的结构化指令 → emit steer_directive。
+  workitems.effects.registerHandler(createSteerApplyHandler());
   // requirement 并行实现阶段监工科层 (PIVOT §4): static gatekeeper_review effect。扫各仓工人「疑则上报」→
   // 跨仓外溢/疑则判大 emit gatekeeper_big（病历）/ 纯本仓判小回写图纸 emit gatekeeper_passed → owner assess。
   workitems.effects.registerHandler(createGatekeeperReviewHandler());

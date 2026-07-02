@@ -112,6 +112,9 @@ export function requirementTransition(item: WorkItem, ev: WorkItemEvent): Transi
       return onIntegrationFailed(item, ev);
     case 'human_message':
       return onHumanMessage(item, ev);
+    case 'steer_directive':
+      // WS-2：steer_apply effect 解析包工头报告后 emit 的结构化指令（redo_reconcile / rework / raise_human / none）。
+      return onSteerDirective(item, ev);
     case 'liveness_stalled':
       // 容器活性看门（watchdog）发现 must-progress 单无任何在途工作 → 自曝；raise 病历让人重试当前阶段。
       return onLivenessStalled(item, ev);
@@ -129,37 +132,42 @@ function onRunCompleted(item: WorkItem, ev: WorkItemEvent): Transition {
   // assess 在 implement 收尾推进集成验证；steer（WS-2）读报告落指令。stage 缺失（历史事件 / 纯单测手造）→
   // 回落下方旧 phase 路由，保证逐字节兼容。
   if (role === 'owner') {
-    if (stage === STAGE.reconcile) return { effects: [{ kind: 'reconcile_check' }] };
-    if (stage === STAGE.assess && item.phase === PHASE.implement) {
-      return enterPhase(item, PHASE.integrate, 'workers_done', ev);
-    }
+    // steer 自己收尾：读报告落指令，**不**追加新 steer（它刚消费完这批消息；期间又来的新消息由到达时
+    // owner 空闲走 onHumanMessage）。
     if (stage === STAGE.steer) {
       return {
         effects: [{ kind: 'steer_apply', payload: { reportPath: reportPathOf(ev.payload) } }],
       };
     }
+    // 其余 owner run（reconcile / assess / stage 缺失回落）：算出 base 后包 withPendingSteer——若期间来了
+    // 未被消费的群消息，收尾时追加一个 steer run 去消费（消息必达，WS-2.2b）。
+    if (stage === STAGE.reconcile) {
+      return withPendingSteer(item, ev, { effects: [{ kind: 'reconcile_check' }] });
+    }
+    if (stage === STAGE.assess && item.phase === PHASE.implement) {
+      return withPendingSteer(item, ev, enterPhase(item, PHASE.integrate, 'workers_done', ev));
+    }
+    // stage 缺失 → 回落旧 phase 路由（拆解 owner → reconcile_check；实现 owner → integrate），逐字节兼容 +
+    // 同样包补派。
+    if (item.phase === PHASE.split) {
+      return withPendingSteer(item, ev, { effects: [{ kind: 'reconcile_check' }] });
+    }
+    if (item.phase === PHASE.implement) {
+      return withPendingSteer(item, ev, enterPhase(item, PHASE.integrate, 'workers_done', ev));
+    }
+    return {};
   }
+  // worker fan-in（owner 槽独立，不涉及 steer 补派）。
   switch (item.phase) {
-    case PHASE.split:
-      // owner 对账 run 收尾（afterRun 已落 contract/contract.json + contract/reconcile.json）→ 起静态
-      // reconcile_check effect（与 integration_check 同构）：结构化安全网 ∪ owner 自报 → reconcile_passed/_conflict。
-      return role === 'owner' ? { effects: [{ kind: 'reconcile_check' }] } : {};
     case PHASE.implement:
       // T4 owner-snapshot fan-in: only the LAST worker (no siblings still running — the container
-      // injects `runningWorkers`) closes the batch. 它不直接叫 owner assess——先过**监工 gate**
-      // （gatekeeper_review effect 扫各仓工人「疑则上报」：跨仓外溢→判大 raise 人 / 纯本仓→判小回写图纸），
-      // 监工放行（gatekeeper_passed）后才 assess。earlier workers rest。
-      if (role === 'worker') {
-        return runningWorkersOf(ev.payload) === 0
-          ? { effects: [{ kind: 'gatekeeper_review' }] }
-          : {};
-      }
-      if (role === 'owner') return enterPhase(item, PHASE.integrate, 'workers_done', ev);
-      return {};
+      // injects `runningWorkers`) closes the batch → 先过监工 gate（gatekeeper_review），放行后才 assess。
+      return role === 'worker' && runningWorkersOf(ev.payload) === 0
+        ? { effects: [{ kind: 'gatekeeper_review' }] }
+        : {};
     case PHASE.integrate:
-      // A fix worker finished → re-run the static integration对账 (idempotent effect), but only
-      // once the whole fix batch is in (runningWorkers===0) so a re-check never races a repo
-      // still being fixed. The integration verdict drives the phase, not a run conclusion.
+      // A fix worker finished → re-run the static integration对账 (idempotent effect), but only once
+      // the whole fix batch is in (runningWorkers===0) so a re-check never races a repo still fixing.
       return role === 'worker' && runningWorkersOf(ev.payload) === 0
         ? { effects: [{ kind: 'integration_check' }] }
         : {};
@@ -190,6 +198,8 @@ const STALLED_NO_PATH_REASON = 'stalled_no_path';
 // 只能从管控台 resolve），补上后与其它病历同权，且防「未知 reason resolve 被误当 checkpoint 拍板」(#13)。
 const RETRY_EXHAUSTED_REASON = 'retry_exhausted';
 const THRASH_REASON = 'thrash';
+// WS-2.3：包工头（steer）拿不准 / 用户要求超出范围 → 上报人裁决的病历 reason。
+const STEER_ESCALATED_REASON = 'steer_escalated';
 
 // 重弹一条同名 human 病历（declined 后防死状态：病历必须一直 open 到被 approve 或整单 /cancel）。
 function reRaiseWait(reason: string): Transition {
@@ -278,6 +288,9 @@ const RUN_FAILED_REASON = 'run_failed';
 // 标 failed、不重试不升级；尤其末位 worker 以 run_failed 收尾时 fan-in（依赖 run_completed）不唤醒 owner、
 // 批次会永久挂起——病历让人看见并裁决（resolve 病历=重试当前阶段，见 onWaitResolved）。idempotent。
 function onRunFailed(_item: WorkItem, ev: WorkItemEvent): Transition {
+  // WS-2.2(c)：steer run 只是答话，失败不值得弹病历（消息仍在窗口内，下一个 owner run 会带上；WS-8 的
+  // 自动重试也不给 steer）。
+  if (stageOf(ev.payload) === STAGE.steer) return {};
   if (openWaitReasonsOf(ev.payload).includes(RUN_FAILED_REASON)) return {};
   return {
     waits: [{ kind: 'human', reason: RUN_FAILED_REASON, deadlineTtlSec: CHECKPOINT_WAIT_TTL_SEC }],
@@ -336,6 +349,11 @@ function onWaitResolved(item: WorkItem, ev: WorkItemEvent): Transition {
   if (reason === THRASH_REASON) {
     // thrash 时容器已清 discardStreak；人确认即可（approved → {}），或重弹留观（declined）。
     return decision.approved ? {} : reRaiseWait(THRASH_REASON);
+  }
+  if (reason === STEER_ESCALATED_REASON) {
+    // WS-2.3：包工头上报，人处理完就完了（approved → {}）；declined 重弹留观。若要继续推进，人再在群里
+    // 说话即触发新 steer。
+    return decision.approved ? {} : reRaiseWait(STEER_ESCALATED_REASON);
   }
 
   // checkpoint 拍板（立项 gate / 灯③）：兜底收紧（修 #13）——只有真正的 checkpoint wait（reason 以
@@ -397,7 +415,7 @@ function redoPhase(item: WorkItem): Transition {
   return {};
 }
 
-function onHumanMessage(_item: WorkItem, ev: WorkItemEvent): Transition {
+function onHumanMessage(item: WorkItem, ev: WorkItemEvent): Transition {
   const text = humanText(ev.payload).trim();
   if (text === '/cancel') {
     // 防误触: confirm before tearing down. The confirm card resolves with a cancel decision.
@@ -405,9 +423,12 @@ function onHumanMessage(_item: WorkItem, ev: WorkItemEvent): Transition {
       waits: [{ kind: 'human', reason: 'cancel_confirm', deadlineTtlSec: CHECKPOINT_WAIT_TTL_SEC }],
     };
   }
-  // 设计外置后已无「群内反馈改设计」的协调阶段（理解/合同/详设 已砍）。拆解阶段的重对账走病历 resolve、
-  // 实现/集成阶段的反馈各由 worker / 集成 effect 回路负责，故其它群内消息只记录、不在此重跑 owner。
-  return {};
+  // WS-2 消息必达：立项相位走 bridge 收料（不经此）。其余相位（拆解/实现/集成/交付）——owner 空闲立刻派
+  // steer run 消费这条消息；owner 忙则等它收尾补派（withPendingSteer）。owner 槽独立于 worker（reducer
+  // owner single-flight 只看 owner），故 worker 忙不忙无关。deliver 相位也适用（交付后问「分支在哪」有人答）。
+  if (item.phase === PHASE.intake) return {};
+  if (runningOwnersOf(ev.payload) > 0) return {};
+  return { dispatch: [ownerSpec(item, STAGE.steer)] };
 }
 
 function onClose(item: WorkItem): Transition {
@@ -511,5 +532,91 @@ function numberField(payload: unknown, key: string): number | undefined {
 
 function stringArrayField(payload: unknown, key: string): string[] {
   const v = asObject(payload)[key];
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
+
+// ── WS-2 消息必达 ─────────────────────────────────────────────────────────────────────────
+
+// steer_apply emit 的结构化指令消费（WS-2.3）。redo_reconcile → 派 owner 重对账；rework → 定向重派受影响
+// 仓 worker（跳过 running / 清单外的仓）；raise_human → 上报病历；none → {}。幂等：redo_reconcile 靠
+// runningOwners、rework 靠 runningWorkerRepos + 容器同 repo 去重，防 steer_apply(recovery:'rerun') 崩溃
+// 重跑重复派。
+function onSteerDirective(item: WorkItem, ev: WorkItemEvent): Transition {
+  const action = steerActionOf(ev.payload);
+  if (action === 'redo_reconcile') {
+    // 仅拆解 / 并行实现相位可重对账；且 owner 空闲（幂等 + 防挤兑）。
+    if (
+      (item.phase === PHASE.split || item.phase === PHASE.implement) &&
+      runningOwnersOf(ev.payload) === 0
+    ) {
+      return { dispatch: [ownerSpec(item, STAGE.reconcile)] };
+    }
+    return {};
+  }
+  if (action === 'rework') {
+    if (item.phase !== PHASE.implement && item.phase !== PHASE.integrate) return {};
+    const running = new Set(runningWorkerReposOf(ev.payload));
+    const note = steerNoteOf(ev.payload);
+    // 只派清单内、且当前无 running worker 的仓（有 running 的仓 note 已落 steering/<repo>.md，注入其后续轮次）。
+    const targets = steerReposOf(ev.payload).filter(
+      (r) => item.repos.includes(r) && !running.has(r),
+    );
+    return { dispatch: targets.map((repo) => workerReworkSpec(item, repo, note)) };
+  }
+  if (action === 'raise_human') {
+    if (openWaitReasonsOf(ev.payload).includes(STEER_ESCALATED_REASON)) return {};
+    return reRaiseWait(STEER_ESCALATED_REASON);
+  }
+  return {}; // none
+}
+
+// 定向重派某仓 worker（rework 轮，WS-2.3 / WS-5）。note 经 dispatch payload 传给 worker prompt。
+function workerReworkSpec(item: WorkItem, repo: string, note: string): AssignmentSpec {
+  const t = ttlsOf(item);
+  return {
+    role: 'worker',
+    repo,
+    deadlineTtlSec: t.deadlineTtlSec,
+    wallclockCapSec: t.wallclockCapSec,
+    payload: { stage: STAGE.rework, repo, note },
+  };
+}
+
+// owner run（非 steer）收尾时，若期间来了未被消费的群消息，在其 transition 上追加一个 steer run 去消费
+// （消息必达，WS-2.2b）。steer 自己收尾不追加（onRunCompleted 的 steer 分支不经此）。
+function withPendingSteer(item: WorkItem, ev: WorkItemEvent, base: Transition): Transition {
+  if (unconsumedHumanMessagesOf(ev.payload) === 0) return base;
+  return { ...base, dispatch: [...(base.dispatch ?? []), ownerSpec(item, STAGE.steer)] };
+}
+
+// 容器 enrich 注入的中性字段（WS-0.2 / WS-2.3），防御式读取、缺失回落。
+function runningOwnersOf(payload: unknown): number {
+  const v = asObject(payload).runningOwners;
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+function unconsumedHumanMessagesOf(payload: unknown): number {
+  const v = asObject(payload).unconsumedHumanMessages;
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+function runningWorkerReposOf(payload: unknown): string[] {
+  const v = asObject(payload).runningWorkerRepos;
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
+
+// steer_directive payload 读取（WS-2.3）。
+function steerActionOf(payload: unknown): string {
+  const v = asObject(payload).action;
+  return typeof v === 'string' ? v : 'none';
+}
+
+function steerNoteOf(payload: unknown): string {
+  const v = asObject(payload).note;
+  return typeof v === 'string' ? v : '';
+}
+
+function steerReposOf(payload: unknown): string[] {
+  const v = asObject(payload).repos;
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
 }

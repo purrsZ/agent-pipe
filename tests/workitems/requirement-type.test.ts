@@ -223,15 +223,17 @@ describe('requirement lifecycle transitions', () => {
     ).toEqual({});
   });
 
-  it('群内消息：拆解阶段普通消息只记录、不重跑 owner（重对账走病历 resolve）', () => {
+  it('WS-2 群内消息：拆解阶段 owner 空闲 → 派 steer 消费（消息必达，不再只记录）', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.split });
-    expect(t.onEvent(item, ev('human_message', { text: 'B 仓接口改名了' }))).toEqual({});
+    const out = t.onEvent(item, ev('human_message', { text: 'B 仓接口改名了', runningOwners: 0 }));
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'steer' } });
   });
 
-  it('群内消息：实现/集成/交付阶段普通消息只记录（各自回路负责）', () => {
+  it('WS-2 群内消息：实现/集成/交付阶段 owner 空闲 → 派 steer 消费', () => {
     for (const phase of [PHASE.implement, PHASE.integrate, PHASE.deliver]) {
       const item = makeWorkItem('wi-1', { phase });
-      expect(t.onEvent(item, ev('human_message', { text: '随手一句' }))).toEqual({});
+      const out = t.onEvent(item, ev('human_message', { text: '随手一句', runningOwners: 0 }));
+      expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'steer' } });
     }
   });
 
@@ -463,5 +465,114 @@ describe('requirement lifecycle transitions', () => {
       }),
     );
     expect(out).toEqual({});
+  });
+
+  // WS-2 消息必达：派发规则 + steer_directive 消费。
+  it('WS-2 实现相位 human_message 且 owner 空闲 → 派 steer；owner 忙 → {}', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    const idle = t.onEvent(item, ev('human_message', { text: '改字段', runningOwners: 0 }));
+    expect(idle.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'steer' } });
+    expect(t.onEvent(item, ev('human_message', { text: 'x', runningOwners: 1 }))).toEqual({});
+  });
+
+  it('WS-2 立项相位 human_message → 不派 steer（走 bridge 收料）；/cancel 仍触发确认', () => {
+    const intake = makeWorkItem('wi-1', { phase: PHASE.intake });
+    expect(t.onEvent(intake, ev('human_message', { text: 'x', runningOwners: 0 }))).toEqual({});
+    const impl = makeWorkItem('wi-1', { phase: PHASE.implement });
+    expect(t.onEvent(impl, ev('human_message', { text: '/cancel' })).waits?.[0]).toMatchObject({
+      reason: 'cancel_confirm',
+    });
+  });
+
+  it('WS-2 owner assess 收尾且 unconsumed>0 → 追加 steer dispatch；steer 自己收尾不追加', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    const assess = t.onEvent(
+      item,
+      ev('run_completed', { role: 'owner', stage: 'assess', unconsumedHumanMessages: 2 }),
+    );
+    expect(assess.phase).toEqual({ to: PHASE.integrate, reason: 'workers_done' });
+    expect(assess.dispatch?.some((d) => (d.payload as { stage?: string })?.stage === 'steer')).toBe(
+      true,
+    );
+    const steer = t.onEvent(
+      item,
+      ev('run_completed', {
+        role: 'owner',
+        stage: 'steer',
+        reportPath: 'r',
+        unconsumedHumanMessages: 3,
+      }),
+    );
+    expect(steer.effects?.[0]).toMatchObject({ kind: 'steer_apply' });
+    expect(steer.dispatch ?? []).toHaveLength(0);
+  });
+
+  it('WS-2 steer_directive redo_reconcile（implement + owner 空闲）→ 派 owner reconcile', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    const out = t.onEvent(
+      item,
+      ev('steer_directive', { action: 'redo_reconcile', runningOwners: 0 }),
+    );
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'reconcile' } });
+  });
+
+  it('WS-2 steer_directive rework → 只对无 running worker 的仓派 rework worker（带 note）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['/a', '/b'] });
+    const out = t.onEvent(
+      item,
+      ev('steer_directive', {
+        action: 'rework',
+        repos: ['/a', '/b'],
+        note: '改样式',
+        runningWorkerRepos: ['/b'],
+      }),
+    );
+    expect(out.dispatch).toHaveLength(1);
+    expect(out.dispatch?.[0]).toMatchObject({
+      role: 'worker',
+      repo: '/a',
+      payload: { stage: 'rework', note: '改样式' },
+    });
+  });
+
+  it('WS-2 steer_directive raise_human → steer_escalated 病历（幂等）；none → {}', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    expect(
+      t.onEvent(item, ev('steer_directive', { action: 'raise_human', note: '裁决' })).waits?.[0],
+    ).toMatchObject({ reason: 'steer_escalated' });
+    expect(
+      t.onEvent(
+        item,
+        ev('steer_directive', { action: 'raise_human', openWaitReasons: ['steer_escalated'] }),
+      ),
+    ).toEqual({});
+    expect(t.onEvent(item, ev('steer_directive', { action: 'none' }))).toEqual({});
+  });
+
+  it('WS-2 resolve steer_escalated（approved → {}；declined → 重弹）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    expect(
+      t.onEvent(
+        item,
+        ev('wait_resolved', {
+          decision: { approved: true },
+          resolvedWaitReason: 'steer_escalated',
+        }),
+      ),
+    ).toEqual({});
+    expect(
+      t.onEvent(
+        item,
+        ev('wait_resolved', {
+          decision: { approved: false },
+          resolvedWaitReason: 'steer_escalated',
+        }),
+      ).waits?.[0],
+    ).toMatchObject({ reason: 'steer_escalated' });
+  });
+
+  it('WS-2 steer run 失败 → 不弹病历（消息仍在窗口内，下个 owner run 会带上）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    expect(t.onEvent(item, ev('run_failed', { role: 'owner', stage: 'steer' }))).toEqual({});
   });
 });

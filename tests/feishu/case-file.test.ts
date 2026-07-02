@@ -45,6 +45,14 @@ describe('caseFileDetail', () => {
     expect(caseFileDetail(events, 'integration_unresolved')).toBe('破坏性变更 2 处');
   });
 
+  it('WS-2 steer_escalated：标签 + detail 取最近 steer_directive 的 note', () => {
+    expect(caseFileLabel('steer_escalated')).toContain('包工头');
+    const events = [
+      ev('steer_directive', { action: 'raise_human', note: '用户要求超出范围，请裁决' }),
+    ];
+    expect(caseFileDetail(events, 'steer_escalated')).toBe('用户要求超出范围，请裁决');
+  });
+
   it('抽不到 → undefined（永不抛）', () => {
     expect(caseFileDetail([], 'reconcile_conflict')).toBeUndefined();
     expect(caseFileDetail([ev('run_failed', {})], 'run_failed')).toBeUndefined();

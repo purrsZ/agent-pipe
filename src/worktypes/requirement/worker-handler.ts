@@ -6,6 +6,7 @@ import { type ContractSnapshot, EMPTY_SNAPSHOT } from './contract.js';
 import { parseInternalApis, promoteToContract } from './design.js';
 import { PHASE } from './phases.js';
 import { composeReconcilePrompt, parseReconcileResult, reconcileToContract } from './reconcile.js';
+import { composeSteerPrompt, renderContractSummary, steeringNotePath } from './steering.js';
 import { composeWorkerPrompt, mapWritePermission } from './worker.js';
 
 // requirement run strategy (worker-runtime). Workers run in their own worktree under the
@@ -49,18 +50,40 @@ export function createRequirementRunStrategy(opts: {
     }) => {
       if (assignment.role === 'worker') {
         const contract = readContract(readArtifact);
+        // WS-2.5：rework/fix 轮的返工说明优先取 dispatch payload 的 note（steer/fix 显式指令），回落到
+        // stall 重派的 priorReport；用户中途给本仓的指示从 steering/<repo>.md 读（steer_apply 落）。
+        const note = noteFromPayload(effectPayload);
         return composeWorkerPrompt({
           title,
           repo: assignment.repo ?? '',
           contract,
           // 选择性注入: only workers get repo knowledge, keyed by the repo they own.
           knowledge: assignment.repo ? opts.knowledgeFor?.(assignment.repo) : undefined,
-          reworkNote: assignment.replacesAssignmentId ? priorReport : undefined,
+          reworkNote: note || (assignment.replacesAssignmentId ? priorReport : undefined),
+          steeringNote: assignment.repo
+            ? readArtifact(steeringNotePath(assignment.repo))
+            : undefined,
         });
       }
       // owner run 按 stage 优先分流（WS-0.4）：拆解 = 跨仓对账 run（读各仓设计「外部方契约」节，拼凑+对账），
       // WS-5 起 implement 相位内也可重对账（stage=reconcile）。afterRun 升格写 contract.json + reconcile.json。
       const stage = stageFromPayload(effectPayload);
+      // WS-2.4：steer run（包工头答复用户 + 决定是否调整施工）——读契约摘要 / 监工日志 / 集成报告 / 各仓回执，
+      // followups 是用户这批话（run-handler 已算好）。产出面向用户的答复 + 末尾 steer 指令块（steer_apply 消费）。
+      if (stage === 'steer') {
+        return composeSteerPrompt({
+          title,
+          phase: workitem.phase,
+          repos: workitem.repos,
+          intakeBrief: readArtifact('intake/intake.md'),
+          followups,
+          contractSummary: renderContractSummary(readContract(readArtifact)),
+          gatekeeperLog: readArtifact('contract/gatekeeper-log.md'),
+          integrationReport: readArtifact('contract/integration-report.md'),
+          recentReports: boundedReports(priorReportPaths, readArtifact),
+          priorSteerReport: priorReport,
+        });
+      }
       if (stage === 'reconcile' || workitem.phase === PHASE.split) {
         return composeReconcilePrompt({
           title,
@@ -75,15 +98,7 @@ export function createRequirementRunStrategy(opts: {
       // （priorReportPaths = 全历史 run_completed 报告路径，含跨仓对账报告 + 各仓工人回执，B 阶段）。
       // 有界：只取最近 N 份（最新的就是各仓工人回执；最老的跨仓对账报告在仓多/多轮时自然落出）+ 每份截断，
       // 防 prompt 随工人数 × 重跑轮数线性膨胀撞 context window。
-      const workerReports = (priorReportPaths ?? [])
-        .slice(-MAX_ASSESS_REPORTS)
-        .map((p) => readArtifact(p))
-        .filter((r): r is string => typeof r === 'string' && r.trim().length > 0)
-        .map((r) =>
-          r.length > MAX_ASSESS_REPORT_CHARS
-            ? `${r.slice(0, MAX_ASSESS_REPORT_CHARS)}\n…（回执已截断）`
-            : r,
-        );
+      const workerReports = boundedReports(priorReportPaths, readArtifact);
       return composeOwnerPrompt({
         title,
         repos: workitem.repos,
@@ -184,6 +199,30 @@ function stageFromPayload(payload: unknown): string | undefined {
   if (typeof payload !== 'object' || payload === null) return undefined;
   const v = (payload as Record<string, unknown>).stage;
   return typeof v === 'string' ? v : undefined;
+}
+
+// WS-2.4/2.5：dispatch payload 的 note（rework/fix 轮的返工说明）。空/缺失 → undefined。
+function noteFromPayload(payload: unknown): string | undefined {
+  if (typeof payload !== 'object' || payload === null) return undefined;
+  const v = (payload as Record<string, unknown>).note;
+  return typeof v === 'string' && v.trim().length > 0 ? v : undefined;
+}
+
+// assess / steer 共用：全历史 run_completed 报告路径 → 有界回执（最近 N 份、每份截断），防 prompt 随工人数 ×
+// 重跑轮数线性膨胀撞 context window。
+function boundedReports(
+  priorReportPaths: string[] | undefined,
+  readArtifact: (rel: string) => string | undefined,
+): string[] {
+  return (priorReportPaths ?? [])
+    .slice(-MAX_ASSESS_REPORTS)
+    .map((p) => readArtifact(p))
+    .filter((r): r is string => typeof r === 'string' && r.trim().length > 0)
+    .map((r) =>
+      r.length > MAX_ASSESS_REPORT_CHARS
+        ? `${r.slice(0, MAX_ASSESS_REPORT_CHARS)}\n…（回执已截断）`
+        : r,
+    );
 }
 
 function readContract(readArtifact: (rel: string) => string | undefined): ContractSnapshot {
