@@ -25,7 +25,8 @@ export type IntakeFieldKey =
   | 'constraints'; // 已知依赖 / 技术约束 / 不能动的
 
 // 必填语义：required=恒必填；conditional=条件必填（ui：勾选「涉及 UI 改动」才必填）；optional=选填。
-export type IntakeRequirement = 'required' | 'conditional' | 'optional';
+// WS-6 复杂度自适应：'multi-conditional' = 多仓（≥2）时必填、单仓时选填。让约束与需求复杂度成比例。
+export type IntakeRequirement = 'required' | 'conditional' | 'multi-conditional' | 'optional';
 
 export interface IntakeFieldDef {
   key: IntakeFieldKey;
@@ -59,13 +60,13 @@ export const INTAKE_CHECKLIST: readonly IntakeFieldDef[] = [
   {
     key: 'prd',
     label: 'PRD',
-    requirement: 'required',
+    requirement: 'multi-conditional', // WS-6：单仓选填、多仓必填
     hint: '群里上传 PRD 的 MD 文件，或直接发文字描述',
   },
   {
     key: 'acceptance',
     label: '验收标准 / 完成定义',
-    requirement: 'required',
+    requirement: 'multi-conditional', // WS-6：单仓选填、多仓必填
     hint: '怎么算做完（可从 PRD 抽草稿待你确认）',
   },
   {
@@ -163,11 +164,20 @@ export function isFieldSatisfied(field: IntakeField | undefined): boolean {
   return field.filledBy === 'user' || field.confirmed === true;
 }
 
-// 当前生效的必填项集合：required 恒在；conditional（ui）当 uiRequired 时才在。
-export function requiredDefs(state: IntakeState): IntakeFieldDef[] {
-  return INTAKE_CHECKLIST.filter(
-    (d) => d.requirement === 'required' || (d.requirement === 'conditional' && state.uiRequired),
+// WS-6：单一必填判定源——required 恒在；conditional（ui）当 uiRequired；multi-conditional（prd/acceptance）
+// 当 repos ≥ 2。bridge 的 buildIntakeView 与 requiredDefs 共用这一份，杜绝两处判定漂移（WS-6.3）。
+export function isDefRequired(def: IntakeFieldDef, state: IntakeState): boolean {
+  const multiRepo = intakeReposOf(state).length >= 2;
+  return (
+    def.requirement === 'required' ||
+    (def.requirement === 'conditional' && state.uiRequired) ||
+    (def.requirement === 'multi-conditional' && multiRepo)
   );
+}
+
+// 当前生效的必填项集合（随 uiRequired / repos 数变）。
+export function requiredDefs(state: IntakeState): IntakeFieldDef[] {
+  return INTAKE_CHECKLIST.filter((d) => isDefRequired(d, state));
 }
 
 // 还缺哪些必填项（引导者据此逐项追）。

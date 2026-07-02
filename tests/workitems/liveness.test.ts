@@ -89,7 +89,13 @@ describe('WS-1.2 watchdog 活性不变式扫描', () => {
 
   it('resolve stalled_no_path 病历（approved）→ 重派当前阶段入口（拆解 → owner reconcile run）', () => {
     const { api, store, watchdog } = harness();
-    const item = api.createWorkItem({ type: 'requirement', title: 't', source: {} }).item;
+    // WS-6：多仓（满配）→ 拆解自愈回 owner 对账；单仓 lite 会派 worker。
+    const item = api.createWorkItem({
+      type: 'requirement',
+      title: 't',
+      source: {},
+      repos: ['repo-a', 'repo-b'],
+    }).item;
     store.updateWorkItem(item.id, { phase: PHASE.split, updatedAt: now });
     watchdog.tick(); // 首次观测违反，记录时间
     now += 31_000;

@@ -158,7 +158,7 @@ describe('requirement skeleton end-to-end', () => {
       type: 'requirement',
       title: '双端需求',
       source: {},
-      repos: ['repo-a'],
+      repos: ['repo-a', 'repo-b'],
     }).item;
 
     await walkThroughIntake(store, api, item.id); // 立项 gate（立项→拆解）通过 → 进拆解，自动对账推进
@@ -181,12 +181,52 @@ describe('requirement skeleton end-to-end', () => {
     await waitFor(() => expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.deliver));
     expect(store.getWorkItem(item.id)!.status).not.toBe('done'); // 灯④ rests, awaits close
 
-    // a worker actually ran for the single repo.
+    // 双仓各起一个 worker（满配路径经拆解 owner 对账 → 按仓 fan-out）。
+    const workers = store.listAssignments(item.id).filter((a) => a.role === 'worker');
+    expect(workers).toHaveLength(2);
+    expect(workers.map((w) => w.repo).sort()).toEqual(['repo-a', 'repo-b']);
+
+    // 灯④: human submits → done.
+    api.injectClose(item.id);
+    await waitFor(() => expect(store.getWorkItem(item.id)!.status).toBe('done'));
+  });
+
+  it('WS-6 lite 单仓主线：立项 gate 通过 → 跳过拆解直进并行实现 → 1 worker → 跳过 assess → 灯③ → done', async () => {
+    const { store, api } = harness();
+    const item = api.createWorkItem({
+      type: 'requirement',
+      title: '单仓小需求',
+      source: {},
+      repos: ['repo-a'],
+    }).item;
+
+    // 单仓 lite：立项 gate 通过后直跳并行实现（walkThroughIntake 单仓落在 implement，不经拆解）。
+    await walkThroughIntake(store, api, item.id, ['repo-a']);
+
+    // 无 owner 对账 run（lite 跳过跨仓对账）；仅 1 个 worker。
+    await waitFor(() =>
+      expect(store.listAssignments(item.id).some((a) => a.role === 'worker')).toBe(true),
+    );
+    const owners = store.listAssignments(item.id).filter((a) => a.role === 'owner');
+    // 直到灯③ 出现（worker done → 监工放行 → lite 跳过 assess 直接进集成 → no_contract 放行）。
+    await waitFor(() =>
+      expect(
+        store.listOpenWaits(item.id).some((w) => w.reason === `checkpoint:${PHASE.deliver}`),
+      ).toBe(true),
+    );
+    // lite 全程无 owner run（对账 + assess 都跳过）。
+    expect(owners).toHaveLength(0);
+    expect(store.listAssignments(item.id).filter((a) => a.role === 'owner')).toHaveLength(0);
     const workers = store.listAssignments(item.id).filter((a) => a.role === 'worker');
     expect(workers).toHaveLength(1);
     expect(workers[0]!.repo).toBe('repo-a');
 
-    // 灯④: human submits → done.
+    // 灯③ 通过 → 交付 → close → done。
+    const gate = store
+      .listOpenWaits(item.id)
+      .find((w) => w.reason === `checkpoint:${PHASE.deliver}`)!;
+    api.resolveWait(gate.id, { operator: 'lichao', reason: 'ok', decision: { approved: true } });
+    await waitFor(() => expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.deliver));
     api.injectClose(item.id);
     await waitFor(() => expect(store.getWorkItem(item.id)!.status).toBe('done'));
   });
@@ -212,8 +252,8 @@ describe('requirement skeleton end-to-end', () => {
     ).toHaveLength(0);
     expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.intake);
 
-    // 必填齐 → 立项 gate（立项→拆解）出现，仍不 dispatch（人审前不开干）。
-    api.injectIntakeField(item.id, { key: 'repos', value: ['repo-a'] });
+    // 必填齐 → 立项 gate（立项→拆解）出现，仍不 dispatch（人审前不开干）。多仓走满配（测拆解转换）。
+    api.injectIntakeField(item.id, { key: 'repos', value: ['repo-a', 'repo-b'] });
     api.injectIntakeField(item.id, { key: 'prd', value: 'PRD 全文' });
     api.injectIntakeField(item.id, { key: 'acceptance', value: '输入单号返回状态' });
     await waitFor(() =>
@@ -303,7 +343,7 @@ describe('requirement skeleton end-to-end', () => {
     for (const f of [
       { key: 'name', value: 'n' },
       { key: 'summary', value: 's' },
-      { key: 'repos', value: ['repo-a'] },
+      { key: 'repos', value: ['repo-a', 'repo-b'] }, // 多仓走满配（测拆解转换）
       { key: 'prd', value: 'p' },
       { key: 'acceptance', value: 'a' },
     ]) {
@@ -463,7 +503,8 @@ describe('requirement skeleton end-to-end', () => {
     store: WorkitemsStore,
     api: WorkitemsApi,
     itemId: string,
-    repos: string[] = ['repo-a'],
+    // WS-6：默认 2 仓走满配（经拆解 owner 对账）；显式传单仓走 lite（跳过拆解直进并行实现）。
+    repos: string[] = ['repo-a', 'repo-b'],
   ): Promise<void> {
     for (const f of [
       { key: 'name', value: '需求' },
@@ -481,7 +522,9 @@ describe('requirement skeleton end-to-end', () => {
     );
     const gate = store.listOpenWaits(itemId).find((w) => w.reason === `checkpoint:${PHASE.split}`)!;
     api.resolveWait(gate.id, { operator: 'lichao', reason: 'go', decision: { approved: true } });
-    await waitFor(() => expect(store.getWorkItem(itemId)!.phase).toBe(PHASE.split));
+    // WS-6：单仓 lite gate 通过后直跳并行实现（跳过拆解）；多仓停在拆解等 owner 对账。
+    const landed = repos.length <= 1 ? PHASE.implement : PHASE.split;
+    await waitFor(() => expect(store.getWorkItem(itemId)!.phase).toBe(landed));
   }
 
   // 过完立项 gate 后，拆解(对账放行)→并行实现自动展开。Stops once a worker per repo is fanned out so a
@@ -490,7 +533,7 @@ describe('requirement skeleton end-to-end', () => {
     store: WorkitemsStore,
     api: WorkitemsApi,
     itemId: string,
-    repos: string[] = ['repo-a'],
+    repos: string[] = ['repo-a', 'repo-b'],
   ): Promise<void> {
     await walkThroughIntake(store, api, itemId, repos);
     await waitFor(() =>

@@ -6,6 +6,7 @@ import {
   INTAKE_CHECKLIST,
   initialIntakeState,
   intakeReposOf,
+  isDefRequired,
   isFieldSatisfied,
   isGateReady,
   nextRequiredToFill,
@@ -14,8 +15,6 @@ import {
 } from '../../src/worktypes/requirement/intake.js';
 
 // 立项清单纯核心（M-I1 任务1）：清单 v1 + fold + 必填判定 + 立项书。全沙箱可测，不读 fs / 不建群 / 不调 AI。
-
-const REQUIRED_KEYS = ['name', 'summary', 'repos', 'prd', 'acceptance'] as const;
 
 function fillAllRequired() {
   return foldIntake([
@@ -28,10 +27,14 @@ function fillAllRequired() {
 }
 
 describe('INTAKE_CHECKLIST v1', () => {
-  it('定义 10 项，其中 5 项恒必填、ui 为条件必填', () => {
+  it('WS-6：name/summary/repos 恒必填；prd/acceptance 多仓必填(multi-conditional)；ui 条件必填', () => {
     expect(INTAKE_CHECKLIST).toHaveLength(10);
     const required = INTAKE_CHECKLIST.filter((d) => d.requirement === 'required').map((d) => d.key);
-    expect(required).toEqual([...REQUIRED_KEYS]);
+    expect(required).toEqual(['name', 'summary', 'repos']);
+    const multiCond = INTAKE_CHECKLIST.filter((d) => d.requirement === 'multi-conditional').map(
+      (d) => d.key,
+    );
+    expect(multiCond).toEqual(['prd', 'acceptance']);
     expect(INTAKE_CHECKLIST.find((d) => d.key === 'ui')?.requirement).toBe('conditional');
     expect(INTAKE_CHECKLIST.find((d) => d.key === 'repos')?.multi).toBe(true);
   });
@@ -148,6 +151,46 @@ describe('isGateReady / requiredMissing', () => {
     );
   });
 
+  // WS-6 复杂度自适应：单仓（≤1）lite——prd/acceptance 选填；多仓（≥2）满配。
+  it('单仓：name/summary/repos 齐即 gateReady（prd/acceptance 选填）', () => {
+    const s = foldIntake([
+      { key: 'name', value: 'n' },
+      { key: 'summary', value: 's' },
+      { key: 'repos', value: ['/abs/only'] },
+    ]);
+    expect(isGateReady(s)).toBe(true);
+    expect(requiredMissing(s)).toHaveLength(0);
+  });
+
+  it('填第 2 仓 → prd/acceptance 变必填，ready 翻 false、missing 含 prd/acceptance', () => {
+    const s = foldIntake([
+      { key: 'name', value: 'n' },
+      { key: 'summary', value: 's' },
+      { key: 'repos', value: ['/abs/a', '/abs/b'] },
+    ]);
+    expect(isGateReady(s)).toBe(false);
+    expect(requiredMissing(s).map((d) => d.key)).toEqual(['prd', 'acceptance']);
+  });
+
+  it('多仓补齐 prd/acceptance → ready 复真', () => {
+    const s = foldIntake([
+      { key: 'name', value: 'n' },
+      { key: 'summary', value: 's' },
+      { key: 'repos', value: ['/abs/a', '/abs/b'] },
+      { key: 'prd', value: 'p' },
+      { key: 'acceptance', value: 'a' },
+    ]);
+    expect(isGateReady(s)).toBe(true);
+  });
+
+  it('isDefRequired：multi-conditional 随 repos 数变（单仓 false / 多仓 true）', () => {
+    const single = foldIntake([{ key: 'repos', value: ['/a'] }]);
+    const multi = foldIntake([{ key: 'repos', value: ['/a', '/b'] }]);
+    const prd = INTAKE_CHECKLIST.find((d) => d.key === 'prd')!;
+    expect(isDefRequired(prd, single)).toBe(false);
+    expect(isDefRequired(prd, multi)).toBe(true);
+  });
+
   it('空 repos 数组（去空白后为空）建了字段但不算齐 → 未 ready，requiredMissing 含 repos', () => {
     let s = fillAllRequired();
     s = applyFieldInput(s, { key: 'repos', value: ['', '  '] });
@@ -160,13 +203,16 @@ describe('isGateReady / requiredMissing', () => {
 });
 
 describe('requiredProgress', () => {
-  it('随必填项填充与 uiRequired 变化', () => {
+  it('随必填项填充、repos 数、uiRequired 变化（WS-6：单仓 3 项 / 多仓 5 项）', () => {
     let s = initialIntakeState();
-    expect(requiredProgress(s)).toEqual({ filled: 0, total: 5 });
+    expect(requiredProgress(s)).toEqual({ filled: 0, total: 3 }); // 空/单仓：name/summary/repos
     s = applyFieldInput(s, { key: 'name', value: 'n' });
-    expect(requiredProgress(s)).toEqual({ filled: 1, total: 5 });
+    expect(requiredProgress(s)).toEqual({ filled: 1, total: 3 });
+    // 填 2 仓 → prd/acceptance 升必填 → total 5（repos 也算已填 → filled 2）
+    s = applyFieldInput(s, { key: 'repos', value: ['/a', '/b'] });
+    expect(requiredProgress(s)).toEqual({ filled: 2, total: 5 });
     s = applyFieldInput(s, { uiRequired: true });
-    expect(requiredProgress(s)).toEqual({ filled: 1, total: 6 });
+    expect(requiredProgress(s)).toEqual({ filled: 2, total: 6 });
   });
 });
 

@@ -96,10 +96,19 @@ describe('requirement lifecycle transitions', () => {
     expect(out.effects?.[0]).toMatchObject({ kind: 'intake_finalize' });
   });
 
-  it('repos_set（立项收尾提升 repos 后）在拆解阶段 → dispatch 首个 owner 对账 run', () => {
+  it('repos_set 多仓（≥2）在拆解阶段 → dispatch 首个 owner 对账 run（满配）', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.split });
-    const out = t.onEvent(item, ev('repos_set', { repos: ['/abs/a'] }));
+    const out = t.onEvent(item, ev('repos_set', { repos: ['/abs/a', '/abs/b'] }));
     expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'reconcile' } });
+  });
+
+  it('WS-6 repos_set 单仓 → lite：直跳并行实现 + 派 1 个 worker（跳过 owner 对账）', () => {
+    // 注意：applyReposSet 只写 DB、不改内存 item，onReposSet 里 item.repos 仍是旧值 → 以事件 payload 判 lite。
+    const item = makeWorkItem('wi-1', { phase: PHASE.split });
+    const out = t.onEvent(item, ev('repos_set', { repos: ['/abs/only'] }));
+    expect(out.phase).toEqual({ to: PHASE.implement, reason: 'lite_single_repo' });
+    expect(out.dispatch).toHaveLength(1);
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'worker', repo: '/abs/only' });
   });
 
   it('repos_set 在非拆解阶段不触发 run（防御，避免重复派）', () => {
@@ -238,7 +247,8 @@ describe('requirement lifecycle transitions', () => {
   });
 
   it('last worker (runningWorkers===0) → 监工 gate（gatekeeper_review）；放行后 owner assess，owner done→集成验证', () => {
-    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a'] });
+    // 多仓（满配）路径：单仓 lite 走另一条（gatekeeper_passed 直接进集成，见 WS-6 describe）。
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a', 'repo-b'] });
     const onWorker = t.onEvent(item, ev('run_completed', { role: 'worker', runningWorkers: 0 }));
     expect(onWorker.phase).toBeUndefined();
     // 不直接 assess——先过监工 gate。
@@ -403,7 +413,8 @@ describe('requirement lifecycle transitions', () => {
   });
 
   it('WS-1 resolve stalled_no_path 病历：approved → 重试当前阶段；declined → 重弹', () => {
-    const item = makeWorkItem('wi-1', { phase: PHASE.split });
+    // 多仓（拆解阶段自愈回 owner 对账）；单仓 lite 自愈派 worker，见 WS-6 describe。
+    const item = makeWorkItem('wi-1', { phase: PHASE.split, repos: ['repo-a', 'repo-b'] });
     const approved = t.onEvent(
       item,
       ev('wait_resolved', { decision: { approved: true }, resolvedWaitReason: 'stalled_no_path' }),
@@ -659,6 +670,47 @@ describe('requirement WS-5 打回带意见 + 监工判大返工通道', () => {
       ev('wait_resolved', {
         decision: { approved: true },
         resolvedWaitReason: 'reconcile_conflict',
+      }),
+    );
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'reconcile' } });
+  });
+});
+
+describe('requirement WS-6 复杂度自适应 lite 主线', () => {
+  it('gatekeeper_passed 单仓 lite → 跳过 assess 直接进集成验证', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['/abs/only'] });
+    const out = t.onEvent(item, ev('gatekeeper_passed', { approved: 0 }));
+    expect(out.phase).toEqual({ to: PHASE.integrate, reason: 'lite_skip_assess' });
+    expect(out.effects?.[0]).toMatchObject({ kind: 'integration_check' });
+  });
+
+  it('gatekeeper_passed 多仓 → 派 owner assess（现状）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['/abs/a', '/abs/b'] });
+    const out = t.onEvent(item, ev('gatekeeper_passed', { approved: 0 }));
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'assess' } });
+    expect(out.phase).toBeUndefined();
+  });
+
+  it('retryCurrentPhase：lite 单在拆解阶段自愈 → 派 worker（不派回 owner 对账）', () => {
+    // 防 stalled 自愈把 lite 单派回 owner 对账。用 stalled_no_path resolve 触发 retryCurrentPhase。
+    const item = makeWorkItem('wi-1', { phase: PHASE.split, repos: ['/abs/only'] });
+    const out = t.onEvent(
+      item,
+      ev('wait_resolved', {
+        decision: { approved: true },
+        resolvedWaitReason: 'stalled_no_path',
+      }),
+    );
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'worker', repo: '/abs/only' });
+  });
+
+  it('retryCurrentPhase：多仓在拆解阶段自愈 → 派 owner 对账（现状）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.split, repos: ['/abs/a', '/abs/b'] });
+    const out = t.onEvent(
+      item,
+      ev('wait_resolved', {
+        decision: { approved: true },
+        resolvedWaitReason: 'stalled_no_path',
       }),
     );
     expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'reconcile' } });

@@ -72,6 +72,7 @@ import {
   composeIntakeExtractPrompt,
   foldIntake,
   INTAKE_CHECKLIST,
+  isDefRequired,
   isFieldSatisfied,
   isGateReady,
   nextRequiredToFill,
@@ -308,8 +309,8 @@ function buildIntakeView(title: string, state: ReturnType<typeof foldIntake>): I
     return {
       label: d.label,
       done: isFieldSatisfied(f),
-      required:
-        d.requirement === 'required' || (d.requirement === 'conditional' && state.uiRequired),
+      // WS-6.3：与 requiredDefs 共用 isDefRequired 单一判定（含 multi-conditional 随 repos 数变），杜绝漂移。
+      required: isDefRequired(d, state),
       pending: f?.filledBy === 'ai-extracted' && !f.confirmed,
       value,
     };

@@ -83,7 +83,7 @@ export function requirementTransition(item: WorkItem, ev: WorkItemEvent): Transi
       return onRunFailed(item, ev);
     case 'repos_set':
       // 立项收尾把 repos 提升进 workitem 后才触发首个 owner 对账 run（确保 run 读到的 repos 已就位）。
-      return onReposSet(item);
+      return onReposSet(item, ev);
     case 'reconcile_passed':
       // 拆解阶段：owner 跨仓对账全咬合 → 拆解→并行实现（按仓分发）。
       // WS-5 implement 阶段：监工判大后人改图纸的重对账通过 → gatekeeper_rework effect 提取受影响仓 → 定向返工。
@@ -99,8 +99,12 @@ export function requirementTransition(item: WorkItem, ev: WorkItemEvent): Transi
     case 'reconcile_conflict':
       return onReconcileConflict(item, ev);
     case 'gatekeeper_passed':
-      // 监工放行（无跨仓外溢上报；判小的已回写图纸）→ 叫 owner 评估批次（assess）。
-      return item.phase === PHASE.implement ? { dispatch: [ownerSpec(item, 'assess')] } : {};
+      // 监工放行（无跨仓外溢上报；判小的已回写图纸）。多仓 → 叫 owner 评估批次（assess）；WS-6 单仓 lite →
+      // 跳过 assess（单仓无跨仓契约、impl-claims 无对象）直接进集成验证。
+      if (item.phase !== PHASE.implement) return {};
+      return isLite(item)
+        ? enterPhase(item, PHASE.integrate, 'lite_skip_assess', ev)
+        : { dispatch: [ownerSpec(item, STAGE.assess)] };
     case 'gatekeeper_big':
       return onGatekeeperBig(item, ev);
     case 'integration_check_passed':
@@ -264,9 +268,23 @@ function onIntakeFieldSet(item: WorkItem, ev: WorkItemEvent): Transition {
 // 立项收尾把立项收齐的 repos 提升进 workitem.repos（repos_set，由 intake_finalize emit）后，才 dispatch
 // 首个 owner 对账 run——保证 run 的 resolveCwd / readableDirs 读到的是用户的仓库，而非 run 与提升抢跑时
 // 落到的 defaultCwd（bot 自己的 cwd，真机暴露）。仅拆解阶段触发；owner 单飞门挡掉任何重复。
-function onReposSet(item: WorkItem): Transition {
+// WS-6：单仓（≤1）走 lite——跳过 owner 跨仓对账，直跳并行实现派 worker（split→implement 非 checkpoint
+// 边界，直跳合法）。≥2 仓走满配（派 owner 对账）。注意：applyReposSet 只写 DB、不改内存 item，故此处
+// item.repos 仍是提升前旧值——lite 判定 + worker 切分都以事件 payload 的 repos（正在提升的仓）为准。
+function onReposSet(item: WorkItem, ev: WorkItemEvent): Transition {
   if (item.phase !== PHASE.split) return {};
-  return { dispatch: [ownerSpec(item, 'reconcile')] };
+  const repos = reposSetOf(ev.payload);
+  if (repos.length <= 1) {
+    return {
+      phase: { to: PHASE.implement, reason: 'lite_single_repo' },
+      dispatch: workerDispatches(item, undefined, repos),
+    };
+  }
+  return { dispatch: [ownerSpec(item, STAGE.reconcile)] };
+}
+
+function isLite(item: WorkItem): boolean {
+  return item.repos.length <= 1;
 }
 
 // Phase-work done → either gate (raise the human wait, stay) or advance + run entry work.
@@ -382,7 +400,13 @@ function onWaitResolved(item: WorkItem, ev: WorkItemEvent): Transition {
 
 // run 失败病历被 approve（人已处理环境/问题）→ 重试当前阶段的入口工作。
 function retryCurrentPhase(item: WorkItem): Transition {
-  if (item.phase === PHASE.split) return { dispatch: [ownerSpec(item, 'reconcile')] };
+  // WS-6：lite 单在拆解阶段自愈（stalled_no_path 等 approve）→ 派 worker 而非 owner 对账（lite 从不过对账，
+  // 派回 owner 会跑错流程）。此处 item.repos 已提升（非 onReposSet 的旧值），isLite 可信。
+  if (item.phase === PHASE.split) {
+    return isLite(item)
+      ? { dispatch: workerDispatches(item, undefined) }
+      : { dispatch: [ownerSpec(item, STAGE.reconcile)] };
+  }
   if (item.phase === PHASE.implement) return { dispatch: workerDispatches(item, undefined) };
   if (item.phase === PHASE.integrate) return { effects: [{ kind: 'integration_check' }] };
   return {};
@@ -465,9 +489,13 @@ function ownerSpec(item: WorkItem, stage: string): AssignmentSpec {
 function workerDispatches(
   item: WorkItem,
   parentAssignmentId: string | undefined,
+  // WS-6：onReposSet 的 lite 路径在 item.repos 提升前调用（applyReposSet 只写 DB），须显式传入正在提升的
+  // 仓，否则读到旧的空 repos 会派 0 个 worker。其它调用点（reconcile_passed / retry）item.repos 已就位，省略即可。
+  reposOverride?: string[],
 ): AssignmentSpec[] {
   const t = ttlsOf(item);
-  const repos = item.repos.length > 0 ? item.repos : [''];
+  const source = reposOverride ?? item.repos;
+  const repos = source.length > 0 ? source : [''];
   return repos.map((repo) => ({
     role: 'worker' as const,
     repo: repo || undefined,
@@ -485,6 +513,12 @@ function priorIntakeEventsOf(payload: unknown): unknown[] {
 
 function openWaitReasonsOf(payload: unknown): string[] {
   const v = asObject(payload).openWaitReasons;
+  return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+}
+
+// WS-6：repos_set 事件 payload 携带的仓（正在提升进 workitem.repos 的仓）。onReposSet 据此判 lite + 切 worker。
+function reposSetOf(payload: unknown): string[] {
+  const v = asObject(payload).repos;
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
 }
 
