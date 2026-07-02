@@ -1,12 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { PHASE } from '../../src/worktypes/requirement/phases.js';
 import { checkpointGateLabel, checkpointRail } from '../../src/worktypes/requirement/lights.js';
+import { PHASE } from '../../src/worktypes/requirement/phases.js';
 
-describe('checkpointGateLabel (T3 灯标签)', () => {
+// PIVOT「两灯一 gate」：立项 gate（立项→拆解）+ 灯③（集成验证→交付）。理解/合同/详设的灯①② 已随设计外置砍掉。
+describe('checkpointGateLabel (灯标签)', () => {
   it('maps each checkpoint boundary to its 灯 + 边界文案', () => {
-    expect(checkpointGateLabel(PHASE.contract)).toBe('灯① 理解→合同');
-    expect(checkpointGateLabel(PHASE.design)).toBe('灯②(快) 合同→详设');
-    expect(checkpointGateLabel(PHASE.split)).toBe('灯②(慢) 详设→拆解');
+    expect(checkpointGateLabel(PHASE.split)).toBe('立项 立项→拆解');
     expect(checkpointGateLabel(PHASE.deliver)).toBe('灯③ 集成验证→交付');
   });
 
@@ -15,17 +14,15 @@ describe('checkpointGateLabel (T3 灯标签)', () => {
   });
 });
 
-describe('checkpointRail (T3 4 灯 rail)', () => {
+describe('checkpointRail (两灯一 gate rail)', () => {
   it('marks passed ✓ / active ● / future ○ relative to the boundary', () => {
-    // 灯① active: nothing passed yet
-    expect(checkpointRail(PHASE.contract)).toBe('●灯①  ○灯②(快)  ○灯②(慢)  ○灯③');
-    // 灯②慢 active: ①②快 passed, ③ future
-    expect(checkpointRail(PHASE.split)).toBe('✓灯①  ✓灯②(快)  ●灯②(慢)  ○灯③');
-    // 灯③ active: first three passed
-    expect(checkpointRail(PHASE.deliver)).toBe('✓灯①  ✓灯②(快)  ✓灯②(慢)  ●灯③');
+    // 立项 gate active: nothing passed yet
+    expect(checkpointRail(PHASE.split)).toBe('●立项  ○灯③');
+    // 灯③ active: 立项 gate passed
+    expect(checkpointRail(PHASE.deliver)).toBe('✓立项  ●灯③');
   });
 
   it('renders all-pending for an unknown boundary (never throws)', () => {
-    expect(checkpointRail('requirement:理解')).toBe('○灯①  ○灯②(快)  ○灯②(慢)  ○灯③');
+    expect(checkpointRail('requirement:理解')).toBe('○立项  ○灯③');
   });
 });

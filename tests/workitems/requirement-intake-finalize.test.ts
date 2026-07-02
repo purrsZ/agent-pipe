@@ -25,7 +25,7 @@ function fakeCtx(priorEvents: WorkItemEvent[]) {
       createdAt: 1,
       updatedAt: 1,
     },
-    workitem: makeWorkItem('wi-1', { type: 'requirement', phase: PHASE.understand }),
+    workitem: makeWorkItem('wi-1', { type: 'requirement', phase: PHASE.split }),
     signal: new AbortController().signal,
     clock: { now: () => 1000 },
     logger: {},

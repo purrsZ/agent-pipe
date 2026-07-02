@@ -154,12 +154,16 @@ export function computeImpact(diff: ContractDiff): string[] {
 // A p板 carries the contract fingerprint it was based on (固化 into decision.data). If any
 // contract change since then carries a DIFFERENT fingerprint, the p板 is stale → reject +
 // re-pop the card (the reject/re-pop lives in checkpoint-gate; here we只判定).
+//
+// PIVOT 后：合同变更引擎已砍，contract_change_applied/contract_patched 不再 emit，故此判定对当前
+// checkpoint（立项 gate / 灯③）实际恒返回 false（这两道关的 decision.data 也不固化 fingerprint）。保留为
+// worktype.isDecisionStale 的防御实现——一旦未来重新引入会改契约的事件，这套 stale 兜底即复活，无需改接线。
 export function isRequirementDecisionStale(
   decision: Decision,
   eventsSince: WorkItemEvent[],
 ): boolean {
   const baseFp = fingerprintField(decision.data);
-  if (!baseFp) return false; // no contract basis yet (理解 phase) → never stale.
+  if (!baseFp) return false; // no contract fingerprint basis → never stale.
   for (const ev of eventsSince) {
     if (ev.kind === 'contract_change_applied' || ev.kind === 'contract_patched') {
       const newFp = fingerprintField(ev.payload);

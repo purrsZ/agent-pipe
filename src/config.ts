@@ -39,6 +39,13 @@ export interface Config {
     token: string;
     operator: string;
   };
+  // 需求管控台 (React SPA) 的 JSON API + 静态托管。复用 workbench 的 host/token/operator（同一 owner、
+  // 同一单写入口），只另起一个端口与静态目录。CONSOLE_ENABLED 缺省跟随 workbench。
+  console: {
+    enabled: boolean;
+    port: number;
+    staticDir: string;
+  };
 }
 
 function parseAgent(v: string | undefined): AgentKind {
@@ -95,6 +102,14 @@ export function loadConfig(): Config {
   const workbenchToken = process.env.WORKBENCH_TOKEN ?? '';
   const workbenchOperator = process.env.WORKBENCH_OPERATOR?.trim() || allowed[0] || 'owner';
 
+  // 需求管控台：缺省跟随 workbench 开关；端口默认 7090；静态目录默认仓库内 web/dist（vite build 产物）。
+  const consoleEnabled =
+    (process.env.CONSOLE_ENABLED ?? String(workbenchEnabled)).trim().toLowerCase() !== 'false';
+  const consolePort = parsePositiveInt(process.env.CONSOLE_PORT, 7090, 'CONSOLE_PORT');
+  const consoleStaticDir = expandHome(
+    process.env.CONSOLE_STATIC_DIR ?? path.join(process.cwd(), 'web', 'dist'),
+  );
+
   return {
     feishu: { appId, appSecret },
     claude: {
@@ -126,6 +141,11 @@ export function loadConfig(): Config {
       port: workbenchPort,
       token: workbenchToken,
       operator: workbenchOperator,
+    },
+    console: {
+      enabled: consoleEnabled,
+      port: consolePort,
+      staticDir: consoleStaticDir,
     },
   };
 }

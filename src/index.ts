@@ -13,6 +13,8 @@ import {
   anchorAction,
   AUQ_ACTION_KIND,
   buildAnchorCard,
+  buildCaseFileAnsweredCard,
+  buildCaseFileCard,
   buildCheckpointAnsweredCard,
   buildCheckpointCard,
   buildProcessingCard,
@@ -37,6 +39,8 @@ import { composeRepoKnowledge, KNOWLEDGE_BUDGET_CHARS } from './knowledge/compos
 import { loadFreshnessPolicy } from './knowledge/freshness.js';
 import { KnowledgeStore } from './knowledge/store.js';
 import { createWorkitemsContainer, type WorkitemsContainer } from './workitems/container.js';
+import { createConsoleServer } from './console/server.js';
+import { buildRequirementBoard } from './worktypes/requirement/board.js';
 import { createWorkbenchAdapter } from './workitems/workbench-adapter.js';
 import { createTokenAuth } from './workbench/auth.js';
 import { createWorkbenchServer } from './workbench/server.js';
@@ -48,6 +52,8 @@ import { registerProbe } from './worktypes/probe/index.js';
 import { checkpointBoundaryOf } from './worktypes/requirement/checkpoint.js';
 import { registerRequirement } from './worktypes/requirement/index.js';
 import { createIntegrationCheckHandler } from './worktypes/requirement/integration.js';
+import { createGatekeeperReviewHandler } from './worktypes/requirement/gatekeeper.js';
+import { createReconcileCheckHandler } from './worktypes/requirement/reconcile.js';
 import { checkpointGateLabel, checkpointRail } from './worktypes/requirement/lights.js';
 import { createRequirementRunStrategy } from './worktypes/requirement/worker-handler.js';
 import { PendingIntakeStore } from './bridge/pending-intake.js';
@@ -121,6 +127,51 @@ async function fetchBotOpenId(client: any, logger: Logger): Promise<string> {
 // type-agnostic — it just takes the rendered noun.
 export function anchorNoun(type: string): string {
   return type === 'requirement' ? '需求' : '调查';
+}
+
+// 病历(非 checkpoint 的 human wait)的飞书卡标签。返回 undefined ⇒ 不是病历(不发病历卡)。
+// 放 index(kernel-exempt 桥层),故可用业务词。
+export function caseFileLabel(reason: string): string | undefined {
+  switch (reason) {
+    case 'reconcile_conflict':
+      return '跨仓对账 · 冲突/悬空';
+    case 'gatekeeper_big':
+      return '监工 · 跨仓外溢';
+    case 'run_failed':
+      return '执行报错';
+    case 'integration_unresolved':
+      return '集成验证 · 未通过';
+    default:
+      return undefined;
+  }
+}
+
+// 从事件历史里抽一句人类可读的病历详情(为什么卡住),喂进病历卡。永不抛,抽不到 → undefined。
+export function caseFileDetail(events: WorkItemEvent[], reason: string): string | undefined {
+  const kind = reason === 'integration_unresolved' ? 'integration_check_failed' : reason;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (!ev || ev.kind !== kind) continue;
+    const p = (typeof ev.payload === 'object' && ev.payload ? ev.payload : {}) as Record<
+      string,
+      unknown
+    >;
+    const pick = (arr: unknown, key: string): string | undefined => {
+      if (!Array.isArray(arr)) return undefined;
+      const parts = arr
+        .map((x) => (typeof x === 'object' && x ? (x as Record<string, unknown>)[key] : undefined))
+        .filter((s): s is string => typeof s === 'string' && s.length > 0)
+        .slice(0, 3);
+      return parts.length > 0 ? parts.join('；') : undefined;
+    };
+    if (reason === 'reconcile_conflict') return pick(p.unresolved, 'detail');
+    if (reason === 'gatekeeper_big') return pick(p.raises, 'question');
+    if (reason === 'integration_unresolved') {
+      return Array.isArray(p.breaking) ? `破坏性变更 ${p.breaking.length} 处` : undefined;
+    }
+    return undefined; // run_failed：无结构化详情，卡上只给类型 + 处理指引
+  }
+  return undefined;
 }
 
 // 立项清单事件流 → feishu 清单卡的中性视图。kernel-exempt：index 可 import worktypes 的 intake 纯核心，
@@ -265,12 +316,33 @@ async function main() {
       })
     : null;
 
+  // 需求管控台（React SPA 的 JSON API + 静态托管）。与 workbench 并存，复用同一 resolveWait 单写口、
+  // 同一本人 token。最佳努力：bind 失败不拖垮 bot（见下方 listen 的 error 监听）。
+  const consoleServer = config.console.enabled
+    ? createConsoleServer({
+        board: () =>
+          buildRequirementBoard({ store: workitems.store, artifacts: workitems.artifacts }),
+        resolve: ({ waitId, approved, reason }, operator) => {
+          const r = workitems.api.resolveWait(waitId, {
+            operator,
+            reason,
+            decision: { approved, payload: { reason } },
+          });
+          return { ok: r.resolved };
+        },
+        auth: createTokenAuth(config.workbench),
+        staticDir: config.console.staticDir,
+        logger,
+      })
+    : null;
+
   const releaseResources = createReleaseResources({
     pool,
     workitems,
     store,
     pidPath,
     workbenchServer,
+    consoleServer,
   });
   installCrashGuard(logger, releaseResources);
   scheduleDailyBackup(store, path.join(config.dataDir, 'backups'), logger, [workitems.backupJob()]);
@@ -726,7 +798,10 @@ async function main() {
   // /req (立项重塑, M-I2/3): /req 不再直接建单。bridge 先在原会话问群名（临时待答态），用户下一条
   // 普通消息即群名 → startIntakeGroup 建专属群发起立项。createWorkItem + claim + 清单卡都在
   // startIntakeGroup 里（建群成功后才建单）。
-  async function runRequirement(msg: IncomingMessage, opts: { description: string }): Promise<void> {
+  async function runRequirement(
+    msg: IncomingMessage,
+    opts: { description: string },
+  ): Promise<void> {
     pendingIntake.set(msg.userId, msg.chatId, opts.description, Date.now());
     const tail = opts.description ? `\n需求一句话：${opts.description}` : '';
     await sender.reply(
@@ -797,7 +872,10 @@ async function main() {
       { workitemId: item.id, groupChatId, anchorMsgId },
       'requirement intake group started',
     );
-    await sender.reply(msg.messageId, `已建群「${groupName}」并发起立项，请到群里继续把前置料收齐。`);
+    await sender.reply(
+      msg.messageId,
+      `已建群「${groupName}」并发起立项，请到群里继续把前置料收齐。`,
+    );
     await promptNextIntake(item.id, groupChatId);
   }
 
@@ -914,7 +992,10 @@ async function main() {
     const state = foldIntakeState(workitems.api.listEvents(item.id));
     const next = nextRequiredToFill(state);
     if (!next) {
-      await sender.sendText(msg.chatId, '必填项已齐 ✅ 点上方清单卡「立项完成 · 开始开发」即可开跑。');
+      await sender.sendText(
+        msg.chatId,
+        '必填项已齐 ✅ 点上方清单卡「立项完成 · 开始开发」即可开跑。',
+      );
       return;
     }
     if (next.key === 'repos') {
@@ -1142,13 +1223,34 @@ async function main() {
   ): Promise<void> {
     const itemId = typeof value.itemId === 'string' ? value.itemId : '';
     const waitId = typeof value.waitId === 'string' ? value.waitId : '';
-    const boundary = typeof value.boundary === 'string' ? value.boundary : '';
-    const approved = value.approved === true;
     if (!itemId || !waitId) {
       logger.warn({ itemId, waitId }, 'checkpoint card action missing itemId/waitId');
       return;
     }
-    // 飞书按钮无输入框，打回理由用固定文案；操作者 = 点按钮的飞书用户（已过白名单门）。
+    const title = workitems.api.getWorkItem(itemId)?.title ?? itemId;
+    const caseLabel = typeof value.caseLabel === 'string' ? value.caseLabel : '';
+    // 立项 gate 的「立项完成」按钮就在清单卡（= 单元锚点卡）上：点完不在此就地打补丁，交给 postStatus
+    // 把它 morph 成锚点卡，避免对同一张卡双改打架。独立卡（≠锚点卡）才就地补「已处理」。
+    const anchorId = store.getThreadAnchorByOwner(itemId);
+    const patch = async (card: object): Promise<void> => {
+      if (action.messageId && action.messageId !== anchorId) {
+        await sender.updateCard(action.messageId, card);
+      }
+    };
+
+    // 病历「取消整单」：resolve wait 带 cancel 决策 → onWaitResolved 认出 isCancelDecision → terminal cancelled。
+    if (value.cancel === true) {
+      const r = workitems.api.resolveWait(waitId, {
+        operator: action.operatorId,
+        reason: '飞书：取消整单',
+        decision: { approved: true, payload: { action: 'cancel' } },
+      });
+      await patch(buildCaseFileAnsweredCard(title, caseLabel || '病历', r.resolved));
+      return;
+    }
+
+    // 通过/打回（关卡灯 或 病历「已处理·继续」）。飞书按钮无输入框，理由用固定文案；操作者 = 点按钮的飞书用户。
+    const approved = value.approved === true;
     const reason = approved ? '飞书拍板：通过' : '飞书拍板：打回，请按反馈修改';
     const r = workbenchAdapter.actions.resolve({
       itemId,
@@ -1157,16 +1259,12 @@ async function main() {
       approved,
       reason,
     });
-    const title = workitems.api.getWorkItem(itemId)?.title ?? itemId;
-    const gateLabel = boundary ? checkpointGateLabel(boundary) : '检查点';
-    // 立项 gate 的「立项完成」按钮就在清单卡（= 单元锚点卡）上：点完不在此就地打补丁，交给 postStatus
-    // 把它 morph 成锚点卡（进理解），避免对同一张卡双改打架。独立 灯卡（≠锚点卡）才就地补「已通过/打回」。
-    const anchorId = store.getThreadAnchorByOwner(itemId);
-    if (action.messageId && action.messageId !== anchorId) {
-      await sender.updateCard(
-        action.messageId,
-        buildCheckpointAnsweredCard(title, gateLabel, r.ok ? approved : null),
-      );
+    if (caseLabel) {
+      await patch(buildCaseFileAnsweredCard(title, caseLabel, false));
+    } else {
+      const boundary = typeof value.boundary === 'string' ? value.boundary : '';
+      const gateLabel = boundary ? checkpointGateLabel(boundary) : '检查点';
+      await patch(buildCheckpointAnsweredCard(title, gateLabel, r.ok ? approved : null));
     }
   }
 
@@ -1205,7 +1303,10 @@ async function main() {
       if (pendingIntake.has(msg.userId, msg.chatId, Date.now())) {
         const groupName = msg.text.trim();
         if (!groupName) {
-          await sender.reply(msg.messageId, '群名不能为空，请回一条文字作为群名（比如「订单导出」）。');
+          await sender.reply(
+            msg.messageId,
+            '群名不能为空，请回一条文字作为群名（比如「订单导出」）。',
+          );
           return;
         }
         const naming = pendingIntake.take(msg.userId, msg.chatId, Date.now());
@@ -1236,10 +1337,7 @@ async function main() {
           // follow-up would hit the reducer terminal short-circuit (recorded, never dispatched)
           // — so reply honestly instead of promising a report that never comes.
           if (isTerminalStatus(item.status)) {
-            await sender.reply(
-              msg.messageId,
-              '该单元已结束，回复 `/done` 关闭后可重新发起。',
-            );
+            await sender.reply(msg.messageId, '该单元已结束，回复 `/done` 关闭后可重新发起。');
             return;
           }
           // 立项收料：群内普通消息当作「当前待填项」的值（缺哪项填哪项），写 intake_field_set 事件并
@@ -1389,6 +1487,19 @@ async function main() {
     });
   }
 
+  // 需求管控台同样最后拉起、best-effort（bind 失败只记日志，不拖垮 bot）。
+  if (consoleServer) {
+    consoleServer.on('error', (err) => {
+      logger.error({ err, port: config.console.port }, 'requirement console server error');
+    });
+    consoleServer.listen(config.console.port, config.workbench.host, () => {
+      logger.info(
+        { host: config.workbench.host, port: config.console.port },
+        'requirement console listening',
+      );
+    });
+  }
+
   startHeartbeat(logger, () => ({
     uptimeSec: Math.floor(process.uptime()),
     rssMb: Math.round(process.memoryUsage().rss / 1048576),
@@ -1450,17 +1561,27 @@ export function createWorkitemsRuntime(deps: {
     anchorMsgId: string,
   ): Promise<void> => {
     for (const w of workitems.store.listOpenWaits(workitemId)) {
-      if (w.kind !== 'human') continue;
+      if (w.kind !== 'human' || cardedWaits.has(w.id)) continue;
       const boundary = checkpointBoundaryOf(w.reason);
-      if (!boundary || cardedWaits.has(w.id)) continue;
+      // 关卡灯(checkpoint:*) → 灯卡(通过/打回)；病历(对账冲突/监工判大/执行报错/集成未决) → 病历卡
+      // (已处理·继续/取消整单)。二者皆非 → 跳过(如 cancel_confirm 走别的路径)。
+      const caseLabel = boundary ? undefined : caseFileLabel(w.reason);
+      if (!boundary && !caseLabel) continue;
       cardedWaits.add(w.id);
-      const posted = await deps.sender.replyCard(
-        anchorMsgId,
-        buildCheckpointCard(
-          { title, gateLabel: checkpointGateLabel(boundary), rail: checkpointRail(boundary) },
-          { itemId: workitemId, waitId: w.id, boundary },
-        ),
-      );
+      const card = boundary
+        ? buildCheckpointCard(
+            { title, gateLabel: checkpointGateLabel(boundary), rail: checkpointRail(boundary) },
+            { itemId: workitemId, waitId: w.id, boundary },
+          )
+        : buildCaseFileCard(
+            {
+              title,
+              label: caseLabel!,
+              detail: caseFileDetail(workitems.api.listEvents(workitemId), w.reason),
+            },
+            { itemId: workitemId, waitId: w.id },
+          );
+      const posted = await deps.sender.replyCard(anchorMsgId, card);
       if (!posted) cardedWaits.delete(w.id); // 发送失败 → 允许下一次事件重试
     }
   };
@@ -1542,6 +1663,12 @@ export function createWorkitemsRuntime(deps: {
   );
   // requirement 集成验证: static contract对账 effect (emits integration_check_passed/failed).
   workitems.effects.registerHandler(createIntegrationCheckHandler());
+  // requirement 拆解阶段 owner 跨仓对账: static reconcile_check effect (PIVOT §3.1)。读 owner 对账产物
+  // contract/reconcile.json + workitem.repos → emit reconcile_passed / reconcile_conflict（病历）。
+  workitems.effects.registerHandler(createReconcileCheckHandler());
+  // requirement 并行实现阶段监工科层 (PIVOT §4): static gatekeeper_review effect。扫各仓工人「疑则上报」→
+  // 跨仓外溢/疑则判大 emit gatekeeper_big（病历）/ 纯本仓判小回写图纸 emit gatekeeper_passed → owner assess。
+  workitems.effects.registerHandler(createGatekeeperReviewHandler());
   // 立项收尾 effect: 立项 gate 通过 → fold 立项填项历史 → 落立项书 intake/intake.md + 提升 repos
   // (emit repos_set)。注册在这里，与 agent-run / integration_check 同批，进理解时由 worktype 发起。
   workitems.effects.registerHandler(createIntakeFinalizeHandler());
@@ -1557,9 +1684,16 @@ export function createReleaseResources(deps: {
   // HTML 工作台 server — closed first so it stops accepting requests before the store/pool it
   // reads through are torn down. Optional/nullable: absent when WORKBENCH_ENABLED=false.
   workbenchServer?: { close(): void } | null;
+  // 需求管控台 server — 与 workbench 同样最先关停（停止读 store/pool）。可空：CONSOLE_ENABLED=false 时缺席。
+  consoleServer?: { close(): void } | null;
   removePidFile?: typeof removeOwnPidFile;
 }): () => void {
   return () => {
+    try {
+      deps.consoleServer?.close();
+    } catch {
+      /* ignore */
+    }
     try {
       deps.workbenchServer?.close();
     } catch {

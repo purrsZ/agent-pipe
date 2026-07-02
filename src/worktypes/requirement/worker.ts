@@ -36,6 +36,18 @@ export function composeWorkerPrompt(input: WorkerPromptInput): string {
   if (input.reworkNote && input.reworkNote.trim()) {
     lines.push('', '# 返工说明（在原活基础上改，不要从零重来）', input.reworkNote.trim());
   }
+  // 监工科层（C，rule #5 疑则上报）：冻结的跨仓契约由系统冻结、**不可擅改**。如你必须偏离契约、或你的
+  // 改动会外溢到别仓依赖的接口、或你拿不准是否碰了跨仓约束——别自己拍板改契约，在报告**最末尾**输出一个
+  // ```gatekeeper 块上报，交独立监工裁决（疑则就报、只会多报，安全）：
+  lines.push(
+    '',
+    '# 图纸疑问上报（冻结契约不可擅改 · 疑则上报，交监工裁决）',
+    '若需偏离冻结的跨仓契约 / 改动可能外溢到别仓依赖的接口 / 拿不准是否碰了跨仓约束，请在报告最末尾输出',
+    '且仅输出一个 ```gatekeeper 块（没有就别输出）。碰到跨仓契约接口时**务必**填它的 interfaceId：',
+    '```gatekeeper',
+    '{ "raises": [ { "interfaceId": "碰到的跨仓契约接口 id（纯本仓内部疑问则留空）", "question": "要偏离/协调什么", "repo": "本仓路径" } ] }',
+    '```',
+  );
   return lines.join('\n');
 }
 

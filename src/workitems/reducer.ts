@@ -722,35 +722,42 @@ export class ReducerRuntime {
   // interpretation (no phase compare), holding the container red-line.
   private enrichEventForType(item: WorkItem, event: WorkItemEvent): WorkItemEvent {
     if (this.topologyOf(item) !== 'owner-workers') return event;
+    const base = isObject(event.payload) ? event.payload : {};
+    // 当前 open waits 的 reason（中性字符串搬运，不解释语义）注入到**每一条** owner-workers 事件上，
+    // 让 worktype 的所有 raise-gate / advance 判定幂等——崩溃恢复重跑 effect（reconcile_check /
+    // integration_check 都是 recovery:'rerun'）再次 emit 判定事件时，若对应 checkpoint/病历 已 open，
+    // worktype 复用而非再 raise 一个孤儿 wait。容器只搬运字符串，不解释。
+    const openWaitReasons = this.deps.store.listOpenWaits(item.id).map((w) => w.reason);
     if (event.kind === 'run_completed' || event.kind === 'run_failed') {
+      // Owner snapshot fan-in (T4): a pure worktype can't count its own in-flight workers, so hand
+      // the run-conclusion event a strongly-consistent `runningWorkers` count.
       const runningWorkers = this.deps.store.countRunningWorkers(item.id);
-      return {
-        ...event,
-        payload: { ...(isObject(event.payload) ? event.payload : {}), runningWorkers },
-      };
+      return { ...event, payload: { ...base, runningWorkers, openWaitReasons } };
     }
     // 立项收料事件：把该单截至此刻的 intake 填项历史（payload 序列）中性搬运给 worktype，由它自行
-    // fold 出立项清单状态并判定 gate（容器不解释 payload 语义、不存清单状态——走纯事件溯源）。同
-    // runningWorkers 一样是 transient enrichment：只对本次 onEvent 可见，持久化/观察的 event 保持
-    // 干净（无 priorIntakeEvents 字段），solo 拓扑不受影响。
+    // fold 出立项清单状态并判定 gate（容器不解释 payload 语义、不存清单状态——走纯事件溯源）。
     if (event.kind === 'intake_field_set') {
       const priorIntakeEvents = this.deps.store
         .listEvents(item.id)
         .filter((e) => e.kind === 'intake_field_set')
         .map((e) => e.payload);
-      // 同时把当前 open waits 的 reason（中性字符串）交给 worktype，使其 gate 判定幂等：gate 已 raise
-      // 就别因后续补料重复 raise。容器不解释 reason，只搬运。
-      const openWaitReasons = this.deps.store.listOpenWaits(item.id).map((w) => w.reason);
+      return { ...event, payload: { ...base, priorIntakeEvents, openWaitReasons } };
+    }
+    // wait_resolved：把**被解析的那个 wait 的原始 reason** 中性搬运给 worktype（resolvedWaitReason），
+    // 让它精确路由——区分 checkpoint p板 / 取消确认病历 / 对账病历 / run 失败病历，而不必靠 phase 猜或
+    // 依赖 resolve 决策里恰好带某字段（生产 resolve 决策形状统一为 {approved,payload:{reason}}）。容器只
+    // 搬运 reason 字符串、不解释。containerTransition 已先关闭该 wait，但 wait.reason 字段在 resolve 后仍在。
+    if (event.kind === 'wait_resolved') {
+      const waitId = typeof base.waitId === 'string' ? base.waitId : undefined;
+      const wait = waitId ? this.deps.store.getWait(waitId) : undefined;
       return {
         ...event,
-        payload: {
-          ...(isObject(event.payload) ? event.payload : {}),
-          priorIntakeEvents,
-          openWaitReasons,
-        },
+        payload: { ...base, openWaitReasons, resolvedWaitReason: wait?.reason },
       };
     }
-    return event;
+    // 其它事件（reconcile_passed/_conflict、integration_check_passed/_failed …）：也带上 openWaitReasons，
+    // 使 worktype 的 reconcile_conflict 病历 / 灯③ checkpoint raise 幂等（崩溃恢复重跑 effect 不重复 raise）。
+    return { ...event, payload: { ...base, openWaitReasons } };
   }
 
   private releaseWakePending(item: WorkItem, seq: number, now: number): void {

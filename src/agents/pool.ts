@@ -218,6 +218,16 @@ export class AgentPool {
       return await runner.runTurn(text, callbacks, options);
     } finally {
       this.slots.release(high);
+      // A runner that disposed/killed itself mid-turn (e.g. the D-04 fail-closed probe abort) is a
+      // dead shell: not hot, so evictLRU (which only scans hot runners) never reclaims it → it would
+      // linger in the map forever AND could be re-selected by a same-taskId send as a stale
+      // disposed runner. Drop dead shells here so the next send rebuilds cleanly. Hot (reusable) and
+      // busy runners are left untouched — zero impact on the normal hot-reuse / LRU path.
+      const r = this.runners.get(task.id);
+      if (r && !r.isHot() && !r.isBusy()) {
+        this.runners.delete(task.id);
+        this.fingerprints.delete(task.id);
+      }
     }
   }
 

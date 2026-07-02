@@ -4,6 +4,8 @@ import {
   AUQ_ACTION_KIND,
   buildAnchorCard,
   buildCancelledCard,
+  buildCaseFileAnsweredCard,
+  buildCaseFileCard,
   buildCheckpointAnsweredCard,
   buildCheckpointCard,
   buildErrorCard,
@@ -179,6 +181,77 @@ describe('buildCheckpointCard (T3 灯卡)', () => {
       waitId: 'wt-9',
       approved: true,
     });
+  });
+});
+
+describe('buildCaseFileCard (病历卡)', () => {
+  const routing = { itemId: 'wi-1', waitId: 'wt-9' };
+
+  it('red header, label+detail, 已处理·继续 / 取消整单 两按钮(取消带 cancel:true)', () => {
+    const card = buildCaseFileCard(
+      { title: '自定义菜品备注', label: '跨仓对账 · 冲突/悬空', detail: '后端仓未列入' },
+      routing,
+    ) as { header: { template: string }; body: { elements: Array<Record<string, unknown>> } };
+    expect(card.header.template).toBe('red');
+    const json = JSON.stringify(card);
+    expect(json).toContain('跨仓对账 · 冲突/悬空');
+    expect(json).toContain('后端仓未列入');
+    expect(json).toContain('已处理');
+    expect(json).toContain('取消整单');
+
+    const buttons = card.body.elements.filter((e) => e.tag === 'button');
+    expect(buttons).toHaveLength(2);
+    const values = buttons.map(
+      (b) => (b.behaviors as Array<{ value: Record<string, unknown> }>)[0]!.value,
+    );
+    expect(values[0]).toEqual({
+      kind: CHECKPOINT_ACTION_KIND,
+      itemId: 'wi-1',
+      waitId: 'wt-9',
+      caseLabel: '跨仓对账 · 冲突/悬空',
+      approved: true,
+    });
+    expect(values[1]).toEqual({
+      kind: CHECKPOINT_ACTION_KIND,
+      itemId: 'wi-1',
+      waitId: 'wt-9',
+      caseLabel: '跨仓对账 · 冲突/悬空',
+      cancel: true,
+    });
+  });
+
+  it('parseCardAction round-trips the 取消整单 button (handler reads cancel:true back)', () => {
+    const card = buildCaseFileCard({ title: 't', label: '监工 · 跨仓外溢' }, routing) as {
+      body: { elements: Array<Record<string, unknown>> };
+    };
+    const cancelBtn = card.body.elements.filter((e) => e.tag === 'button')[1] as {
+      behaviors: Array<{ value: unknown }>;
+    };
+    const action = parseCardAction({
+      action: { value: cancelBtn.behaviors[0]!.value },
+      operator: { open_id: 'ou_owner' },
+    });
+    expect(action?.value).toMatchObject({
+      kind: CHECKPOINT_ACTION_KIND,
+      itemId: 'wi-1',
+      waitId: 'wt-9',
+      cancel: true,
+    });
+  });
+});
+
+describe('buildCaseFileAnsweredCard (病历卡终态)', () => {
+  it('grey 已取消整单 when cancelled', () => {
+    const card = buildCaseFileAnsweredCard('t', '跨仓对账', true) as {
+      header: { template: string };
+    };
+    expect(card.header.template).toBe('grey');
+    expect(JSON.stringify(card)).toContain('已取消整单');
+  });
+  it('green 已处理·继续 when not cancelled', () => {
+    const card = buildCaseFileAnsweredCard('t', '监工', false) as { header: { template: string } };
+    expect(card.header.template).toBe('green');
+    expect(JSON.stringify(card)).toContain('已处理');
   });
 });
 

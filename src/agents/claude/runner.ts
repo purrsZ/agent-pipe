@@ -14,7 +14,7 @@ import type {
   TurnResult,
 } from '../types.js';
 import { ClaudeParser } from './parser.js';
-import { buildWriteSettings, renderWriteGuardScript } from './write-guard.js';
+import { buildWriteSettings, probeWriteGuard, renderWriteGuardScript } from './write-guard.js';
 
 export interface ClaudeFactoryConfig {
   binPath: string;
@@ -45,6 +45,9 @@ export function buildClaudeArgs(p: {
   // --dangerously-skip-permissions (that would drop the dir limit, R04.AC-6).
   writableDirs?: string[];
   guardSettingsPath?: string;
+  // Read-widening only (any profile): extra dirs the agent may read via --add-dir. Lets a
+  // readonly 包工头 read every involved repo, not just cwd. --add-dir never grants write.
+  readableDirs?: string[];
 }): string[] {
   const args = [
     '-p',
@@ -69,6 +72,12 @@ export function buildClaudeArgs(p: {
     args.push('--disallowedTools', READONLY_DENIED_TOOLS);
   } else {
     args.push('--dangerously-skip-permissions');
+  }
+  // Read-scope widening, independent of the permission profile: --add-dir only widens which
+  // dirs tools may access, never narrows. For a readonly multi-repo 包工头 this is the only way
+  // it can read beyond cwd; combined with readonly's --disallowedTools it stays read-only.
+  if (p.readableDirs) {
+    for (const dir of p.readableDirs) args.push('--add-dir', dir);
   }
   if (p.mcpConfigPath) args.push('--mcp-config', p.mcpConfigPath, '--strict-mcp-config');
   if (p.sessionId) args.push('--resume', p.sessionId);
@@ -159,6 +168,23 @@ class ClaudeRunner implements Runner {
     }
     if (!this.proc || this.proc.killed) {
       this.spawn(options);
+      // D-04 fail-closed（B 阶段）：写档 run 在喂任何 prompt 之前，先探针验证 PreToolUse 写权限 hook
+      // 真生效（拦截 worktree 外的写、放行内部写）。hook 不生效（node 缺失/脚本坏/Claude 没认 --settings/
+      // 逻辑漏）→ 绝不放无防护的写 agent 跑：kill 刚 spawn 的进程（此刻它还没收到任何输入、零副作用）+
+      // 抛错（→ pool.send reject → effects 层 run_failed → onRunFailed 病历）。
+      if (options?.permission?.mode === 'write') {
+        const probe = this.guardPaths
+          ? await probeWriteGuard(this.guardPaths.script, options.writableDirs ?? [])
+          : { ok: false, reason: 'write run 缺少 PreToolUse 写权限 guard（无 writableDirs）' };
+        if (!probe.ok) {
+          this.deps.logger.error(
+            { taskId: this.taskId, reason: probe.reason },
+            'write-guard probe failed — fail-closed abort',
+          );
+          this.dispose();
+          throw new Error(`write-guard fail-closed: ${probe.reason}`);
+        }
+      }
     }
     this.state = 'busy';
     this.parser.reset();
@@ -277,6 +303,8 @@ class ClaudeRunner implements Runner {
       readonly,
       writableDirs: mode === 'write' ? (options?.writableDirs ?? []) : undefined,
       guardSettingsPath: this.guardPaths?.settings,
+      // 跨多仓的只读 owner：把涉及仓全部 --add-dir 进来，让它能读不止 cwd 一个仓。
+      readableDirs: options?.readableDirs,
     });
 
     const cleanEnv: Record<string, string | undefined> = { ...process.env };

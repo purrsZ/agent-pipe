@@ -156,6 +156,10 @@ export interface RunOptions {
   // only paths, never "repo" (kernel neutrality, D-04). Same source as the run's cwd
   // (worktreePathFor), so cwd + writableDirs always move together (R05.AC-7).
   writableDirs?: string[];
+  // Any profile: extra directories the agent may READ (--add-dir, read-widening only). A
+  // readonly 包工头 spanning multiple repos passes every repo here so it can read them all,
+  // not just cwd. Never grants write — readonly still --disallowedTools, write still guarded.
+  readableDirs?: string[];
 }
 
 /**

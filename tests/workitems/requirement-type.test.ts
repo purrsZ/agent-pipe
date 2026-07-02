@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import type { WorkItemEvent } from '../../src/workitems/types.js';
-import { PHASE } from '../../src/worktypes/requirement/phases.js';
-import { registerRequirement, requirementWorkType } from '../../src/worktypes/requirement/index.js';
 import { WorkTypeRegistry } from '../../src/workitems/registry.js';
+import type { WorkItemEvent } from '../../src/workitems/types.js';
+import { registerRequirement, requirementWorkType } from '../../src/worktypes/requirement/index.js';
+import { PHASE } from '../../src/worktypes/requirement/phases.js';
 import { makeWorkItem } from '../helpers/workitems.js';
 
 function ev(kind: string, payload: unknown = {}): WorkItemEvent {
@@ -11,18 +11,17 @@ function ev(kind: string, payload: unknown = {}): WorkItemEvent {
 
 const t = requirementWorkType;
 
+// PIVOT《设计外置·实现聚焦》：设计（理解/合同/详设 + 灯①②）已摘出 agent-pipe；新主线五相位「两灯一 gate」：
+//   立项 →[立项 gate]→ 拆解(owner 跨仓对账) → 并行实现 → 集成验证 →[灯③]→ 交付 →[灯④ close]
 describe('requirement WorkType definition', () => {
-  it('is an owner-workers write type starting at 立项, with 立项 gate + 4-light boundaries', () => {
+  it('is an owner-workers write type starting at 立项, with 立项 gate + 灯③ boundaries', () => {
     expect(t.id).toBe('requirement');
     expect(t.topology(makeWorkItem('wi-1'))).toBe('owner-workers');
     expect(t.permissions).toEqual({ mode: 'write' });
     expect(t.initialPhase(makeWorkItem('wi-1'))).toBe(PHASE.intake);
     expect(t.checkpoints.requiredBefore).toEqual([
-      PHASE.understand, // 立项 gate（立项→理解）
-      PHASE.contract,
-      PHASE.design,
-      PHASE.split,
-      PHASE.deliver,
+      PHASE.split, // 立项 gate（立项→拆解）
+      PHASE.deliver, // 灯③（集成验证→交付）
     ]);
     expect(t.artifacts.reportRequired).toBe(true);
   });
@@ -49,7 +48,7 @@ describe('requirement lifecycle transitions', () => {
       ev('intake_field_set', { priorIntakeEvents: [{ key: 'name', value: 'n' }] }),
     );
     expect(partial).toEqual({});
-    // all 5 required fields folded → raise the 立项 gate (理解 boundary), NOT a phase change.
+    // all 5 required fields folded → raise the 立项 gate (拆解 boundary), NOT a phase change.
     const ready = t.onEvent(
       item,
       ev('intake_field_set', {
@@ -65,7 +64,7 @@ describe('requirement lifecycle transitions', () => {
     expect(ready.phase).toBeUndefined();
     expect(ready.waits?.[0]).toMatchObject({
       kind: 'human',
-      reason: `checkpoint:${PHASE.understand}`,
+      reason: `checkpoint:${PHASE.split}`,
     });
   });
 
@@ -78,35 +77,33 @@ describe('requirement lifecycle transitions', () => {
       { key: 'prd', value: 'p' },
       { key: 'acceptance', value: 'a' },
     ];
-    // 容器 enrich 注入的 openWaitReasons 已含立项 gate（上一条填项已 raise）→ 补料只刷卡，不再 raise。
     const out = t.onEvent(
       item,
       ev('intake_field_set', {
         priorIntakeEvents: [...required, { key: 'scope', value: '边界' }],
-        openWaitReasons: [`checkpoint:${PHASE.understand}`],
+        openWaitReasons: [`checkpoint:${PHASE.split}`],
       }),
     );
     expect(out).toEqual({});
   });
 
-  it('立项 gate approved advances 立项 → 理解 + 发 intake_finalize effect（owner run 不在此派，改由 repos_set 触发）', () => {
+  it('立项 gate approved advances 立项 → 拆解 + 发 intake_finalize effect（owner run 不在此派，改由 repos_set 触发）', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.intake });
     const out = t.onEvent(item, ev('wait_resolved', { decision: { approved: true } }));
-    expect(out.phase).toEqual({ to: PHASE.understand, reason: 'checkpoint_approved' });
+    expect(out.phase).toEqual({ to: PHASE.split, reason: 'checkpoint_approved' });
     // 不在此 dispatch owner——否则与 repos 提升抢跑，run 会用空 repos 落到 defaultCwd 跑错仓（真机暴露）。
     expect(out.dispatch ?? []).toHaveLength(0);
-    // 立项收尾：落立项书 + 提升 repos（emit repos_set，从立项填项历史 fold）。
     expect(out.effects?.[0]).toMatchObject({ kind: 'intake_finalize' });
   });
 
-  it('repos_set（立项收尾提升 repos 后）在理解阶段 → dispatch 首个 owner understand run', () => {
-    const item = makeWorkItem('wi-1', { phase: PHASE.understand });
+  it('repos_set（立项收尾提升 repos 后）在拆解阶段 → dispatch 首个 owner 对账 run', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.split });
     const out = t.onEvent(item, ev('repos_set', { repos: ['/abs/a'] }));
-    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner' });
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'reconcile' } });
   });
 
-  it('repos_set 在非理解阶段不触发 run（防御，避免重复派）', () => {
-    const item = makeWorkItem('wi-1', { phase: PHASE.contract });
+  it('repos_set 在非拆解阶段不触发 run（防御，避免重复派）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
     const out = t.onEvent(item, ev('repos_set', { repos: ['/abs/a'] }));
     expect(out.dispatch ?? []).toHaveLength(0);
   });
@@ -114,76 +111,183 @@ describe('requirement lifecycle transitions', () => {
   it('立项 gate「驳回」(防御，无真驳回语义) 重弹立项 gate 而非卡死无 wait', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.intake });
     const out = t.onEvent(item, ev('wait_resolved', { decision: { approved: false } }));
-    // 料已齐：重弹立项 gate（不留下「停在立项却无 open wait」的死状态）。
     expect(out.phase).toBeUndefined();
     expect(out.waits?.[0]).toMatchObject({
       kind: 'human',
-      reason: `checkpoint:${PHASE.understand}`,
+      reason: `checkpoint:${PHASE.split}`,
     });
   });
 
   it('intake_field_set outside the 立项 phase is inert', () => {
-    const item = makeWorkItem('wi-1', { phase: PHASE.understand });
+    const item = makeWorkItem('wi-1', { phase: PHASE.split });
     expect(t.onEvent(item, ev('intake_field_set', { priorIntakeEvents: [] }))).toEqual({});
   });
 
-  it('灯① — owner done in 理解 raises a checkpoint wait, NOT a phase change', () => {
-    const item = makeWorkItem('wi-1', { phase: PHASE.understand });
+  it('拆解：owner 对账 run 收尾 → 起 reconcile_check effect（不直接推进）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.split });
     const out = t.onEvent(item, ev('run_completed', { role: 'owner' }));
     expect(out.phase).toBeUndefined();
-    expect(out.waits?.[0]).toMatchObject({ kind: 'human', reason: `checkpoint:${PHASE.contract}` });
+    expect(out.effects?.[0]).toMatchObject({ kind: 'reconcile_check' });
   });
 
-  it('灯① approved advances 理解 → 合同 and dispatches design owner', () => {
-    const item = makeWorkItem('wi-1', { phase: PHASE.understand });
-    const out = t.onEvent(item, ev('wait_resolved', { decision: { approved: true } }));
-    expect(out.phase).toEqual({ to: PHASE.contract, reason: 'checkpoint_approved' });
-    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner' });
-  });
-
-  it('灯① rejected stays in 理解 and re-dispatches the owner', () => {
-    const item = makeWorkItem('wi-1', { phase: PHASE.understand });
-    const out = t.onEvent(item, ev('wait_resolved', { decision: { approved: false } }));
-    expect(out.phase).toBeUndefined();
-    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner' });
-  });
-
-  it('split owner done enters 并行实现 and fans out one worker per repo, parented to the owner', () => {
+  it('reconcile_passed（全咬合）→ 拆解→并行实现，按仓分发一仓一 worker', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.split, repos: ['repo-a', 'repo-b'] });
-    const out = t.onEvent(item, ev('run_completed', { role: 'owner', assignmentId: 'as-owner' }));
-    expect(out.phase).toEqual({ to: PHASE.implement, reason: 'split_done' });
+    const out = t.onEvent(item, ev('reconcile_passed', { interfaces: 2 }));
+    expect(out.phase).toEqual({ to: PHASE.implement, reason: 'reconcile_passed' });
     expect(out.dispatch).toHaveLength(2);
-    for (const d of out.dispatch ?? []) {
-      expect(d).toMatchObject({ role: 'worker', parentAssignmentId: 'as-owner' });
-    }
+    for (const d of out.dispatch ?? []) expect(d).toMatchObject({ role: 'worker' });
     expect(out.dispatch?.map((d) => d.repo).sort()).toEqual(['repo-a', 'repo-b']);
   });
 
-  it('last worker (runningWorkers===0) wakes an owner to assess; owner done advances to 集成验证', () => {
+  it('reconcile_conflict（冲突/悬空）→ raise 人（病历），停在拆解，不推进', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.split });
+    const out = t.onEvent(
+      item,
+      ev('reconcile_conflict', {
+        unresolved: [{ kind: 'dangling', interfaceId: 'x', detail: 'd' }],
+      }),
+    );
+    expect(out.phase).toBeUndefined();
+    expect(out.waits?.[0]).toMatchObject({ kind: 'human', reason: 'reconcile_conflict' });
+  });
+
+  it('reconcile_conflict 幂等：病历已 open（openWaitReasons 含它）→ 不重复 raise', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.split });
+    const out = t.onEvent(
+      item,
+      ev('reconcile_conflict', { unresolved: [], openWaitReasons: ['reconcile_conflict'] }),
+    );
+    expect(out).toEqual({});
+  });
+
+  it('人 resolve 对账病历（拆解阶段, approved）→ 重派 owner 重对账（多轮收敛）；declined → 留在拆解', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.split });
+    // 容器在 wait_resolved 上注入被解析 wait 的 reason，worktype 据此精确路由。
+    const out = t.onEvent(
+      item,
+      ev('wait_resolved', {
+        decision: { approved: true },
+        resolvedWaitReason: 'reconcile_conflict',
+      }),
+    );
+    expect(out.phase).toBeUndefined();
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'reconcile' } });
+    // declined → 重弹同名病历（防死状态：病历必须一直 open 到 approve 或整单 /cancel），不是裸 {}。
+    const declined = t.onEvent(
+      item,
+      ev('wait_resolved', {
+        decision: { approved: false },
+        resolvedWaitReason: 'reconcile_conflict',
+      }),
+    );
+    expect(declined.waits?.[0]).toMatchObject({ kind: 'human', reason: 'reconcile_conflict' });
+  });
+
+  it('run_failed → raise 人病历（不静默卡死，容器对 run_failed 不自动重试）；幂等', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.split });
+    const out = t.onEvent(item, ev('run_failed', { role: 'owner' }));
+    expect(out.waits?.[0]).toMatchObject({ kind: 'human', reason: 'run_failed' });
+    // 病历已 open（容器注入 openWaitReasons）→ 不重复 raise 孤儿病历。
+    expect(t.onEvent(item, ev('run_failed', { openWaitReasons: ['run_failed'] }))).toEqual({});
+  });
+
+  it('resolve run_failed 病历（approved）→ 重试当前阶段入口工作', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a'] });
-    // single repo / last worker: the container injects runningWorkers:0 (absent ⇒ 0 too).
+    const out = t.onEvent(
+      item,
+      ev('wait_resolved', { decision: { approved: true }, resolvedWaitReason: 'run_failed' }),
+    );
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'worker' });
+  });
+
+  it('cancel_confirm 病历 resolve（approved，生产决策不带 action）→ 按 wait reason 路由到取消整单', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    const out = t.onEvent(
+      item,
+      ev('wait_resolved', {
+        decision: { approved: true, payload: { reason: 'ok' } },
+        resolvedWaitReason: 'cancel_confirm',
+      }),
+    );
+    expect(out).toEqual({ terminal: 'cancelled' });
+  });
+
+  it('非 checkpoint 阶段 resolve 一个普通决策（无 reason、无 action）不会误推进阶段', () => {
+    // implement 阶段 nextPhase=integrate 非 checkpoint 边界 → 不推进，杜绝「取消被误执行成推进集成」。
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    expect(
+      t.onEvent(
+        item,
+        ev('wait_resolved', { decision: { approved: true, payload: { reason: 'x' } } }),
+      ),
+    ).toEqual({});
+  });
+
+  it('群内消息：拆解阶段普通消息只记录、不重跑 owner（重对账走病历 resolve）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.split });
+    expect(t.onEvent(item, ev('human_message', { text: 'B 仓接口改名了' }))).toEqual({});
+  });
+
+  it('群内消息：实现/集成/交付阶段普通消息只记录（各自回路负责）', () => {
+    for (const phase of [PHASE.implement, PHASE.integrate, PHASE.deliver]) {
+      const item = makeWorkItem('wi-1', { phase });
+      expect(t.onEvent(item, ev('human_message', { text: '随手一句' }))).toEqual({});
+    }
+  });
+
+  it('last worker (runningWorkers===0) → 监工 gate（gatekeeper_review）；放行后 owner assess，owner done→集成验证', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a'] });
     const onWorker = t.onEvent(item, ev('run_completed', { role: 'worker', runningWorkers: 0 }));
     expect(onWorker.phase).toBeUndefined();
-    expect(onWorker.dispatch?.[0]).toMatchObject({ role: 'owner' });
+    // 不直接 assess——先过监工 gate。
+    expect(onWorker.effects?.[0]).toMatchObject({ kind: 'gatekeeper_review' });
+
+    // 监工放行 → owner assess。
+    const onPassed = t.onEvent(item, ev('gatekeeper_passed', { approved: 0 }));
+    expect(onPassed.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'assess' } });
 
     const onOwner = t.onEvent(item, ev('run_completed', { role: 'owner' }));
     expect(onOwner.phase).toEqual({ to: PHASE.integrate, reason: 'workers_done' });
   });
 
-  it('T4: a non-last worker (runningWorkers>0) rests — no owner assess until the batch is in', () => {
+  it('监工判大（gatekeeper_big：跨仓外溢/疑则）→ raise 人病历，停在实现；幂等', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    const out = t.onEvent(
+      item,
+      ev('gatekeeper_big', { raises: [{ interfaceId: 'x', question: 'q' }] }),
+    );
+    expect(out.waits?.[0]).toMatchObject({ kind: 'human', reason: 'gatekeeper_big' });
+    expect(t.onEvent(item, ev('gatekeeper_big', { openWaitReasons: ['gatekeeper_big'] }))).toEqual(
+      {},
+    );
+  });
+
+  it('人 resolve 监工病历：approved → owner assess；declined → 重弹病历（防死状态）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    const approved = t.onEvent(
+      item,
+      ev('wait_resolved', { decision: { approved: true }, resolvedWaitReason: 'gatekeeper_big' }),
+    );
+    expect(approved.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'assess' } });
+    const declined = t.onEvent(
+      item,
+      ev('wait_resolved', { decision: { approved: false }, resolvedWaitReason: 'gatekeeper_big' }),
+    );
+    expect(declined.waits?.[0]).toMatchObject({ kind: 'human', reason: 'gatekeeper_big' });
+  });
+
+  it('T4: a non-last worker (runningWorkers>0) rests — no 监工 gate until the batch is in', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a', 'repo-b'] });
-    // a sibling worker is still running → do nothing, wait for it.
     const early = t.onEvent(item, ev('run_completed', { role: 'worker', runningWorkers: 1 }));
     expect(early).toEqual({});
-    // the last worker (no siblings left) wakes the owner exactly once.
     const last = t.onEvent(item, ev('run_completed', { role: 'worker', runningWorkers: 0 }));
-    expect(last.dispatch?.[0]).toMatchObject({ role: 'owner' });
+    expect(last.effects?.[0]).toMatchObject({ kind: 'gatekeeper_review' });
   });
 
   it('T4: a worker conclusion with no runningWorkers field is treated as the last (back-compat)', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a'] });
     const out = t.onEvent(item, ev('run_completed', { role: 'worker' }));
-    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner' });
+    expect(out.effects?.[0]).toMatchObject({ kind: 'gatekeeper_review' });
   });
 
   it('T4: in 集成验证 a fix worker re-checks integration only once the whole fix batch is in', () => {
@@ -208,13 +312,20 @@ describe('requirement lifecycle transitions', () => {
     expect(out.dispatch).toBeUndefined();
   });
 
+  it('灯③ rejected stays in 集成验证 and re-runs the integration对账 effect', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.integrate });
+    const out = t.onEvent(item, ev('wait_resolved', { decision: { approved: false } }));
+    expect(out.phase).toBeUndefined();
+    expect(out.effects?.[0]).toMatchObject({ kind: 'integration_check' });
+  });
+
   it('灯④ — close in 交付 terminates done; elsewhere close is inert', () => {
     expect(
       t.onEvent(makeWorkItem('wi-1', { phase: PHASE.deliver }), ev('close_requested')),
     ).toEqual({ terminal: 'done' });
-    expect(
-      t.onEvent(makeWorkItem('wi-1', { phase: PHASE.understand }), ev('close_requested')),
-    ).toEqual({});
+    expect(t.onEvent(makeWorkItem('wi-1', { phase: PHASE.split }), ev('close_requested'))).toEqual(
+      {},
+    );
   });
 
   it('/cancel raises a confirm wait; a cancel decision then terminates cancelled', () => {
@@ -230,11 +341,11 @@ describe('requirement lifecycle transitions', () => {
   });
 
   it('a plain wait_resolved (no decision) does not advance phase (救场 resolve)', () => {
-    const item = makeWorkItem('wi-1', { phase: PHASE.understand });
+    const item = makeWorkItem('wi-1', { phase: PHASE.integrate });
     expect(t.onEvent(item, ev('wait_resolved', { reason: 'rescued' }))).toEqual({});
   });
 
-  it('isDecisionStale is never-stale in the skeleton (Stage 4 contract diff)', () => {
+  it('isDecisionStale is never-stale without a contract change (PIVOT 砍合同变更引擎)', () => {
     expect(t.isDecisionStale({ data: {} }, [])).toBe(false);
   });
 });

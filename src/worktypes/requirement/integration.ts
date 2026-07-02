@@ -8,11 +8,16 @@ import {
 } from './contract.js';
 
 // 集成验证 (R13). A dedicated, idempotent (recovery:'rerun') effect: the质检员 takes the
-// frozen contract as the standard and does a STATIC对账 against each端's claimed
-// implementation (workers write contract/impl-claims.json), via the shared
-// contractStructuralDiff (no re-implementation, D-06). Emits integration_check_passed /
+// cross-repo contract as the standard and does a STATIC对账 against each端's claimed
+// implementation (the owner assess run writes contract/impl-claims.json — single writer, after
+// the worker batch fans in), via the shared contractStructuralDiff (no re-implementation, D-06).
+// Emits integration_check_passed /
 // _failed; the worktype routes failures into the bounded fix loop. Reading各端 worktree code
 // for a richer对账 is the live extension — the structure here is the testable skeleton.
+//
+// PIVOT：基准 contract/contract.json 不再来自被砍的「合同冻结」相位，而是「拆解」phase 的 owner 跨仓
+// **对账**产物（reconcile.ts → afterRun 写同一路径）。这补上了「砍 contract 后灯③ 靠什么对账」——
+// 无对账契约（单仓/无跨仓接口）时仍走 no_contract 放行，有则 contractStructuralDiff 给灯③ 长牙。
 
 const MAX_FIX_ROUNDS = 2;
 

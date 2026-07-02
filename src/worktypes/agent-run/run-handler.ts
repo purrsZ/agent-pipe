@@ -16,6 +16,11 @@ export interface RunStrategy {
   composePrompt(args: {
     title: string;
     priorReport?: string;
+    // All run_completed report paths from the FULL event history (ascending). The owner assess
+    // run uses these to aggregate每仓 worker完成回执 (its own batch has no worker reports — they
+    // landed before the assess was dispatched). probe/worker strategies ignore it. Optional so
+    // pure unit tests may omit it (run-handler always supplies it in production).
+    priorReportPaths?: string[];
     followups: string[];
     workitem: WorkItem;
     assignment: Assignment;
@@ -30,10 +35,12 @@ export interface RunStrategy {
   /**
    * Optional post-run hook (SUCCESS path only). Runs AFTER report.md is persisted and BEFORE
    * onRunEnd. Lets a worktype derive artifacts from the run's own report WITHOUT forging a run
-   * conclusion — the requirement 合同-phase spec-design run uses it to升格 the report's structured
-   * contract draft into contract/contract.json (T5/A2). It is artifact-write only: it MUST NOT
-   * throw the run into failure (the handler swallows + logs any throw), so a parse miss degrades
-   * to an empty contract gated by the human at 灯②, never a crashed run. probe omits it (no-op).
+   * conclusion — the requirement owner runs use it: the 拆解 跨仓对账 run升格 the report's structured
+   * cross-repo contract into contract/contract.json + reconcile.json, and the 并行实现 assess run
+   * registers实现接口 into contract/impl-claims.json (灯③ 对账的实现侧). It is artifact-write only:
+   * it MUST NOT throw the run into failure (the handler swallows + logs any throw), so a parse miss
+   * degrades to an empty/absent artifact (downstream effects对账 or优雅放行), never a crashed run.
+   * probe omits it (no-op).
    */
   afterRun?(args: {
     report: string;
@@ -147,6 +154,9 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
   const batch = ctx.eventsSince(ctx.batchFromSeq);
   const priorReportPath = lastRunCompletedReportPath(batch);
   const priorReport = priorReportPath ? ctx.readArtifact(priorReportPath) : undefined;
+  // B 阶段（回执语义）：全历史的 run_completed 报告路径——owner assess 据此聚合各仓工人完成回执（assess 的
+  // batch 里没有工人报告，它们在 assess 被派之前就落了）。probe/worker 不读它。
+  const priorReportPaths = allRunCompletedReportPaths(ctx.eventsSince(0));
   const followups = batch
     .filter((e) => e.kind === 'human_message')
     .map(humanMessageText)
@@ -154,6 +164,7 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
   const prompt = strategy.composePrompt({
     title: workitemTitle(workitem),
     priorReport,
+    priorReportPaths,
     followups,
     workitem,
     assignment,
@@ -262,6 +273,18 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
   // M2 (merges WI-6): hand the report to the sink so the streaming card patches itself into
   // the report card. success path only — abort returns early above, failure throws before here.
   deps.progress?.onRunEnd({ assignmentId: assignment.id, outcome: 'success', report });
+}
+
+// All run_completed report paths in the given events (seq-ascending). The owner assess run reads
+// them to aggregate每仓 worker完成回执 across the whole history (its own batch has none).
+function allRunCompletedReportPaths(events: WorkItemEvent[]): string[] {
+  const out: string[] = [];
+  for (const ev of events) {
+    if (ev.kind !== 'run_completed') continue;
+    const p = ev.payload;
+    if (isObject(p) && typeof p.reportPath === 'string') out.push(p.reportPath);
+  }
+  return out;
 }
 
 function lastRunCompletedReportPath(batch: WorkItemEvent[]): string | undefined {

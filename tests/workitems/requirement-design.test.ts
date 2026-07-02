@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { contractFingerprint } from '../../src/worktypes/requirement/contract.js';
 import {
-  composeSpecDesignPrompt,
   type InternalApiEntry,
   parseInternalApis,
   promoteToContract,
@@ -120,50 +119,5 @@ describe('spec-design 输出解析 (parseInternalApis)', () => {
     expect(parseInternalApis('没有任何代码块的纯文本报告')).toEqual([]);
     expect(parseInternalApis('```json\n{ not valid json,, }\n```')).toEqual([]);
     expect(parseInternalApis('')).toEqual([]);
-  });
-});
-
-describe('spec-design prompt (composeSpecDesignPrompt)', () => {
-  it('asks for spec-design + a trailing json contract block, lists repos, and is not the readonly probe句', () => {
-    const prompt = composeSpecDesignPrompt({
-      title: '加跨端下单接口',
-      knowledge: 'backend 用 NestJS',
-      priorReport: '理解：要支持下单',
-      repos: ['backend', 'frontend'],
-    });
-    expect(prompt).toContain('spec-design');
-    expect(prompt).toContain('加跨端下单接口');
-    expect(prompt).toContain('```json'); // the structured contract block instruction
-    expect(prompt).toContain('providerRepo');
-    expect(prompt).toContain('- backend');
-    expect(prompt).toContain('- frontend');
-    expect(prompt).toContain('backend 用 NestJS'); // knowledge injected
-    expect(prompt).toContain('理解：要支持下单'); // prior report injected
-    // a real parser run over the prompt's own example block must NOT yield placeholder entries
-    // leaking as real interfaces (the example uses non-key placeholder strings that still coerce,
-    // so we only assert the prompt is design-oriented, not readonly-probe-oriented):
-    expect(prompt).not.toContain('只读的代码调查助手');
-  });
-
-  it('omits the repo / knowledge / prior sections when not provided', () => {
-    const prompt = composeSpecDesignPrompt({ title: '小需求', repos: [] });
-    expect(prompt).toContain('小需求');
-    expect(prompt).not.toContain('涉及的仓库');
-    expect(prompt).not.toContain('各仓已有知识');
-    expect(prompt).not.toContain('上一轮理解产物');
-  });
-
-  it('weaves in the intake brief (立项书) as the structured background', () => {
-    const prompt = composeSpecDesignPrompt({
-      title: '订单状态查询',
-      repos: ['backend'],
-      intakeBrief: '# 立项书：订单状态查询\n\n## 验收标准 / 完成定义\n输入订单号返回状态',
-    });
-    expect(prompt).toContain('立项书'); // brief section header
-    expect(prompt).toContain('输入订单号返回状态'); // 立项书全文喂进去，而非裸标题硬考古
-  });
-
-  it('omits the 立项书 section when no intake brief is provided (优雅降级回裸标题)', () => {
-    expect(composeSpecDesignPrompt({ title: '小需求', repos: [] })).not.toContain('立项书');
   });
 });

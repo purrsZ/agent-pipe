@@ -1,0 +1,312 @@
+import type { BoardData } from './types.js';
+
+// 原型 seed()/extra() 的假数据，逐字搬运 —— Phase 1 用它锁死 UI/交互还原度。
+// 接真 API 时（Phase 1 后半），把 App 里的 useState(SEED) 换成 fetch('/api/requirement-board') 即可，
+// 形状一致。
+export const SEED: BoardData = {
+  reqs: [
+    {
+      id: 'REQ-2041',
+      name: '商家结算账期可配置化',
+      status: 'inflight',
+      stageIndex: 3,
+      lights: ['passed', 'active-human', 'pending'],
+      waitOnHuman: true,
+      waitReason: '灯③验收：集成对账完成，等你确认进交付',
+      health: 'attention',
+      summary: 'payment-core 调整 settleCycle 字段类型 → 自动回灯②，等你拍板',
+      workers: [
+        {
+          repo: 'payment-core',
+          task: '账期计算与冻结快照',
+          state: 'paused',
+          selftest: 'na',
+          detail:
+            '已暂停：等待契约确认后继续。分支 feat/settle-cycle，最近改动涉及 settleCycle 字段类型。',
+        },
+        {
+          repo: 'merchant-api',
+          task: '账期配置读写接口',
+          state: 'running',
+          selftest: 'green',
+          detail: '12/12 用例通过 · 最近提交 4 分钟前。不受本次契约变更影响。',
+        },
+        {
+          repo: 'settlement-job',
+          task: '对账批处理改造',
+          state: 'blocked',
+          selftest: 'red',
+          detail: '依赖 payment-core 新字段，3 个用例红。等契约确认后回灯②继续。',
+        },
+      ],
+      contract: {
+        frozen: true,
+        version: 'v3',
+        breaking: true,
+        note: 'settleCycle: int → enum(WEEKLY/MONTHLY/CUSTOM)，影响 settlement-job 的批处理读取逻辑。',
+      },
+      integration: { round: 0, diffs: 0, status: '未开始' },
+      decisions: [
+        { type: '拍板', text: '范围确认：账期上限 90 天', who: '你 · 06-19' },
+        { type: '拍板', text: '灯① 需求确认通过', who: '你 · 06-18' },
+        { type: '自治', text: '拆解生成 6 个 workitem，分派 3 仓', who: '系统 · 06-18' },
+      ],
+      humanWaits: [
+        {
+          waitId: 'seed-wait-2041',
+          title: '灯② 契约冻结确认',
+          desc: '存在破坏性变更，需你确认是否接受该字段调整。',
+          age: '已等待 2 时 14 分',
+        },
+      ],
+      agentWaits: [],
+    },
+    {
+      id: 'REQ-2038',
+      name: '优惠券叠加规则引擎',
+      status: 'inflight',
+      stageIndex: 3,
+      lights: ['passed', 'active-agent', 'pending'],
+      waitOnHuman: false,
+      waitReason: '',
+      health: 'ok',
+      summary: '集成验证第 2 轮：3 处差异自动修复中（约 8 分钟）',
+      workers: [
+        {
+          repo: 'promo-engine',
+          task: '叠加规则求解器',
+          state: 'done',
+          selftest: 'green',
+          detail: '实现完成 · 38/38 用例通过。',
+        },
+        {
+          repo: 'order-api',
+          task: '下单时规则校验',
+          state: 'done',
+          selftest: 'green',
+          detail: '实现完成 · 21/21 用例通过。',
+        },
+        {
+          repo: 'promo-admin',
+          task: '规则配置后台',
+          state: 'running',
+          selftest: 'amber',
+          detail: '集成差异修复中：金额精度对齐（分 vs 元），修复后自测回绿。',
+        },
+      ],
+      contract: {
+        frozen: true,
+        version: 'v2',
+        breaking: false,
+        note: '契约稳定，三仓接口一致，无破坏性变更。',
+      },
+      integration: { round: 2, diffs: 3, status: '修复中' },
+      decisions: [
+        {
+          type: '自治',
+          text: '集成验证轮次 1→2：自动修复 order-api 字段映射',
+          who: '系统 · 06-21',
+        },
+        { type: '自治', text: 'promo-engine 单测瞬时失败，重试 2 次后恢复', who: '系统 · 06-21' },
+        { type: '拍板', text: '灯② 契约冻结通过', who: '你 · 06-20' },
+      ],
+      humanWaits: [],
+      agentWaits: [
+        {
+          title: '集成验证 第 2 轮',
+          desc: '3 处差异修复中，完成后各仓自测回绿并进灯③。',
+          age: '预计 ~8 分钟',
+        },
+      ],
+    },
+    {
+      id: 'REQ-2052',
+      name: '风控名单批量导入工具',
+      status: 'inflight',
+      stageIndex: 1,
+      lights: ['passed', 'pending', 'pending'],
+      waitOnHuman: false,
+      waitReason: '',
+      health: 'ok',
+      summary: '拆解阶段：owner 跨仓对账中，咬合后自动按仓分发',
+      workers: [
+        {
+          repo: 'risk-list-svc',
+          task: '（待拆解后分派）',
+          state: 'running',
+          selftest: 'na',
+          detail: '设计 agent 起草接口与数据模型中，完成后进入拆解阶段。',
+        },
+      ],
+      contract: {
+        frozen: false,
+        version: '—',
+        breaking: false,
+        note: '契约尚未冻结（仍在设计阶段）。',
+      },
+      integration: { round: 0, diffs: 0, status: '未开始' },
+      decisions: [
+        { type: '拍板', text: '灯① 需求确认通过', who: '你 · 06-21' },
+        { type: '自治', text: '读取需求文档，生成理解摘要', who: '系统 · 06-21' },
+      ],
+      humanWaits: [],
+      agentWaits: [
+        {
+          title: '设计稿生成',
+          desc: '完成后进入拆解，自动生成 workitem 并分派。',
+          age: '预计 ~15 分钟',
+        },
+      ],
+    },
+    { id: 'REQ-2030', name: '退款时效看板', status: 'done', when: '06-15 已上线' },
+    { id: 'REQ-2027', name: '商品标签体系重构', status: 'done', when: '06-12 已上线' },
+  ],
+  extra: {
+    'REQ-2041': {
+      progress: 48,
+      wiDone: 3,
+      wiTotal: 6,
+      elapsed: '3 天 6 时',
+      eta: '受阻 · 待你拍板',
+      etaWarn: true,
+      owner: 'agent-pipe',
+      focus: {
+        text: 'payment-core 的 settleCycle 字段类型变更被判定为破坏性，流程已自动回灯②并暂停下游 —— 等你确认是否接受该变更。',
+        tone: 'human',
+      },
+      events: [
+        { kind: 'ok', text: 'merchant-api 提交 a3f91c，12/12 用例通过', when: '4 分钟前' },
+        { kind: 'human', text: '灯② 契约冻结确认 — 等待你的拍板', when: '2 时 14 分前' },
+        {
+          kind: 'error',
+          text: 'settlement-job 自测失败 0/3，依赖未冻结的新字段',
+          when: '2 时 18 分前',
+        },
+        {
+          kind: 'system',
+          text: '检测到 settleCycle 类型变更，判定破坏性 → 自动回灯②，暂停 payment-core / settlement-job',
+          when: '2 时 20 分前',
+        },
+        { kind: 'agent', text: 'payment-core 起草账期冻结快照逻辑', when: '昨天 18:40' },
+      ],
+      workitems: [
+        {
+          code: 'WI-1',
+          repo: 'merchant-api',
+          title: '账期配置读写接口',
+          state: 'done',
+          tests: '12/12',
+        },
+        {
+          code: 'WI-2',
+          repo: 'merchant-api',
+          title: '配置校验与默认值',
+          state: 'done',
+          tests: '6/6',
+        },
+        { code: 'WI-3', repo: 'payment-core', title: '账期计算', state: 'done', tests: '9/9' },
+        {
+          code: 'WI-4',
+          repo: 'payment-core',
+          title: '冻结快照与字段调整',
+          state: 'paused',
+          tests: '—',
+        },
+        {
+          code: 'WI-5',
+          repo: 'settlement-job',
+          title: '对账批处理改造',
+          state: 'blocked',
+          tests: '0/3',
+        },
+        { code: 'WI-6', repo: 'settlement-job', title: '历史数据迁移', state: 'todo', tests: '—' },
+      ],
+      risks: [
+        {
+          level: 'high',
+          title: 'settlement-job 受阻',
+          detail: '依赖 payment-core 未冻结字段，3 用例红，需先确认灯②契约才能继续。',
+        },
+      ],
+    },
+    'REQ-2038': {
+      progress: 82,
+      wiDone: 7,
+      wiTotal: 8,
+      elapsed: '5 天 2 时',
+      eta: '~8 分钟进灯③',
+      etaWarn: false,
+      owner: 'agent-pipe',
+      focus: {
+        text: '集成验证第 2 轮：promo-admin 金额精度差异自动修复中，完成后各仓自测回绿并进灯③验收 —— 暂不需要你介入。',
+        tone: 'agent',
+      },
+      events: [
+        { kind: 'agent', text: 'promo-admin 修复金额精度（分/元）对齐，重跑自测中', when: '刚刚' },
+        {
+          kind: 'system',
+          text: '集成验证 1→2 轮：自动修复 order-api 字段映射差异 2 处',
+          when: '12 分钟前',
+        },
+        { kind: 'ok', text: 'promo-engine 38/38、order-api 21/21 自测通过', when: '40 分钟前' },
+        { kind: 'agent', text: 'promo-engine 单测瞬时失败，重试 2 次后恢复', when: '1 时前' },
+        { kind: 'human', text: '灯② 契约冻结通过', when: '06-20' },
+      ],
+      workitems: [
+        {
+          code: 'WI-1',
+          repo: 'promo-engine',
+          title: '叠加规则求解器',
+          state: 'done',
+          tests: '38/38',
+        },
+        {
+          code: 'WI-2',
+          repo: 'promo-engine',
+          title: '优先级与互斥矩阵',
+          state: 'done',
+          tests: '15/15',
+        },
+        { code: 'WI-3', repo: 'order-api', title: '下单规则校验', state: 'done', tests: '21/21' },
+        { code: 'WI-4', repo: 'order-api', title: '金额计算管线', state: 'done', tests: '18/18' },
+        { code: 'WI-5', repo: 'promo-admin', title: '规则配置 CRUD', state: 'done', tests: '9/9' },
+        { code: 'WI-6', repo: 'promo-admin', title: '规则预览与仿真', state: 'done', tests: '7/7' },
+        {
+          code: 'WI-7',
+          repo: 'promo-admin',
+          title: '金额精度展示',
+          state: 'running',
+          tests: '3/4',
+        },
+        { code: 'WI-8', repo: 'promo-admin', title: '操作审计日志', state: 'done', tests: '5/5' },
+      ],
+      risks: [
+        {
+          level: 'mid',
+          title: 'promo-admin 自测部分',
+          detail: '金额精度修复中（3/4），属本轮集成差异，预计修复后回绿。',
+        },
+      ],
+    },
+    'REQ-2052': {
+      progress: 12,
+      wiDone: 0,
+      wiTotal: 0,
+      elapsed: '6 时',
+      eta: '~15 分钟出设计稿',
+      etaWarn: false,
+      owner: 'agent-pipe',
+      focus: {
+        text: '设计 agent 正在起草接口与数据模型，完成后自动拆解为 workitem 并分派各仓 —— 暂不需要你介入。',
+        tone: 'agent',
+      },
+      events: [
+        { kind: 'agent', text: '起草批量导入接口与名单数据模型', when: '进行中' },
+        { kind: 'ok', text: '生成需求理解摘要，等待你后续抽查', when: '5 时前' },
+        { kind: 'human', text: '灯① 需求确认通过', when: '6 时前' },
+      ],
+      workitems: [],
+      risks: [],
+    },
+  },
+};

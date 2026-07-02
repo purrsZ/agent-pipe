@@ -574,7 +574,8 @@ export function buildCheckpointCard(
     '',
     `<font color="grey">${data.rail}</font>`,
     '',
-    '通过 → 进入下一步；打回 → 退回本阶段按反馈重做。',
+    '通过 → 进入下一步。',
+    '要改 → **直接在群里回复要改什么**，我据此重做（也可点【打回】退回重做）。',
   ].join('\n');
   const button = (text: string, type: string, approved: boolean): object => ({
     tag: 'button',
@@ -607,6 +608,98 @@ export function buildCheckpointCard(
         { tag: 'markdown', content: lines },
         button('通过', 'primary', true),
         button('打回', 'default', false),
+      ],
+    },
+  };
+}
+
+export interface CaseFileCardRouting {
+  itemId: string;
+  waitId: string;
+}
+
+/**
+ * Interactive 病历卡 (case file) — for a raised human wait that is NOT a routine 关卡 checkpoint
+ * (对账冲突 / 监工判大 / 执行报错 / 集成未决). Unlike a 灯卡's 通过/打回, a 病历 offers【已处理·继续】
+ * (the human fixed / accepted it → the caller's forward action) and【取消整单】(abandon the whole
+ * unit — the only clean exit for a 病历 that keeps re-raising, e.g. an un-resolvable对账). Both
+ * funnel through the same card-action handler; the cancel button carries `cancel:true` so the
+ * handler resolves the wait with a cancel decision (→ terminal cancelled). Kept kernel-neutral
+ * (no upper-layer vocabulary) so this file holds the architecture red-line.
+ */
+export function buildCaseFileCard(
+  data: { title: string; label: string; detail?: string },
+  routing: CaseFileCardRouting,
+): object {
+  const title = data.title.length > 40 ? `${data.title.slice(0, 40)}…` : data.title;
+  const lines = [
+    `**${data.label}** — 系统卡住了，需要你裁决`,
+    ...(data.detail && data.detail.trim()
+      ? ['', `<font color="grey">${data.detail.trim()}</font>`]
+      : []),
+    '',
+    '处理好后点【已处理·继续】我接着往下推；这条推不动就点【取消整单】放弃。',
+  ].join('\n');
+  const button = (text: string, type: string, extra: Record<string, unknown>): object => ({
+    tag: 'button',
+    text: { tag: 'plain_text', content: text },
+    type,
+    width: 'default',
+    behaviors: [
+      {
+        type: 'callback',
+        value: {
+          kind: CHECKPOINT_ACTION_KIND,
+          itemId: routing.itemId,
+          waitId: routing.waitId,
+          caseLabel: data.label,
+          ...extra,
+        },
+      },
+    ],
+  });
+  return {
+    schema: '2.0',
+    header: {
+      template: 'red',
+      title: { tag: 'plain_text', content: `需要你裁决 · ${title}` },
+    },
+    body: {
+      direction: 'vertical',
+      padding: '12px',
+      elements: [
+        { tag: 'markdown', content: lines },
+        button('已处理·继续', 'primary', { approved: true }),
+        button('取消整单', 'danger', { cancel: true }),
+      ],
+    },
+  };
+}
+
+/** Terminal patch for a 病历卡 after a button click (已处理继续 / 已取消整单). */
+export function buildCaseFileAnsweredCard(
+  title: string,
+  label: string,
+  cancelled: boolean,
+): object {
+  const head = title.length > 40 ? `${title.slice(0, 40)}…` : title;
+  const verb = cancelled ? '已取消整单' : '已处理·继续';
+  return {
+    schema: '2.0',
+    header: {
+      template: cancelled ? 'grey' : 'green',
+      title: { tag: 'plain_text', content: `${verb} · ${head}` },
+    },
+    body: {
+      direction: 'vertical',
+      padding: '12px',
+      elements: [
+        {
+          tag: 'markdown',
+          content: cancelled
+            ? `**${label}**：已取消整个需求。`
+            : `**${label}**：已按你的处理继续推进…`,
+        },
       ],
     },
   };
