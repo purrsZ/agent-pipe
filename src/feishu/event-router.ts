@@ -78,6 +78,127 @@ export function extractPostText(raw: any): string {
   return [title, ...lines].filter((s) => s.length > 0).join('\n');
 }
 
+/**
+ * WS-4：把「原始飞书 data → IncomingMessage」的解析抽成导出纯函数，im.message.receive_v1（推送）与
+ * 断线补拉（im.message.list 拉回、经 {@link adaptListMessageToEventData} 拍成同形状）共用一份，避免两份漂移。
+ * 只负责解析，不含 botStartTime 时间门与去重（那是 dispatcher/补拉各自的策略）。永不抛：坏结构 → null。
+ */
+export function parseIncomingMessage(data: unknown, botOpenId: string): IncomingMessage | null {
+  try {
+    const d = data as any;
+    const message = d?.message;
+    const sender = d?.sender;
+    if (!message || !sender) return null;
+
+    // C1（审查）：message_id/chat_id/create_time 是 inbox 落库的必填键。缺 id 或 create_time 非数字 →
+    // 若放行会撞 inbox 的 NOT NULL 约束被 INSERT OR IGNORE 静默吞成「重复」永久丢。这里当无效消息 → null。
+    const createTime = Number.parseInt(message.create_time, 10);
+    if (!message.message_id || !message.chat_id || !Number.isFinite(createTime)) return null;
+
+    const chatType = message.chat_type as 'p2p' | 'group';
+    if (chatType !== 'p2p' && chatType !== 'group') return null;
+    const msgType = message.message_type as string;
+    if (msgType !== 'text' && msgType !== 'post' && msgType !== 'file' && msgType !== 'image')
+      return null;
+
+    const rawMentions = (message.mentions ?? []) as Array<{
+      id?: { open_id?: string };
+      name?: string;
+    }>;
+    let isMentioned = chatType === 'p2p';
+    if (chatType === 'group' && botOpenId) {
+      isMentioned = rawMentions.some((m) => m.id?.open_id === botOpenId);
+    }
+    const mentions = rawMentions
+      .filter((m) => m.id?.open_id && m.id.open_id !== botOpenId)
+      .map((m) => ({ openId: m.id!.open_id!, name: m.name ?? '' }));
+
+    const content = JSON.parse(message.content);
+    let text = '';
+    const attachments: Attachment[] = [];
+
+    if (msgType === 'text') {
+      text = (content.text ?? '').replace(/@_user_\w+/g, '').trim();
+      if (!text) return null;
+    } else if (msgType === 'post') {
+      // 富文本（post）：拍平正文为纯文本（含链接 URL），让群里粘带格式/文档链接的收料也能进。
+      text = extractPostText(content)
+        .replace(/@_user_\w+/g, '')
+        .trim();
+      if (!text) return null;
+    } else if (msgType === 'file') {
+      const fk = content.file_key;
+      if (!fk) return null;
+      attachments.push({
+        kind: 'file',
+        fileKey: fk,
+        name: content.file_name ?? `file-${message.message_id}`,
+      });
+    } else if (msgType === 'image') {
+      const ik = content.image_key;
+      if (!ik) return null;
+      attachments.push({ kind: 'image', fileKey: ik, name: `image-${message.message_id}.png` });
+    }
+
+    return {
+      messageId: message.message_id,
+      chatId: message.chat_id,
+      chatType,
+      userId: sender.sender_id?.open_id ?? '',
+      text,
+      parentId: message.parent_id || undefined,
+      rootId: message.root_id || undefined,
+      threadId: message.thread_id || undefined,
+      isMentioned,
+      mentions,
+      attachments,
+      createTime,
+    };
+  } catch {
+    // JSON.parse / 字段异常一律吞成 null（对齐 extractPostText 的「永不抛」风格）。
+    return null;
+  }
+}
+
+/**
+ * WS-4：把 im.message.list 返回的历史消息 item 拍成 im.message.receive_v1 的 data 形状，供
+ * {@link parseIncomingMessage} 复用同一解析。两者字段有差异：list 用 msg_type / body.content /
+ * sender.id（字符串 open_id）/ mention.id（字符串），推送用 message_type / content / sender.sender_id.open_id /
+ * mention.id.open_id。list item 不带 chat_type，调用方（backfill）按 thread_claims 记录的 chat_type 显式传入
+ * （C7 审查修复：p2p managed 会话若默认 group + 无 @ 会被 handleIncoming 群门丢弃）；缺省仍按 'group'。
+ */
+export function adaptListMessageToEventData(
+  rawItem: unknown,
+  chatType: 'p2p' | 'group' = 'group',
+): unknown {
+  const it = (rawItem ?? {}) as any;
+  const rawMentions = Array.isArray(it.mentions) ? it.mentions : [];
+  return {
+    message: {
+      message_id: it.message_id,
+      chat_id: it.chat_id,
+      chat_type: it.chat_type ?? chatType,
+      message_type: it.msg_type,
+      content: it.body?.content ?? '{}',
+      create_time: String(it.create_time ?? ''),
+      parent_id: it.parent_id ?? '',
+      root_id: it.root_id ?? '',
+      thread_id: it.thread_id ?? '',
+      mentions: rawMentions.map((m: any) => ({
+        id: { open_id: typeof m?.id === 'string' ? m.id : m?.id?.open_id },
+        name: m?.name ?? '',
+      })),
+    },
+    sender: { sender_id: { open_id: it.sender?.id ?? '' } },
+  };
+}
+
+/** WS-4：补拉时跳过 bot/app 自己发的消息（app 发的 sender_type='app'，或 sender.id 就是 bot 自身）。 */
+export function isBotBackfillMessage(rawItem: unknown, botOpenId: string): boolean {
+  const s = ((rawItem as any)?.sender ?? {}) as { id?: string; sender_type?: string };
+  return s.sender_type === 'app' || (typeof s.id === 'string' && s.id === botOpenId);
+}
+
 export function createDispatcher(
   botOpenId: string,
   logger: Logger,
@@ -111,9 +232,10 @@ export function createDispatcher(
     'im.message.receive_v1': async (data: any) => {
       try {
         const message = data?.message;
-        const sender = data?.sender;
-        if (!message || !sender) return;
+        if (!message) return;
 
+        // 策略门（留在 dispatcher，不进纯解析）：createTime < botStartTime 丢历史消息；进程内 seen
+        // 去重（10min 滑窗）。持久 inbox（WS-4）在 onMessage 里做权威去重，这里是快路径。
         const createTime = Number.parseInt(message.create_time, 10);
         if (createTime && createTime < botStartTime) return;
 
@@ -122,69 +244,8 @@ export function createDispatcher(
         seen.add(msgId);
         setTimeout(() => seen.delete(msgId), DEDUP_TTL_MS);
 
-        const chatType = message.chat_type as 'p2p' | 'group';
-        if (chatType !== 'p2p' && chatType !== 'group') return;
-        const msgType = message.message_type as string;
-        if (msgType !== 'text' && msgType !== 'post' && msgType !== 'file' && msgType !== 'image')
-          return;
-
-        const rawMentions = (message.mentions ?? []) as Array<{
-          id?: { open_id?: string };
-          name?: string;
-        }>;
-        let isMentioned = chatType === 'p2p';
-        if (chatType === 'group' && botOpenId) {
-          isMentioned = rawMentions.some((m) => m.id?.open_id === botOpenId);
-        }
-        const mentions = rawMentions
-          .filter((m) => m.id?.open_id && m.id.open_id !== botOpenId)
-          .map((m) => ({ openId: m.id!.open_id!, name: m.name ?? '' }));
-
-        const content = JSON.parse(message.content);
-        let text = '';
-        const attachments: Attachment[] = [];
-
-        if (msgType === 'text') {
-          text = (content.text ?? '').replace(/@_user_\w+/g, '').trim();
-          if (!text) return;
-        } else if (msgType === 'post') {
-          // 富文本（post）：拍平正文为纯文本（含链接 URL），让群里粘带格式/文档链接的收料也能进。
-          text = extractPostText(content)
-            .replace(/@_user_\w+/g, '')
-            .trim();
-          if (!text) return;
-        } else if (msgType === 'file') {
-          const fk = content.file_key;
-          if (!fk) return;
-          attachments.push({
-            kind: 'file',
-            fileKey: fk,
-            name: content.file_name ?? `file-${message.message_id}`,
-          });
-        } else if (msgType === 'image') {
-          const ik = content.image_key;
-          if (!ik) return;
-          attachments.push({
-            kind: 'image',
-            fileKey: ik,
-            name: `image-${message.message_id}.png`,
-          });
-        }
-
-        const incoming: IncomingMessage = {
-          messageId: message.message_id,
-          chatId: message.chat_id,
-          chatType,
-          userId: sender.sender_id?.open_id ?? '',
-          text,
-          parentId: message.parent_id || undefined,
-          rootId: message.root_id || undefined,
-          threadId: message.thread_id || undefined,
-          isMentioned,
-          mentions,
-          attachments,
-          createTime,
-        };
+        const incoming = parseIncomingMessage(data, botOpenId);
+        if (!incoming) return;
 
         Promise.resolve(onMessage(incoming)).catch((err) => {
           logger.error({ err }, 'message handler error');

@@ -33,7 +33,27 @@ export interface ThreadClaim {
   // WI-8: the anchor card's message id (updateCard target), kept apart from thread_root_id
   // (the routing/claim key). NULL for pre-WI-8 rows and bridge claims.
   anchor_msg_id: string | null;
+  // WS-4: the chat this claim lives in — feeds 断线补拉's managed-chat list so we know which
+  // chats to re-pull offline messages from. NULL for pre-WS-4 rows and claims without a chat.
+  chat_id: string | null;
+  // WS-4 (C7): the chat's type ('p2p'|'group'). im.message.list items don't carry chat_type, so
+  // backfill reads it here to reshape p2p messages correctly (else a p2p probe's offline follow-up
+  // gets defaulted to 'group', un-mentioned, and dropped by the group gate). NULL for old rows.
+  chat_type: string | null;
   created_at: number;
+}
+
+// WS-4: persistent inbox row. Every inbound feishu message lands here first (INSERT OR IGNORE
+// dedup), gets processed, then marked — so a crash between receive and process re-delivers on
+// restart, and a chat's high-water create_time drives 断线补拉.
+export interface InboxMessageRow {
+  id: number;
+  message_id: string;
+  chat_id: string;
+  create_time: number;
+  payload: string;
+  received_at: number;
+  processed_at: number | null;
 }
 
 export interface EventRow {
@@ -104,8 +124,22 @@ export class Store {
         owner_kind     TEXT NOT NULL,
         owner_id       TEXT NOT NULL,
         anchor_msg_id  TEXT,
+        chat_id        TEXT,
+        chat_type      TEXT,
         created_at     INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS inbox_messages (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        message_id   TEXT NOT NULL UNIQUE,
+        chat_id      TEXT NOT NULL,
+        create_time  INTEGER NOT NULL,
+        payload      TEXT NOT NULL,
+        received_at  INTEGER NOT NULL,
+        processed_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_inbox_unprocessed
+        ON inbox_messages(id) WHERE processed_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_inbox_chat ON inbox_messages(chat_id, create_time);
     `);
     this.migrateTasksLegacy();
     this.migrateThreadClaimsLegacy();
@@ -145,8 +179,18 @@ export class Store {
     const cols = this.db.prepare(`PRAGMA table_info(thread_claims)`).all() as Array<{
       name: string;
     }>;
-    if (!cols.some((c) => c.name === 'anchor_msg_id')) {
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('anchor_msg_id')) {
       this.db.exec(`ALTER TABLE thread_claims ADD COLUMN anchor_msg_id TEXT`);
+    }
+    // WS-4: chat_id follows the anchor_msg_id precedent — present in CREATE TABLE for new DBs,
+    // guarded ADD COLUMN back-fills old ones with NULL (those claims just won't feed 补拉).
+    if (!names.has('chat_id')) {
+      this.db.exec(`ALTER TABLE thread_claims ADD COLUMN chat_id TEXT`);
+    }
+    // WS-4 (C7): chat_type for correct p2p/group reshape during 补拉.
+    if (!names.has('chat_type')) {
+      this.db.exec(`ALTER TABLE thread_claims ADD COLUMN chat_type TEXT`);
     }
   }
 
@@ -210,18 +254,92 @@ export class Store {
     ownerKind: 'bridge' | 'managed',
     ownerId: string,
     anchorMsgId: string | null = null,
+    chatId: string | null = null,
+    chatType: string | null = null,
   ): void {
     this.db
       .prepare(
-        'INSERT OR REPLACE INTO thread_claims (thread_root_id, owner_kind, owner_id, anchor_msg_id, created_at) VALUES (?, ?, ?, ?, ?)',
+        'INSERT OR REPLACE INTO thread_claims (thread_root_id, owner_kind, owner_id, anchor_msg_id, chat_id, chat_type, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
       )
-      .run(rootId, ownerKind, ownerId, anchorMsgId, Date.now());
+      .run(rootId, ownerKind, ownerId, anchorMsgId, chatId, chatType, Date.now());
+  }
+
+  // WS-4: distinct chats a managed owner has claimed (立项群 + probe 话题所在群) — 断线补拉只对这些
+  // 会话主动拉离线消息，不碰普通 bridge 会话（避免重启后乱回放旧消息）。空 chat_id 不计入。
+  listManagedClaimChatIds(): string[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT DISTINCT chat_id FROM thread_claims WHERE owner_kind = 'managed' AND chat_id IS NOT NULL",
+        )
+        .all() as Array<{ chat_id: string }>
+    ).map((r) => r.chat_id);
+  }
+
+  // WS-4 (C7): the chat_type recorded for a managed chat, so 补拉 can reshape p2p messages correctly.
+  // Newest non-null wins. undefined when unknown (→ backfill falls back to 'group').
+  managedChatType(chatId: string): string | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT chat_type FROM thread_claims WHERE chat_id = ? AND owner_kind = 'managed' AND chat_type IS NOT NULL ORDER BY created_at DESC LIMIT 1",
+      )
+      .get(chatId) as { chat_type: string } | undefined;
+    return row?.chat_type;
   }
 
   getThreadClaim(rootId: string): ThreadClaim | undefined {
     return this.db.prepare('SELECT * FROM thread_claims WHERE thread_root_id = ?').get(rootId) as
       | ThreadClaim
       | undefined;
+  }
+
+  // WS-4 持久 inbox. INSERT OR IGNORE 是权威去重：首见返回 true，重复（同 message_id）返回 false。
+  // received_at 记落库时刻（供每日清理）；processed_at 由 markInboxProcessed 事后置。
+  recordInbox(msg: {
+    messageId: string;
+    chatId: string;
+    createTime: number;
+    payloadJson: string;
+  }): boolean {
+    const res = this.db
+      .prepare(
+        `INSERT OR IGNORE INTO inbox_messages (message_id, chat_id, create_time, payload, received_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(msg.messageId, msg.chatId, msg.createTime, msg.payloadJson, Date.now());
+    return res.changes > 0;
+  }
+
+  markInboxProcessed(messageId: string): void {
+    this.db
+      .prepare('UPDATE inbox_messages SET processed_at = ? WHERE message_id = ?')
+      .run(Date.now(), messageId);
+  }
+
+  // 启动补投：处理完前崩溃的行（processed_at IS NULL）按落库顺序重放。afterId 游标（C5 审查修复）让
+  // replayInbox 能分批 drain 全部未处理行（>limit 也不漏），并跨过本轮失败的行避免死循环（失败行 id
+  // 仍推进，等下次重启再试）。
+  listInboxUnprocessed(limit: number, afterId = 0): InboxMessageRow[] {
+    return this.db
+      .prepare(
+        'SELECT * FROM inbox_messages WHERE processed_at IS NULL AND id > ? ORDER BY id ASC LIMIT ?',
+      )
+      .all(afterId, limit) as InboxMessageRow[];
+  }
+
+  // 断线补拉水位：该 chat 已见过的最新 create_time（无记录 → 0，调用方回看固定窗口）。
+  latestInboxCreateTime(chatId: string): number {
+    const row = this.db
+      .prepare('SELECT COALESCE(MAX(create_time), 0) AS ts FROM inbox_messages WHERE chat_id = ?')
+      .get(chatId) as { ts: number };
+    return row.ts;
+  }
+
+  // 每日清理：只删已处理且 received_at 早于 cutoff 的行（未处理行永远保留，等补投）。
+  purgeInboxBefore(cutoffMs: number): void {
+    this.db
+      .prepare('DELETE FROM inbox_messages WHERE processed_at IS NOT NULL AND received_at < ?')
+      .run(cutoffMs);
   }
 
   releaseThreadClaim(rootId: string): void {

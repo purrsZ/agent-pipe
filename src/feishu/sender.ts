@@ -321,6 +321,48 @@ export class Sender {
   }
 
   /**
+   * WS-4 断线补拉：按 chat 拉 startTimeSec（秒）之后的历史消息，翻页拉全。ByCreateTimeAsc（旧→新）。
+   * 页数上限 40（=2000 条）防爆；C4/C12 审查修复：真到上限仍 has_more 时 warn（截断可见，而非静默丢最新的）。
+   * 返回 im.message.list 的原始 item 数组（形状 = message.get 的 item：message_id/msg_type/body.content/
+   * sender.id/sender.sender_type/create_time/mentions…）。失败返回 []（与其它方法失败语义一致，只 log）。
+   */
+  async listMessages(chatId: string, startTimeSec: number): Promise<unknown[]> {
+    const MAX_PAGES = 40;
+    const items: unknown[] = [];
+    try {
+      let pageToken: string | undefined;
+      let page = 0;
+      for (; page < MAX_PAGES; page++) {
+        const resp: any = await this.client.im.message.list({
+          params: {
+            container_id_type: 'chat',
+            container_id: chatId,
+            start_time: String(startTimeSec),
+            sort_type: 'ByCreateTimeAsc',
+            page_size: 50,
+            ...(pageToken ? { page_token: pageToken } : {}),
+          },
+        });
+        const pageItems = resp?.data?.items;
+        if (Array.isArray(pageItems)) items.push(...pageItems);
+        if (!resp?.data?.has_more || !resp?.data?.page_token) break;
+        pageToken = resp.data.page_token;
+        if (page === MAX_PAGES - 1) {
+          // 到上限仍 has_more：最新的一批被截断，下一轮 backfill（水位已推进）继续追。
+          this.logger.warn(
+            { chatId, startTimeSec, pulled: items.length },
+            'listMessages hit page cap; newest messages truncated, will catch up next backfill',
+          );
+        }
+      }
+    } catch (err) {
+      this.logger.error({ err, chatId, startTimeSec }, 'listMessages failed');
+      return [];
+    }
+    return items;
+  }
+
+  /**
    * 建专属群并拉人（立项域唯一新增能力）。两步：im.chat.create 建群（bot 为群主，拿 chat_id）→
    * im.chatMembers.create 把成员按 open_id 拉进来（v1 = 发起人）。需 app 授 `im:chat` scope，未授则
    * chat.create 直接 401（建群失败返 null，bridge 兜底回原会话报错、不创建单元）。拉人失败不致命：

@@ -26,7 +26,12 @@ import {
 } from './feishu/card.js';
 import { createFeishuClients } from './feishu/client.js';
 import { startWsReconnectGuard } from './feishu/ws-health.js';
-import { createDispatcher } from './feishu/event-router.js';
+import {
+  adaptListMessageToEventData,
+  createDispatcher,
+  isBotBackfillMessage,
+  parseIncomingMessage,
+} from './feishu/event-router.js';
 import { ProgressCards } from './feishu/progress-cards.js';
 import { Sender } from './feishu/sender.js';
 import { StreamingCard } from './feishu/stream-card.js';
@@ -139,6 +144,88 @@ export function humanizeMs(ms: number): string {
   const days = Math.floor(totalHour / 24);
   const hours = totalHour % 24;
   return hours > 0 ? `${days} 天 ${hours} 小时` : `${days} 天`;
+}
+
+// WS-4 持久 inbox 的入站处理一环：recordInbox 权威去重 → handle → markInboxProcessed。首见返回
+// 'ingested'，重复 'duplicate'（含补拉重投同一条），handle 抛错 'error'（不标记 → 重启补投）。
+export async function ingestMessage(
+  deps: {
+    store: Pick<Store, 'recordInbox' | 'markInboxProcessed'>;
+    handle: (msg: IncomingMessage) => Promise<void>;
+    logger: Pick<Logger, 'error'>;
+  },
+  msg: IncomingMessage,
+): Promise<'ingested' | 'duplicate' | 'error'> {
+  if (
+    !deps.store.recordInbox({
+      messageId: msg.messageId,
+      chatId: msg.chatId,
+      createTime: msg.createTime,
+      payloadJson: JSON.stringify(msg),
+    })
+  ) {
+    return 'duplicate';
+  }
+  try {
+    await deps.handle(msg);
+    deps.store.markInboxProcessed(msg.messageId);
+    return 'ingested';
+  } catch (err) {
+    // 不 markProcessed → 该行留在未处理列表，重启时 replayInbox 再投一次（重启级重试，非紧循环）。
+    deps.logger.error({ err, messageId: msg.messageId }, 'ingest handler error');
+    return 'error';
+  }
+}
+
+// WS-4 断线补拉（对抗「飞书 WS 不重放离线事件」）：对 managed 认领过的每个 chat 主动拉 im.message.list，
+// 跳过 bot 自己的、经 recordInbox 去重后只投未见过的。since 水位 = max(该 chat inbox 最新 create_time,
+// now-lookback)，回看窗口防首启动全量灌；再减 60s 重叠靠 inbox 去重兜。整段永不抛：单 chat 失败只 log 跳过。
+export async function backfillClaimedChats(deps: {
+  store: Pick<
+    Store,
+    | 'listManagedClaimChatIds'
+    | 'managedChatType'
+    | 'latestInboxCreateTime'
+    | 'recordInbox'
+    | 'markInboxProcessed'
+  >;
+  listMessages: (chatId: string, startTimeSec: number) => Promise<unknown[]>;
+  botOpenId: string;
+  handle: (msg: IncomingMessage) => Promise<void>;
+  logger: Pick<Logger, 'error' | 'info'>;
+  now: () => number;
+  reason: string;
+  lookbackMs?: number;
+}): Promise<{ pulled: number; ingested: number }> {
+  const lookback = deps.lookbackMs ?? 24 * 60 * 60 * 1000;
+  let pulled = 0;
+  let ingested = 0;
+  for (const chatId of deps.store.listManagedClaimChatIds()) {
+    // C7: 用 claim 记录的 chat_type 还原 p2p/group（list item 不带 chat_type），否则 p2p 会话被误判 group。
+    const chatType = deps.store.managedChatType(chatId) === 'p2p' ? 'p2p' : 'group';
+    const since = Math.max(deps.store.latestInboxCreateTime(chatId), deps.now() - lookback);
+    const startTimeSec = Math.floor(since / 1000) - 60; // 60s 重叠窗口，靠 inbox 去重防重放
+    let raws: unknown[];
+    try {
+      raws = await deps.listMessages(chatId, startTimeSec);
+    } catch (err) {
+      deps.logger.error({ err, chatId, reason: deps.reason }, 'backfill listMessages failed');
+      continue;
+    }
+    for (const raw of raws) {
+      pulled++;
+      if (isBotBackfillMessage(raw, deps.botOpenId)) continue;
+      const msg = parseIncomingMessage(adaptListMessageToEventData(raw, chatType), deps.botOpenId);
+      if (!msg) continue;
+      const outcome = await ingestMessage(
+        { store: deps.store, handle: deps.handle, logger: deps.logger },
+        msg,
+      );
+      if (outcome === 'ingested') ingested++;
+    }
+  }
+  deps.logger.info({ reason: deps.reason, pulled, ingested }, 'backfill claimed chats done');
+  return { pulled, ingested };
 }
 
 // 病历(非 checkpoint 的 human wait)的飞书卡标签。返回 undefined ⇒ 不是病历(不发病历卡)。
@@ -280,10 +367,15 @@ async function main() {
     for (const id of config.allowedOpenIds) store.addWhitelist(id, 'bootstrap');
     logger.info({ count: config.allowedOpenIds.size }, 'seeded whitelist from .env');
   }
+  // WS-4: onWsRecovered 必须在建 ws 时就绑定，但断线补拉依赖的 sender/store/handleIncoming 要到很后面
+  // 才装配好。用一个可变持有变量做晚绑定：这里传稳定闭包，等补拉函数就绪后再把它挂上（首连不触发，见
+  // createWsHealthLogger 的 everHealthy 守卫）。
+  let onWsRecovered: () => void = () => {};
   const { client, wsClient, wsHealth } = createFeishuClients(
     config.feishu.appId,
     config.feishu.appSecret,
     logger,
+    { onWsRecovered: () => onWsRecovered() },
   );
   const sender = new Sender(client, logger);
 
@@ -374,7 +466,17 @@ async function main() {
     consoleServer,
   });
   installCrashGuard(logger, releaseResources);
-  scheduleDailyBackup(store, path.join(config.dataDir, 'backups'), logger, [workitems.backupJob()]);
+  scheduleDailyBackup(store, path.join(config.dataDir, 'backups'), logger, [
+    workitems.backupJob(),
+    // WS-4: 顺带清 30 天前的已处理 inbox 行（未处理行永远保留等补投）。
+    {
+      label: 'inbox-purge',
+      run: async (now: Date) => {
+        store.purgeInboxBefore(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+        return undefined;
+      },
+    },
+  ]);
 
   const ATTACHMENT_TTL_MS = 30 * 60 * 1000;
   const pendingAttachments = new Map<string, Array<{ path: string; expiresAt: number }>>();
@@ -781,8 +883,9 @@ async function main() {
     }
 
     // 3) 同步建 claim（入站路由）：话题内追问带同一 thread_id（群聊）或回复根（p2p）即可匹配。
+    // WS-4: 记 chat_id（≠ claimKey，probe 的 key 多为 thread/root）→ 断线补拉据此枚举该会话。
     const claimKey = threadId ?? msg.rootId ?? msg.messageId;
-    store.claimThread(claimKey, 'managed', item.id, anchorMsgId);
+    store.claimThread(claimKey, 'managed', item.id, anchorMsgId, msg.chatId, msg.chatType);
 
     // 4) 把占位锚点卡补全为真实 id / 状态。
     await sender.updateCard(
@@ -893,8 +996,9 @@ async function main() {
       return;
     }
     // claim key = 群 chatId（立项群一需求一群；群内消息常无 thread/root/parent，按 chatId 路由）。
+    // WS-4: 立项群 claimKey 即 chatId，仍显式记 chat_id（统一 backfill 枚举，别让它去猜 key 是不是 chatId）。
     const claimKey = groupChatId;
-    store.claimThread(claimKey, 'managed', item.id, anchorMsgId);
+    store.claimThread(claimKey, 'managed', item.id, anchorMsgId, groupChatId, 'group');
     // 预填项进事件流（立项书 fold + gate 判定都靠它）。立项阶段 postStatus 是 no-op，清单卡由本路径就地维护。
     for (const f of seed) workitems.api.injectIntakeField(item.id, f);
     logger.info(
@@ -1297,198 +1401,246 @@ async function main() {
     }
   }
 
+  // WS-4: 入站处理主体抽成具名闭包，让「ws 推送（经 ingestMessage 持久去重）」「启动补投」「断线补拉」
+  // 三条入口共用同一份处理。dispatcher 收到消息后走 ingestMessage(record→handle→mark)。
+  const handleIncoming = async (msg: IncomingMessage): Promise<void> => {
+    if (msg.chatType === 'group' && !msg.isMentioned) {
+      // 已被 managed 认领的群（立项群：一需求一群，bot 是群成员）内的消息不强制 @bot——收料/追问是
+      // 高频多轮，逐条 @ 体验差，且文件消息（PRD）无法附带 @。其它群仍需 @bot 才响应；下方白名单门仍生效。
+      if (store.getThreadClaim(msg.chatId)?.owner_kind !== 'managed') {
+        return;
+      }
+    }
+    const isAdmin = config.allowedOpenIds.has(msg.userId);
+    if (!isAdmin && !store.isAllowed(msg.userId)) {
+      logger.warn(
+        {
+          userId: msg.userId,
+          chatType: msg.chatType,
+          text: msg.text.slice(0, 50),
+        },
+        'unauthorized sender, ignoring',
+      );
+      return;
+    }
+
+    if (msg.text.startsWith('/')) {
+      await commands.dispatch(msg);
+      return;
+    }
+
+    // M-I2: /req 后「等群名」待答——用户下一条普通消息即群名 → 建专属群发起立项。先于一切路由，
+    // 因为此刻还没有 claim/任务可路由。空群名（如发了张图）→ 保留待答、回提示。
+    if (pendingIntake.has(msg.userId, msg.chatId, Date.now())) {
+      const groupName = msg.text.trim();
+      if (!groupName) {
+        await sender.reply(
+          msg.messageId,
+          '群名不能为空，请回一条文字作为群名（比如「订单导出」）。',
+        );
+        return;
+      }
+      const naming = pendingIntake.take(msg.userId, msg.chatId, Date.now());
+      await startIntakeGroup(msg, naming?.description ?? '', groupName);
+      return;
+    }
+
+    // WI-D/WI-5 + M-I2/3: consult the thread-claim registry BEFORE the bridge task fallback. A
+    // managed (workitems) claim must not be swallowed by the bridge's root→task / recent-task
+    // fallback. probe 按飞书话题 thread 认领；立项群按群 chatId 认领（群内消息常无 thread/root/
+    // parent，故 thread 找不到再按 chatId 找）。
+    const threadRoot = msg.threadId ?? msg.rootId ?? msg.parentId;
+    let managedKey: string | undefined;
+    let claim = threadRoot ? store.getThreadClaim(threadRoot) : undefined;
+    if (claim?.owner_kind === 'managed') {
+      managedKey = threadRoot;
+    } else if (msg.chatType === 'group') {
+      const byChat = store.getThreadClaim(msg.chatId);
+      if (byChat?.owner_kind === 'managed') {
+        claim = byChat;
+        managedKey = msg.chatId;
+      }
+    }
+    if (claim?.owner_kind === 'managed' && managedKey) {
+      const item = workitems.api.getWorkItem(claim.owner_id);
+      if (item) {
+        // WI-7 P1: a terminal item (e.g. failed) keeps its claim until /done. Injecting a
+        // follow-up would hit the reducer terminal short-circuit (recorded, never dispatched)
+        // — so reply honestly instead of promising a report that never comes.
+        if (isTerminalStatus(item.status)) {
+          await sender.reply(msg.messageId, '该单元已结束，回复 `/done` 关闭后可重新发起。');
+          return;
+        }
+        // 立项收料：群内普通消息当作「当前待填项」的值（缺哪项填哪项），写 intake_field_set 事件并
+        // 刷新清单卡；非立项阶段才走普通追问注入。
+        if (isIntakePhase(item.phase)) {
+          await handleIntakeMessage(item, msg);
+          return;
+        }
+        workitems.api.injectHumanMessage(item.id, {
+          text: msg.text,
+          feishuMsgId: msg.messageId,
+        });
+        await sender.reply(
+          msg.messageId,
+          '已收到，交给包工头处理；他的回应稍后会以卡片形式出现在本群。',
+        );
+        return;
+      }
+      // Owner vanished but the claim lingered — release it and fall through to normal bridge
+      // routing instead of swallowing the message forever.
+      logger.warn({ managedKey, ownerId: claim.owner_id }, 'managed claim with missing owner');
+      store.releaseThreadClaim(managedKey);
+    }
+
+    const candidates = [msg.rootId, msg.parentId].filter((v): v is string => !!v);
+    let task = candidates.length > 0 ? store.getTaskByRootMsg(candidates[0]!) : undefined;
+    if (!task) {
+      for (const id of candidates) {
+        task = store.getTaskByMessageId(id);
+        if (task) break;
+      }
+    }
+    if (!task) {
+      const currentId = store.getState(currentTaskKey(msg.chatId));
+      if (currentId) {
+        task = store.getBridgeTask(currentId);
+        if (task) {
+          logger.info(
+            { fallbackTo: task.id, chatId: msg.chatId },
+            'routed to current task in chat',
+          );
+        }
+      }
+    }
+    if (!task) {
+      task = store.mostRecentTaskInChat(msg.chatId);
+      if (task) {
+        logger.info(
+          { fallbackTo: task.id, chatId: msg.chatId },
+          'fallback to most recent task in chat',
+        );
+      }
+    }
+    if (!task) {
+      await sender.reply(msg.messageId, '本会话没有任务，用 /new <name> 新建一个。');
+      return;
+    }
+
+    store.recordTaskMessage(task.id, msg.messageId);
+    store.logEvent(task.id, 'user', undefined, {
+      text: msg.text,
+      attachments: msg.attachments,
+    });
+    store.touchTask(task.id);
+
+    if (msg.attachments.length > 0) {
+      const inboxDir = path.join(task.cwd, 'inbox');
+      try {
+        fs.mkdirSync(inboxDir, { recursive: true });
+      } catch (err) {
+        logger.error({ err, inboxDir }, 'mkdir inbox failed');
+        await sender.reply(msg.messageId, `[${task.display_name}] 创建 inbox 目录失败`);
+        return;
+      }
+      const downloaded: string[] = [];
+      for (let i = 0; i < msg.attachments.length; i++) {
+        const a = msg.attachments[i]!;
+        const safe = sanitizeName(a.name);
+        const dest = path.join(inboxDir, `${msg.messageId}-${i}-${safe}`);
+        const ok = await sender.downloadAttachment(msg.messageId, a.fileKey, a.kind, dest);
+        if (ok) downloaded.push(dest);
+      }
+      if (downloaded.length === 0) {
+        await sender.reply(msg.messageId, `[${task.display_name}] 附件下载失败`);
+        return;
+      }
+      const expiresAt = Date.now() + ATTACHMENT_TTL_MS;
+      const list = pendingAttachments.get(msg.chatId) ?? [];
+      for (const p of downloaded) list.push({ path: p, expiresAt });
+      pendingAttachments.set(msg.chatId, list);
+      const ackLines = downloaded.map((p) => `- \`${p}\``).join('\n');
+      const agentLabel = task.agent_kind === 'codex' ? 'Codex' : 'Claude';
+      await sender.reply(
+        msg.messageId,
+        `[${task.display_name}] 已收到附件，存放在：\n${ackLines}\n\n下条消息会自动把这些路径告诉 ${agentLabel}。`,
+      );
+      if (!msg.text) return;
+    }
+
+    const input: TurnInput = {
+      chatId: msg.chatId,
+      messageId: msg.messageId,
+      text: msg.text,
+      parentId: msg.parentId,
+    };
+    if (runningTasks.has(task.id)) {
+      const ok = enqueue(task.id, input);
+      const depth = queues.get(task.id)?.length ?? 0;
+      await sender.reply(
+        msg.messageId,
+        ok
+          ? `[${task.display_name}] 正忙，已排队（队列第 ${depth} 位），处理完会自动接着跑。`
+          : `[${task.display_name}] 队列已满（上限 ${MAX_QUEUE}），请稍后再发。`,
+      );
+      return;
+    }
+    void runWithDrain(task.id, input);
+  };
   const dispatcher = createDispatcher(
     botOpenId,
     logger,
     botStartTime,
+    // 持久 inbox：ws 推送先落库权威去重，再处理、再标记（掉电重启补投）。
     async (msg) => {
-      if (msg.chatType === 'group' && !msg.isMentioned) {
-        // 已被 managed 认领的群（立项群：一需求一群，bot 是群成员）内的消息不强制 @bot——收料/追问是
-        // 高频多轮，逐条 @ 体验差，且文件消息（PRD）无法附带 @。其它群仍需 @bot 才响应；下方白名单门仍生效。
-        if (store.getThreadClaim(msg.chatId)?.owner_kind !== 'managed') {
-          return;
-        }
-      }
-      const isAdmin = config.allowedOpenIds.has(msg.userId);
-      if (!isAdmin && !store.isAllowed(msg.userId)) {
-        logger.warn(
-          {
-            userId: msg.userId,
-            chatType: msg.chatType,
-            text: msg.text.slice(0, 50),
-          },
-          'unauthorized sender, ignoring',
-        );
-        return;
-      }
-
-      if (msg.text.startsWith('/')) {
-        await commands.dispatch(msg);
-        return;
-      }
-
-      // M-I2: /req 后「等群名」待答——用户下一条普通消息即群名 → 建专属群发起立项。先于一切路由，
-      // 因为此刻还没有 claim/任务可路由。空群名（如发了张图）→ 保留待答、回提示。
-      if (pendingIntake.has(msg.userId, msg.chatId, Date.now())) {
-        const groupName = msg.text.trim();
-        if (!groupName) {
-          await sender.reply(
-            msg.messageId,
-            '群名不能为空，请回一条文字作为群名（比如「订单导出」）。',
-          );
-          return;
-        }
-        const naming = pendingIntake.take(msg.userId, msg.chatId, Date.now());
-        await startIntakeGroup(msg, naming?.description ?? '', groupName);
-        return;
-      }
-
-      // WI-D/WI-5 + M-I2/3: consult the thread-claim registry BEFORE the bridge task fallback. A
-      // managed (workitems) claim must not be swallowed by the bridge's root→task / recent-task
-      // fallback. probe 按飞书话题 thread 认领；立项群按群 chatId 认领（群内消息常无 thread/root/
-      // parent，故 thread 找不到再按 chatId 找）。
-      const threadRoot = msg.threadId ?? msg.rootId ?? msg.parentId;
-      let managedKey: string | undefined;
-      let claim = threadRoot ? store.getThreadClaim(threadRoot) : undefined;
-      if (claim?.owner_kind === 'managed') {
-        managedKey = threadRoot;
-      } else if (msg.chatType === 'group') {
-        const byChat = store.getThreadClaim(msg.chatId);
-        if (byChat?.owner_kind === 'managed') {
-          claim = byChat;
-          managedKey = msg.chatId;
-        }
-      }
-      if (claim?.owner_kind === 'managed' && managedKey) {
-        const item = workitems.api.getWorkItem(claim.owner_id);
-        if (item) {
-          // WI-7 P1: a terminal item (e.g. failed) keeps its claim until /done. Injecting a
-          // follow-up would hit the reducer terminal short-circuit (recorded, never dispatched)
-          // — so reply honestly instead of promising a report that never comes.
-          if (isTerminalStatus(item.status)) {
-            await sender.reply(msg.messageId, '该单元已结束，回复 `/done` 关闭后可重新发起。');
-            return;
-          }
-          // 立项收料：群内普通消息当作「当前待填项」的值（缺哪项填哪项），写 intake_field_set 事件并
-          // 刷新清单卡；非立项阶段才走普通追问注入。
-          if (isIntakePhase(item.phase)) {
-            await handleIntakeMessage(item, msg);
-            return;
-          }
-          workitems.api.injectHumanMessage(item.id, {
-            text: msg.text,
-            feishuMsgId: msg.messageId,
-          });
-          await sender.reply(
-            msg.messageId,
-            '已收到，交给包工头处理；他的回应稍后会以卡片形式出现在本群。',
-          );
-          return;
-        }
-        // Owner vanished but the claim lingered — release it and fall through to normal bridge
-        // routing instead of swallowing the message forever.
-        logger.warn({ managedKey, ownerId: claim.owner_id }, 'managed claim with missing owner');
-        store.releaseThreadClaim(managedKey);
-      }
-
-      const candidates = [msg.rootId, msg.parentId].filter((v): v is string => !!v);
-      let task = candidates.length > 0 ? store.getTaskByRootMsg(candidates[0]!) : undefined;
-      if (!task) {
-        for (const id of candidates) {
-          task = store.getTaskByMessageId(id);
-          if (task) break;
-        }
-      }
-      if (!task) {
-        const currentId = store.getState(currentTaskKey(msg.chatId));
-        if (currentId) {
-          task = store.getBridgeTask(currentId);
-          if (task) {
-            logger.info(
-              { fallbackTo: task.id, chatId: msg.chatId },
-              'routed to current task in chat',
-            );
-          }
-        }
-      }
-      if (!task) {
-        task = store.mostRecentTaskInChat(msg.chatId);
-        if (task) {
-          logger.info(
-            { fallbackTo: task.id, chatId: msg.chatId },
-            'fallback to most recent task in chat',
-          );
-        }
-      }
-      if (!task) {
-        await sender.reply(msg.messageId, '本会话没有任务，用 /new <name> 新建一个。');
-        return;
-      }
-
-      store.recordTaskMessage(task.id, msg.messageId);
-      store.logEvent(task.id, 'user', undefined, {
-        text: msg.text,
-        attachments: msg.attachments,
-      });
-      store.touchTask(task.id);
-
-      if (msg.attachments.length > 0) {
-        const inboxDir = path.join(task.cwd, 'inbox');
-        try {
-          fs.mkdirSync(inboxDir, { recursive: true });
-        } catch (err) {
-          logger.error({ err, inboxDir }, 'mkdir inbox failed');
-          await sender.reply(msg.messageId, `[${task.display_name}] 创建 inbox 目录失败`);
-          return;
-        }
-        const downloaded: string[] = [];
-        for (let i = 0; i < msg.attachments.length; i++) {
-          const a = msg.attachments[i]!;
-          const safe = sanitizeName(a.name);
-          const dest = path.join(inboxDir, `${msg.messageId}-${i}-${safe}`);
-          const ok = await sender.downloadAttachment(msg.messageId, a.fileKey, a.kind, dest);
-          if (ok) downloaded.push(dest);
-        }
-        if (downloaded.length === 0) {
-          await sender.reply(msg.messageId, `[${task.display_name}] 附件下载失败`);
-          return;
-        }
-        const expiresAt = Date.now() + ATTACHMENT_TTL_MS;
-        const list = pendingAttachments.get(msg.chatId) ?? [];
-        for (const p of downloaded) list.push({ path: p, expiresAt });
-        pendingAttachments.set(msg.chatId, list);
-        const ackLines = downloaded.map((p) => `- \`${p}\``).join('\n');
-        const agentLabel = task.agent_kind === 'codex' ? 'Codex' : 'Claude';
-        await sender.reply(
-          msg.messageId,
-          `[${task.display_name}] 已收到附件，存放在：\n${ackLines}\n\n下条消息会自动把这些路径告诉 ${agentLabel}。`,
-        );
-        if (!msg.text) return;
-      }
-
-      const input: TurnInput = {
-        chatId: msg.chatId,
-        messageId: msg.messageId,
-        text: msg.text,
-        parentId: msg.parentId,
-      };
-      if (runningTasks.has(task.id)) {
-        const ok = enqueue(task.id, input);
-        const depth = queues.get(task.id)?.length ?? 0;
-        await sender.reply(
-          msg.messageId,
-          ok
-            ? `[${task.display_name}] 正忙，已排队（队列第 ${depth} 位），处理完会自动接着跑。`
-            : `[${task.display_name}] 队列已满（上限 ${MAX_QUEUE}），请稍后再发。`,
-        );
-        return;
-      }
-      void runWithDrain(task.id, input);
+      await ingestMessage({ store, handle: handleIncoming, logger }, msg);
     },
     handleCardAction,
   );
 
   await wsClient.start({ eventDispatcher: dispatcher });
+
+  // WS-4 启动补投：上一进程收下但未处理完就崩溃的 inbox 行，按落库顺序重放（已 recordInbox → 不再去重，
+  // 直接走 handleIncoming 再标记）。逐条隔离，坏行只 log。用 id 游标分批 drain 全部未处理行（C5 审查修复：
+  // 原来只取前 200 条、余量本次运行永不补投）；游标跨过失败行（失败行等下次重启再试），避免死循环。
+  const replayInbox = async (): Promise<void> => {
+    let afterId = 0;
+    for (;;) {
+      const rows = store.listInboxUnprocessed(200, afterId);
+      if (rows.length === 0) break;
+      for (const row of rows) {
+        afterId = row.id;
+        try {
+          await handleIncoming(JSON.parse(row.payload) as IncomingMessage);
+          store.markInboxProcessed(row.message_id);
+        } catch (err) {
+          logger.error({ err, messageId: row.message_id }, 'inbox replay failed');
+        }
+      }
+    }
+  };
+  // WS-4 断线补拉：对 managed 认领过的会话主动拉 im.message.list（飞书 WS 不重放离线事件）。绕过 ws
+  // 推送路径（那条有 botStartTime 时间门会吞掉离线消息），直接喂 handleIncoming。
+  const runBackfill = (reason: string): Promise<{ pulled: number; ingested: number }> =>
+    backfillClaimedChats({
+      store,
+      listMessages: (chatId, startTimeSec) => sender.listMessages(chatId, startTimeSec),
+      botOpenId,
+      handle: handleIncoming,
+      logger,
+      now: () => Date.now(),
+      reason,
+    });
+  // C8 审查修复：先绑定 onWsRecovered，再跑（可能耗时的）启动补投/补拉——否则 start 到绑定之间若 ws 掉线
+  // 恢复只会命中 no-op。backfill 幂等（recordInbox 去重），提前绑定即使与 startup 补拉重叠也无害。
+  onWsRecovered = () => {
+    void runBackfill('ws-recovered').catch((err) =>
+      logger.error({ err }, 'recovered backfill failed'),
+    );
+  };
+  await replayInbox();
+  await runBackfill('startup').catch((err) => logger.error({ err }, 'startup backfill failed'));
+
   // WS reconnect guard: the SDK's reconnect interval is a hard-coded 120s, so a dropped ws
   // leaves the bot "deaf" for up to 2 min. This proactively re-starts the ws once it's been
   // unhealthy past the grace window — start() is re-entrant (see feishu/ws-health.ts).

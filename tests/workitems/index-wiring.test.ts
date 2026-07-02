@@ -60,7 +60,7 @@ describe('index workitems wiring', () => {
     // WI-8: claim keys on the thread root (rootId ?? messageId), NOT the anchor card id —
     // the anchor card id rides as the 4th arg for later updateCard (anchor refresh / close).
     expect(source).toContain("store.claimThread(claimKey, 'managed'");
-    expect(source).toContain('item.id, anchorMsgId)');
+    expect(source).toContain('item.id, anchorMsgId,'); // WS-4: 尾参加了 chat_id
     // 群聊：用 reply_in_thread 把 probe 收进一个飞书话题（claim key = 话题 id）。
     expect(source).toContain('sender.replyCardInThread');
     expect(source).toContain('store.releaseThreadClaim(threadRoot)');
@@ -75,7 +75,7 @@ describe('index workitems wiring', () => {
     expect(source).toContain("type: 'requirement'");
     // same managed-claim + anchor-card path probe uses, keyed on the thread root.
     expect(source).toContain("store.claimThread(claimKey, 'managed'");
-    expect(source).toContain('item.id, anchorMsgId)');
+    expect(source).toContain('item.id, anchorMsgId,'); // WS-4: 尾参加了 chat_id
     // onRequirement closure is handed to the CommandHandler alongside onProbe/onDone.
     expect(source).toContain('void runRequirement(msg, opts)');
   });

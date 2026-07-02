@@ -207,6 +207,38 @@ describe('Store: legacy migration', () => {
     expect(store2.getTask('t1')).toBeDefined();
     store2.close();
   });
+
+  // WS-4: thread_claims 加 chat_id 列（断线补拉需要 managed chat 列表）。老库缺列 → 守卫式 ADD COLUMN
+  // 回填 NULL，既有认领零回归；再开幂等不炸。
+  it('backfills thread_claims.chat_id on an old-schema DB (guarded ADD COLUMN)', () => {
+    const raw = new Database(dbPath);
+    raw.exec(`
+      CREATE TABLE thread_claims (
+        thread_root_id TEXT PRIMARY KEY,
+        owner_kind     TEXT NOT NULL,
+        owner_id       TEXT NOT NULL,
+        anchor_msg_id  TEXT,
+        created_at     INTEGER NOT NULL
+      );
+    `);
+    raw
+      .prepare(
+        `INSERT INTO thread_claims (thread_root_id, owner_kind, owner_id, created_at)
+         VALUES ('root-legacy', 'managed', 'wi-legacy', 1)`,
+      )
+      .run();
+    raw.close();
+
+    const store = new Store(dbPath);
+    expect(store.getThreadClaim('root-legacy')?.chat_id).toBeNull();
+    // 迁移后写入新 chat_id 正常
+    store.claimThread('root-new', 'managed', 'wi-new', null, 'oc_new');
+    expect(store.listManagedClaimChatIds()).toEqual(['oc_new']);
+    store.close();
+
+    // 再开幂等：列已存在，不重复 ALTER、不炸
+    expect(() => new Store(dbPath).close()).not.toThrow();
+  });
 });
 
 describe('Store: events', () => {

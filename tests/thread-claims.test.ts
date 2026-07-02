@@ -81,4 +81,31 @@ describe('thread claims registry (WI-D)', () => {
     store.claimThread('root-bridge', 'bridge', 'task-y', 'anchor-y');
     expect(store.getThreadAnchorByOwner('task-y')).toBeUndefined();
   });
+
+  // WS-4: 断线补拉需要「managed 认领过哪些 chat」——claimThread 记 chat_id，listManagedClaimChatIds
+  // 给出去重后的 managed chat 列表（bridge 认领与空 chat 不计入）。
+  it('WS-4: stores chat_id and lists distinct managed chat ids', () => {
+    store.claimThread('root-1', 'managed', 'wi-1', null, 'oc_chat_1');
+    store.claimThread('root-2', 'managed', 'wi-2', null, 'oc_chat_1'); // 同 chat 去重
+    store.claimThread('root-3', 'managed', 'wi-3', null, 'oc_chat_2');
+    store.claimThread('root-b', 'bridge', 'task-x', null, 'oc_bridge'); // bridge 不计入
+    expect(store.getThreadClaim('root-1')?.chat_id).toBe('oc_chat_1');
+    expect([...store.listManagedClaimChatIds()].sort()).toEqual(['oc_chat_1', 'oc_chat_2']);
+  });
+
+  it('WS-4: chat_id defaults to null and null chats are excluded from the managed list', () => {
+    store.claimThread('root-x', 'managed', 'wi-x'); // 无 chat_id
+    expect(store.getThreadClaim('root-x')?.chat_id).toBeNull();
+    expect(store.listManagedClaimChatIds()).toEqual([]);
+  });
+
+  // C7（审查）：记 chat_type，断线补拉据此把 p2p 会话正确还原（否则默认 group + 无 @ 被群门丢）。
+  it('WS-4: stores chat_type and looks it up by chat_id for backfill', () => {
+    store.claimThread('root-dm', 'managed', 'wi-1', null, 'oc_dm', 'p2p');
+    store.claimThread('root-grp', 'managed', 'wi-2', null, 'oc_grp', 'group');
+    expect(store.getThreadClaim('root-dm')?.chat_type).toBe('p2p');
+    expect(store.managedChatType('oc_dm')).toBe('p2p');
+    expect(store.managedChatType('oc_grp')).toBe('group');
+    expect(store.managedChatType('oc_unknown')).toBeUndefined();
+  });
 });

@@ -28,8 +28,14 @@ const UNHEALTHY_RE = /reconnect|connect failed|unable to connect|ws (?:client )?
  * drive a `WsHealth` flag. The flag is the input to {@link startWsReconnectGuard}, which
  * proactively reconnects faster than the SDK's hard-coded 120s reconnectInterval.
  */
-export function createWsHealthLogger(base: Logger): { sdkLogger: SdkLogger; health: WsHealth } {
+export function createWsHealthLogger(
+  base: Logger,
+  // WS-4: onRecovered 在 WS 从 unhealthy 恢复 healthy 时触发一次（用于断线后主动补拉离线消息）。
+  // everHealthy 守卫：首次建连（初值 healthy=false → true）不算「恢复」、不触发，否则启动即误补拉。
+  opts?: { onRecovered?: () => void },
+): { sdkLogger: SdkLogger; health: WsHealth } {
   const health: WsHealth = { healthy: false, since: Date.now() };
+  let everHealthy = false;
   const observe = (parts: unknown[]): void => {
     const text = parts.map((p) => (typeof p === 'string' ? p : String(p))).join(' ');
     let next: boolean | undefined;
@@ -38,6 +44,10 @@ export function createWsHealthLogger(base: Logger): { sdkLogger: SdkLogger; heal
     if (next !== undefined && next !== health.healthy) {
       health.healthy = next;
       health.since = Date.now();
+      if (next) {
+        if (everHealthy) opts?.onRecovered?.();
+        everHealthy = true;
+      }
     }
   };
   const line = (parts: unknown[]): string => parts.map(String).join(' ');
