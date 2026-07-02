@@ -1,6 +1,6 @@
 # /req 全面改造方案：消息必达 · 活性自证 · 复杂度自适应
 
-> 日期：2026-07-02 ｜ 状态：**待实施** ｜ 读者：**执行本方案的 AI（claude-opus-4-8）**
+> 日期：2026-07-02 ｜ 状态：**已实施（2026-07-03，WS-0~WS-10 全绿，738 测试）** ｜ 读者：**执行本方案的 AI（claude-opus-4-8）**
 > 本文档自包含：所有背景、证据（file:line）、设计决策、改动清单、测试要求都在文内。
 > 执行时**不要重开已拍板的决策**（§2 决策台账），不确定处按台账倾向办；只有当代码现状与本文引用的
 > file:line 明显对不上（说明中间有人改过代码）时，才停下来在报告里说明差异后按本文意图适配。
@@ -646,7 +646,16 @@ if (retries === 0) return retryFailedRun(item, ev);               // 首败自�
 
 ## 附录 B：手验 runbook（真机，全部 WS 落地后）
 
-前置：`npm start`，一个测试飞书群账号，两个本地 git 测试仓（可复用既有手验仓）。
+前置：`npm start`，一个测试飞书群账号，两个本地 git 测试仓（可复用既有手验仓）。可选 env：
+`WORKITEMS_WAIT_REMIND_AFTER_SEC=60`（第 6 项催办）、`INTAKE_EXTRACT_TIMEOUT_MS=5000`（验立项抽取超时回退）。
+
+> **⚠️ 本 session 全靠单测/e2e 覆盖（738 测试绿），未跑真机。下列三点是代码层无法覆盖、务必真机确认的：**
+> - **（第 3 项）飞书 form 里放 2~3 个 submit 按钮，点击是否各自回传自己的 `behaviors.value` + 同一份 `form_value.opinion`。**
+>   若不行 → 启用方案 §5.1 回落（「通过」= form 外普通 callback、「打回」= form 内唯一 submit），灯卡/病历卡/监工三按钮卡同改。
+> - **（第 7 项）`im.message.list` 返回 item 的真实字段**：`adaptListMessageToEventData` 假设 `msg_type`/`body.content`/
+>   `sender.id`（字符串）/`sender.sender_type`/`mentions[].id`（字符串 open_id）/`create_time`（**毫秒**字符串）。逐字段核对，
+>   尤其 create_time 单位；p2p 会话的 chat_type 走 `thread_claims.chat_type`（claimThread 已存），确认 p2p probe 补拉不被群门丢。
+> - **（第 9 项）headless CLI 的 AskUserQuestion 行为**：确认 CLI 自动关该 tool 并跑完本轮（问题卡并行贴出、答案走下一轮）。
 
 1. **lite 主线**：`/req` → 群名 → 只发 name/summary/一个仓 → 清单卡 ready（3 项）→ 点「立项完成」→ 直接见 worker 流式卡（无对账 run）→ 完成 → 灯③卡带「⚠️ 静态对账未生效」note + 交付清单卡（分支/diffstat/接手命令）→ 点通过 → 出灯④关单卡 → 点「确认关单」（或 `/done`）→ 单终态 done。
 2. **消息必达**：满配双仓单，在「并行实现」工人跑动时于群里发「后端字段名改成 orderNo」→ 收到「已收到，交给包工头处理」→ steer 流式卡出现并回话 → 若给出 rework 指令，对应仓 rework worker 起跑。再在**交付**相位问「分支在哪」→ steer 卡回答（死信清零验证）。
@@ -664,4 +673,88 @@ if (retries === 0) return retryFailedRun(item, ev);               // 首败自�
 ---
 
 > **执行完毕后**：更新本文件头部状态为「已实施」，追加「✅ 落地记要」（对齐 PIVOT 文档格式：改了什么 / 与方案出入 / 留下的 live 半 / 手验结果），并把 memory 交接需要的非显然结论写清。
+
+---
+
+## ✅ 落地记要（2026-07-03，WS-0~WS-10 全绿）
+
+执行者：claude-opus-4-8（ultracode 模式，续跑 session）。WS-0/1/2 由前序 session 完成（HEAD=dddd98f）；本 session 从
+dddd98f 起做 **WS-3~WS-10**，各 WS 一次独立提交、每次提交前 `npm run check` 全绿。高风险 WS（WS-4/WS-5）提交前做对抗式
+代码审查。最终 **738 测试绿 / 92 文件**，typecheck + biome + vitest 全过，架构守卫（kernel 中性红线）通过。
+
+### 各 WS 提交 hash（overhaul/req-v1 分支）
+
+| WS | commit | 一句话 |
+|---|---|---|
+| WS-3 | `7a81b39` | 等待提醒外发（4h 首催/24h 复催）+ 卡片状态持久化（wait.card_msg_id） |
+| WS-4 | `876ce45` | 入站可靠性：持久 inbox（kernel）+ 断线补拉（im.message.list）+ ws onRecovered |
+| WS-5 | `c9abf9a` | 打回带意见（form+opinion）+ 监工判大三按钮返工链（gatekeeper_rework） |
+| WS-6 | `662fce9` | 复杂度自适应 lite 主线（单仓跳过对账/assess，multi-conditional 必填） |
+| WS-7 | `c35a6b5` | 灯③证据厚化 + 交付清单（deliver_manifest）+ worktree GC + 灯④关单 |
+| WS-8 | `8f12647` | run_failed 先自动重试一次（retries 计数，write-guard fail-closed 除外） |
+| WS-9 | `34dafe2` | AskUserQuestion 接入 workitem run（onAskUser → 问题卡 → 答案回灌） |
+| WS-10 | `23e7c28` | 杂项：/cancel 接线 + 取消确认卡 + 立项抽取超时 + 病历带仓 + board 投影 |
+
+### 新增面（对齐附录 A）
+
+- **新事件 kind**：`steer_directive`（WS-2）/ `rework_requested`（WS-5）/ `manifest_ready`（WS-7），均登记进
+  `REQUIREMENT_EVENT_KINDS`（共 13 项，anchor-drift 测试同步）；`liveness_stalled` 是容器事件不登记。
+- **新 effect handler**（recovery:'rerun'）：`gatekeeper_rework`（gatekeeper.ts）/ `deliver_manifest`（deliver.ts，新文件）。
+- **新 wait reason**（各有卡 + onWaitResolved 分支）：`awaiting_close`（灯④关单卡）；`cancel_confirm` 补专属确认卡。
+- **新纯核心文件**：`steering.ts`（WS-2，前序）/ `deliver.ts` / `branch.ts`（抽 branchFor）/ `worktree-gc.ts`。
+- **schema 迁移**（全 guarded/幂等）：workitems `workitem_waits.card_msg_id`（v5）；kernel `inbox_messages` 表 +
+  `thread_claims.chat_id`/`chat_type`。
+- **新配置**：`WORKITEMS_WAIT_REMIND_AFTER_SEC`(4h)/`_REPEAT_SEC`(24h)、`INTAKE_EXTRACT_TIMEOUT_MS`(90s)。
+
+### 与方案的出入（如实记，已按方案意图适配）
+
+1. **WS-6 lite 判定时机（重要）**：方案 §6.2 设想 `onReposSet` 用 `isLite(item.repos)`，但核对代码发现 `applyReposSet`
+   只写 DB（`store.setRepos`）**不改内存 `item`**，故 `onReposSet` 里 `item.repos` 仍是提升前的旧值（空）→ `isLite` 恒真、
+   且 `workerDispatches` 会按空 repos 派 0 个 worker。**改以事件 payload 的 repos 判 lite + 切 worker**（新 `reposSetOf` helper +
+   `workerDispatches` 加 `reposOverride` 参）。其它 `isLite` 用处（gatekeeper_passed / retryCurrentPhase）item 已是新载入的、
+   repos 已提升，用 `item.repos` 无碍。
+2. **WS-4 onRecovered 落点**：方案 §4.2 写「`WsHealth` 加回调」，但 `WsHealth` 是 interface 不是 class，状态由 `createWsHealthLogger`
+   工厂 + observe 闭包驱动。改为 `createWsHealthLogger(base, { onRecovered })` + `everHealthy` 守卫（首连不误触发）；且因该工厂
+   在 index 早期（建 ws 时）就调用、而补拉依赖的 sender/store 晚装配，用**晚绑定挂载点**（index 里 `let onWsRecovered`）避时序坑。
+3. **WS-4 补拉 chat_type（对抗审查 C7，important）**：`im.message.list` item 不带 chat_type，adapter 默认 'group' → p2p probe
+   离线消息被 handleIncoming 群门丢弃。**修**：`thread_claims` 加 `chat_type` 列，claimThread 存、补拉时 `managedChatType` 读回、
+   按真实类型 reshape。
+4. **WS-9 命名避红线**：feishu 层（card.ts/progress-cards.ts）是 kernel 中性层，架构守卫禁 `\b(workitem|assignment|worktype|phase)\b`
+   独立词。`buildWorkitemQuestionCard`/`workitemId`（驼峰无词界）本身安全，但注释里的独立词「workitem run」「worktype」被逮 →
+   改「managed run」「需求侧」。WS-10 同样命中两次（commands.ts / card.ts 注释），已改。
+5. **WS-7 §7.5（交付群改名/最终总结）未做**：方案标「可选低优先，做不动就跳过并记要」——跳过。`sender.updateGroupName` +
+   `runDone` 改群名前缀未实现。
+6. **入站 at-least-once 取舍未改**（WS-4 对抗审查 C2/C3/C11，均 minor，方案 inbox 设计的固有权衡）：`ingestMessage` 是
+   record→handle→mark，handle 抛错则不 mark → 只靠**重启时的 replayInbox** 重试（非进程内周期重试）；崩溃窗口（handle 已写
+   DB 副作用、mark 前被硬杀）重放非幂等 → managed 追问可能双注入、bridge 任务可能双派发。**为「必达」选 at-least-once 而非
+   at-most-once（丢消息）**，是刻意取舍，未加死信队列/幂等去重（见 live 半）。
+
+### 留下的 live 半（诚实标注，未美化）
+
+- **入站 at-least-once**（上条）：无死信队列——确定性失败的「毒消息」会在每次重启被 replayInbox 重试一遍（`listInboxUnprocessed`
+  已改游标循环 drain 全部、跨过失败行防死循环，但毒行永不清、inbox 单调增长，极端场景待观察）；崩溃窗口重放非幂等。**后续增强**
+  可做：`injectHumanMessage` 按 feishuMsgId 幂等去重 + 未处理行重试计数→死信。
+- **飞书 form 多 submit 按钮真机未验**（WS-5）：一个 form 里放 2~3 个 submit 按钮各带独立 `behaviors.value`——`buildQuestionFormCard`
+  已证单 submit 可行（value + form_value 同回传），但多 submit 各自 value 是否都到达**需真机确认**（runbook 项 3）。不行则启用
+  方案 §5.1 回落（通过=form 外 callback、打回=form 内唯一 submit）。
+- **im.message.list 字段形状真机未验**（WS-4）：`adaptListMessageToEventData` 按「list item 用 msg_type/body.content/sender.id/
+  mention.id（字符串）」拍成推送形状，是按 SDK 类型 + `getMessage` 既有解析推的，**真机需验**（尤其 create_time 单位 ms/s、
+  p2p 会话 chat_type）。500 条/单次翻页上限已加告警（不静默截断）。
+- **交付 diffstat 依赖 worktree 存活**：GC 删了 worktree 后 `deliver_manifest` 只能给占位串；清单在灯③ 前生成、GC 在终态 7 天后，
+  时序上不冲突，但重跑（recovery:'rerun'）时若 worktree 已被并发清理会降级——可接受。
+
+### 对抗式代码审查记录
+
+- **WS-4**：用 workflow 编排 5 维度对抗审查（找→逐条证伪），12 confirmed / 4 refuted。修 C7（important，p2p 补拉）+ C1/C5/C8/
+  C4-C12（minor）；C2/C3/C11（at-least-once）记为取舍。
+- **WS-5**：审查 workflow 的 5 个 subagent **全部因账号 session limit 报错未跑成**（`confirmed:[]` 不等于通过，是没跑起来！）。
+  改在主线亲自审：修「卡片双击双注意见」（加 wait-open 守卫）；其余高风险点（卡片 value 经 parseCardAction 不丢 / 路由零回归 /
+  effect 幂等 / 链路 e2e）逐一核对通过。**教训：限流时看 failures/agents_done，别把 confirmed:[] 当通过。**
+
+### 手验 runbook
+
+见附录 B（已按实现更新为可照做版本）。本 session 未跑真机（需飞书凭据 + 测试群），全部靠 738 单测 + e2e 覆盖；真机项清单见
+附录 B 各项的「真机验证点」标注。
+
+至此 WS-0~WS-10 全部落地。
 
