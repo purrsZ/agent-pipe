@@ -69,6 +69,7 @@ export const REQUIREMENT_EVENT_KINDS = [
   'gatekeeper_big', // 监工科层（C）：跨仓外溢/疑则判大 → raise 人（病历）
   'intake_field_set', // 立项收料：每填一项一条（fold 出立项清单状态，gateReady 时 raise 立项 gate）
   'steer_directive', // WS-2 消息必达：steer_apply 解析包工头报告后 emit 的结构化指令（redo_reconcile/rework/raise_human/none）
+  'rework_requested', // WS-5 监工判大返工：gatekeeper_rework 提取受影响仓后 emit → 定向重派 worker
 ] as const;
 
 export type RequirementEventKind = (typeof REQUIREMENT_EVENT_KINDS)[number];

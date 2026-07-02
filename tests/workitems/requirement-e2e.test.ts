@@ -333,8 +333,11 @@ describe('requirement skeleton end-to-end', () => {
     await waitFor(() => expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.split));
   });
 
-  it('灯③反馈回路：驳回 灯③ 留在集成验证并重核（integration_check 重跑），仍可再通过', async () => {
-    const { store, api } = harness();
+  it('WS-5 灯③反馈回路：驳回 灯③ → 派 steer run 读打回意见（不再空转 integration_check），留在集成验证', async () => {
+    // steer 报告给一个 rework 指令 → 定向返工 repo-a → 集成重核（no_contract 放行）→ 灯③ 重现，仍可通过。
+    const { store, api } = harness({
+      steerJson: JSON.stringify({ action: 'rework', repos: ['repo-a'], note: '样式改一下' }),
+    });
     const item = api.createWorkItem({
       type: 'requirement',
       title: '灯三驳回',
@@ -353,7 +356,10 @@ describe('requirement skeleton end-to-end', () => {
       .find((w) => w.reason === `checkpoint:${PHASE.deliver}`)!;
     api.resolveWait(wait.id, { operator: 'lichao', reason: 'redo', decision: { approved: false } });
 
-    // 留在集成验证；重核（integration_check 重跑，no_contract → passed）→ 灯③ 重新出现，仍可通过。
+    // 灯③ 驳回派 steer owner run → steer_apply emit steer_directive（rework）→ 定向返工 → 集成重核 → 灯③ 重现。
+    await waitFor(() =>
+      expect(store.listEvents(item.id).some((e) => e.kind === 'steer_directive')).toBe(true),
+    );
     await waitFor(() => {
       expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.integrate);
       expect(

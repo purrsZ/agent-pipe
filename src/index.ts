@@ -15,6 +15,7 @@ import {
   buildAnchorCard,
   buildCaseFileAnsweredCard,
   buildCaseFileCard,
+  buildGatekeeperBigCard,
   buildCheckpointAnsweredCard,
   buildCheckpointCard,
   buildProcessingCard,
@@ -57,7 +58,10 @@ import { registerProbe } from './worktypes/probe/index.js';
 import { checkpointBoundaryOf } from './worktypes/requirement/checkpoint.js';
 import { registerRequirement } from './worktypes/requirement/index.js';
 import { createIntegrationCheckHandler } from './worktypes/requirement/integration.js';
-import { createGatekeeperReviewHandler } from './worktypes/requirement/gatekeeper.js';
+import {
+  createGatekeeperReviewHandler,
+  createGatekeeperReworkHandler,
+} from './worktypes/requirement/gatekeeper.js';
 import { createReconcileCheckHandler } from './worktypes/requirement/reconcile.js';
 import { createSteerApplyHandler } from './worktypes/requirement/steering.js';
 import { checkpointGateLabel, checkpointRail } from './worktypes/requirement/lights.js';
@@ -1382,22 +1386,42 @@ async function main() {
       return;
     }
 
-    // 通过/打回（关卡灯 或 病历「已处理·继续」）。飞书按钮无输入框，理由用固定文案；操作者 = 点按钮的飞书用户。
+    // WS-5 通过/打回（关卡灯 / 病历「已处理·继续」/ 监工判大三按钮）。opinion 输入框（form_value）在 resolve
+    // 之前经 injectHumanMessage 注入 → seq 落在 resolve 引发的后续 dispatch effect 之前 → 下一轮 run（灯③打回派
+    // 的 steer / rework worker）的 batch 窗口内被消费（D-E）。cancel 分支不注入（上面已 return）。
     const approved = value.approved === true;
-    const reason = approved ? '飞书拍板：通过' : '飞书拍板：打回，请按反馈修改';
-    const r = workbenchAdapter.actions.resolve({
-      itemId,
-      waitId,
-      operator: action.operatorId,
-      approved,
-      reason,
-    });
+    const rawOpinion = (action.formValue as { opinion?: unknown } | undefined)?.opinion;
+    const opinion = typeof rawOpinion === 'string' ? rawOpinion.trim() : '';
+    // 仅在该 wait 仍 open 时注入——防卡片双击/重复点击把同一意见注入两遍（第二击时 wait 已 resolved，
+    // resolveWait 幂等返回未解析，但注入无幂等，故在此加门）。首击时 wait 未 resolve → 注入先于 resolve。
+    if (opinion && workitems.store.getWait(waitId)?.resolvedAt === null) {
+      workitems.api.injectHumanMessage(itemId, {
+        text: `【${approved ? '拍板意见' : '打回意见'}】${opinion}`,
+      });
+    }
+    const reason = opinion || (approved ? '飞书拍板：通过' : '飞书拍板：打回，请按反馈修改');
+    // 监工判大三按钮把 value.action（rework/proceed）透传进 decision.payload，worktype 据此路由（走 resolveWait
+    // 单写口，与 cancel 分支同源）；其余检查点走 workbenchAdapter（板与飞书共用同一口）。
+    const decisionAction = typeof value.action === 'string' ? value.action : undefined;
+    const ok = decisionAction
+      ? workitems.api.resolveWait(waitId, {
+          operator: action.operatorId,
+          reason,
+          decision: { approved, payload: { reason, action: decisionAction } },
+        }).resolved
+      : workbenchAdapter.actions.resolve({
+          itemId,
+          waitId,
+          operator: action.operatorId,
+          approved,
+          reason,
+        }).ok;
     if (caseLabel) {
       await patch(buildCaseFileAnsweredCard(title, caseLabel, false));
     } else {
       const boundary = typeof value.boundary === 'string' ? value.boundary : '';
       const gateLabel = boundary ? checkpointGateLabel(boundary) : '检查点';
-      await patch(buildCheckpointAnsweredCard(title, gateLabel, r.ok ? approved : null));
+      await patch(buildCheckpointAnsweredCard(title, gateLabel, ok ? approved : null));
     }
   }
 
@@ -1750,19 +1774,27 @@ export function createWorkitemsRuntime(deps: {
       // (已处理·继续/取消整单)。二者皆非 → 跳过(如 cancel_confirm 走别的路径)。
       const caseLabel = boundary ? undefined : caseFileLabel(w.reason);
       if (!boundary && !caseLabel) continue;
-      const card = boundary
-        ? buildCheckpointCard(
-            { title, gateLabel: checkpointGateLabel(boundary), rail: checkpointRail(boundary) },
-            { itemId: workitemId, waitId: w.id, boundary },
-          )
-        : buildCaseFileCard(
-            {
-              title,
-              label: caseLabel!,
-              detail: caseFileDetail(workitems.api.listEvents(workitemId), w.reason),
-            },
-            { itemId: workitemId, waitId: w.id },
-          );
+      const detail = boundary
+        ? undefined
+        : caseFileDetail(workitems.api.listEvents(workitemId), w.reason);
+      let card: object;
+      if (boundary) {
+        card = buildCheckpointCard(
+          { title, gateLabel: checkpointGateLabel(boundary), rail: checkpointRail(boundary) },
+          { itemId: workitemId, waitId: w.id, boundary },
+        );
+      } else if (w.reason === 'gatekeeper_big') {
+        // WS-5：监工判大用三按钮卡（已改图纸·重对账并返工 / 无需改·放行 / 取消整单），红线出口不再只有放行。
+        card = buildGatekeeperBigCard(
+          { title, label: caseLabel!, detail },
+          { itemId: workitemId, waitId: w.id },
+        );
+      } else {
+        card = buildCaseFileCard(
+          { title, label: caseLabel!, detail },
+          { itemId: workitemId, waitId: w.id },
+        );
+      }
       const posted = await deps.sender.replyCard(anchorMsgId, card);
       // 发卡成功 → 记 cardMsgId（重启不重发）；失败 → cardMsgId 仍空、下次事件/提醒重试。
       if (posted) workitems.store.updateWait(w.id, { cardMsgId: posted });
@@ -1877,6 +1909,9 @@ export function createWorkitemsRuntime(deps: {
   // requirement 并行实现阶段监工科层 (PIVOT §4): static gatekeeper_review effect。扫各仓工人「疑则上报」→
   // 跨仓外溢/疑则判大 emit gatekeeper_big（病历）/ 纯本仓判小回写图纸 emit gatekeeper_passed → owner assess。
   workitems.effects.registerHandler(createGatekeeperReviewHandler());
+  // WS-5 监工判大返工：人已改图纸并重对账通过（reconcile_passed@implement）→ 提取最近 gatekeeper_big 的受影响仓 →
+  // emit rework_requested → worktype 定向重派这些仓的 worker。设计仍只有人能改（agent 只重对账），红线不放松。
+  workitems.effects.registerHandler(createGatekeeperReworkHandler());
   // 立项收尾 effect: 立项 gate 通过 → fold 立项填项历史 → 落立项书 intake/intake.md + 提升 repos
   // (emit repos_set)。注册在这里，与 agent-run / integration_check 同批，进理解时由 worktype 发起。
   workitems.effects.registerHandler(createIntakeFinalizeHandler());

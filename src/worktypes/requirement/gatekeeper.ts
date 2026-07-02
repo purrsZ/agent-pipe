@@ -102,6 +102,37 @@ export function createGatekeeperReviewHandler(): EffectHandler {
   };
 }
 
+// WS-5：监工判大后人已改图纸并重对账通过（reconcile_passed@implement）→ 本 effect 从最近一条 gatekeeper_big
+// 的 raises 提取受影响仓（∩ workitem.repos；空则回落全量，宁多勿漏）→ emit rework_requested，由 worktype
+// 定向重派这些仓的 worker（带 rework note）。recovery:'rerun' 幂等：重跑重读同一 gatekeeper_big、重 emit 同一指令，
+// 下游 rework_requested 分支靠 runningWorkerRepos 守卫防重派。
+export function createGatekeeperReworkHandler(): EffectHandler {
+  return {
+    kind: 'gatekeeper_rework',
+    recovery: 'rerun',
+    run: gatekeeperRework,
+  };
+}
+
+async function gatekeeperRework(ctx: EffectContext): Promise<void> {
+  let lastBig: unknown;
+  for (const ev of ctx.eventsSince(0)) {
+    if (ev.kind === 'gatekeeper_big') lastBig = ev.payload;
+  }
+  const repos = ctx.workitem.repos;
+  const affected = [
+    ...new Set(
+      coerceRaises(lastBig)
+        .map((r) => r.repo)
+        .filter((r) => r.length > 0 && repos.includes(r)),
+    ),
+  ];
+  ctx.emit('rework_requested', {
+    repos: affected.length > 0 ? affected : repos,
+    note: '监工判大后人已改图纸并重对账通过；请重读本仓设计目录与最新跨仓契约，按新图纸返工。',
+  });
+}
+
 async function gatekeeperReview(ctx: EffectContext): Promise<void> {
   const raises: WorkerRaise[] = [];
   for (const reportPath of reportPathsFrom(ctx.eventsSince(0))) {

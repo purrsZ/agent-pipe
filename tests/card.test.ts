@@ -9,6 +9,7 @@ import {
   buildCheckpointAnsweredCard,
   buildCheckpointCard,
   buildErrorCard,
+  buildGatekeeperBigCard,
   buildQuestionAnsweredCard,
   buildQuestionCard,
   buildQuestionFormCard,
@@ -126,10 +127,29 @@ describe('buildAnchorCard (M1b WI-4)', () => {
   });
 });
 
+// WS-5：灯卡/病历卡把按钮移进 form，并加 opinion 输入框。提交时飞书同时回传 button.value 与 form_value.opinion。
+function formOf(card: { body: { elements: Array<Record<string, unknown>> } }): {
+  elements: Array<Record<string, unknown>>;
+} {
+  return card.body.elements.find((e) => e.tag === 'form') as {
+    elements: Array<Record<string, unknown>>;
+  };
+}
+function formButtons(card: {
+  body: { elements: Array<Record<string, unknown>> };
+}): Array<Record<string, unknown>> {
+  return formOf(card).elements.filter((e) => e.tag === 'button');
+}
+function formInputNames(card: { body: { elements: Array<Record<string, unknown>> } }): string[] {
+  return formOf(card)
+    .elements.filter((e) => e.tag === 'input')
+    .map((e) => e.name as string);
+}
+
 describe('buildCheckpointCard (T3 灯卡)', () => {
   const routing = { itemId: 'wi-1', waitId: 'wt-9', boundary: 'requirement:合同' };
 
-  it('renders gate label + rail and 通过/打回 callback buttons carrying the routing', () => {
+  it('WS-5: form 包裹 opinion 输入框 + 通过/打回 submit 按钮，value 携带 routing/approved', () => {
     const card = buildCheckpointCard(
       { title: '双端登录', gateLabel: '灯① 理解→合同', rail: '●灯①  ○灯②(快)' },
       routing,
@@ -137,12 +157,13 @@ describe('buildCheckpointCard (T3 灯卡)', () => {
     expect(card.header.template).toBe('orange');
     const json = JSON.stringify(card);
     expect(json).toContain('灯① 理解→合同');
-    expect(json).toContain('●灯①');
     expect(json).toContain('通过');
     expect(json).toContain('打回');
 
-    const buttons = card.body.elements.filter((e) => e.tag === 'button');
+    expect(formInputNames(card)).toContain('opinion');
+    const buttons = formButtons(card);
     expect(buttons).toHaveLength(2);
+    for (const b of buttons) expect(b.form_action_type).toBe('submit');
     const values = buttons.map(
       (b) => (b.behaviors as Array<{ value: Record<string, unknown> }>)[0]!.value,
     );
@@ -168,9 +189,7 @@ describe('buildCheckpointCard (T3 灯卡)', () => {
     const card = buildCheckpointCard({ title: 't', gateLabel: '灯①', rail: 'r' }, routing) as {
       body: { elements: Array<Record<string, unknown>> };
     };
-    const approveBtn = card.body.elements.find((e) => e.tag === 'button') as {
-      behaviors: Array<{ value: unknown }>;
-    };
+    const approveBtn = formButtons(card)[0] as { behaviors: Array<{ value: unknown }> };
     const action = parseCardAction({
       action: { value: approveBtn.behaviors[0]!.value },
       operator: { open_id: 'ou_owner' },
@@ -187,7 +206,7 @@ describe('buildCheckpointCard (T3 灯卡)', () => {
 describe('buildCaseFileCard (病历卡)', () => {
   const routing = { itemId: 'wi-1', waitId: 'wt-9' };
 
-  it('red header, label+detail, 已处理·继续 / 取消整单 两按钮(取消带 cancel:true)', () => {
+  it('red header, label+detail, WS-5 form+opinion + 已处理·继续 / 取消整单 两 submit 按钮(取消带 cancel:true)', () => {
     const card = buildCaseFileCard(
       { title: '自定义菜品备注', label: '跨仓对账 · 冲突/悬空', detail: '后端仓未列入' },
       routing,
@@ -199,7 +218,8 @@ describe('buildCaseFileCard (病历卡)', () => {
     expect(json).toContain('已处理');
     expect(json).toContain('取消整单');
 
-    const buttons = card.body.elements.filter((e) => e.tag === 'button');
+    expect(formInputNames(card)).toContain('opinion');
+    const buttons = formButtons(card);
     expect(buttons).toHaveLength(2);
     const values = buttons.map(
       (b) => (b.behaviors as Array<{ value: Record<string, unknown> }>)[0]!.value,
@@ -224,7 +244,7 @@ describe('buildCaseFileCard (病历卡)', () => {
     const card = buildCaseFileCard({ title: 't', label: '监工 · 跨仓外溢' }, routing) as {
       body: { elements: Array<Record<string, unknown>> };
     };
-    const cancelBtn = card.body.elements.filter((e) => e.tag === 'button')[1] as {
+    const cancelBtn = formButtons(card)[1] as {
       behaviors: Array<{ value: unknown }>;
     };
     const action = parseCardAction({
@@ -237,6 +257,35 @@ describe('buildCaseFileCard (病历卡)', () => {
       waitId: 'wt-9',
       cancel: true,
     });
+  });
+});
+
+describe('buildGatekeeperBigCard (WS-5 监工判大三按钮)', () => {
+  const routing = { itemId: 'wi-1', waitId: 'wt-9' };
+
+  it('三 submit 按钮(重对账并返工 action=rework / 放行 proceed / 取消整单) + opinion 输入框', () => {
+    const card = buildGatekeeperBigCard(
+      { title: '订单导出', label: '监工 · 跨仓外溢', detail: '要给 createOrder 加字段' },
+      routing,
+    ) as { header: { template: string }; body: { elements: Array<Record<string, unknown>> } };
+    expect(card.header.template).toBe('red');
+    expect(formInputNames(card)).toContain('opinion');
+
+    const buttons = formButtons(card);
+    expect(buttons).toHaveLength(3);
+    for (const b of buttons) expect(b.form_action_type).toBe('submit');
+    const values = buttons.map(
+      (b) => (b.behaviors as Array<{ value: Record<string, unknown> }>)[0]!.value,
+    );
+    expect(values[0]).toMatchObject({
+      kind: CHECKPOINT_ACTION_KIND,
+      itemId: 'wi-1',
+      waitId: 'wt-9',
+      approved: true,
+      action: 'rework',
+    });
+    expect(values[1]).toMatchObject({ approved: true, action: 'proceed' });
+    expect(values[2]).toMatchObject({ cancel: true });
   });
 });
 

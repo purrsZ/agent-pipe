@@ -85,14 +85,17 @@ export function requirementTransition(item: WorkItem, ev: WorkItemEvent): Transi
       // 立项收尾把 repos 提升进 workitem 后才触发首个 owner 对账 run（确保 run 读到的 repos 已就位）。
       return onReposSet(item);
     case 'reconcile_passed':
-      // owner 跨仓对账全咬合 → 拆解→并行实现（按仓分发）。
-      return requestAdvance(
-        item,
-        PHASE.split,
-        PHASE.implement,
-        'reconcile_passed',
-        openWaitReasonsOf(ev.payload),
-      );
+      // 拆解阶段：owner 跨仓对账全咬合 → 拆解→并行实现（按仓分发）。
+      // WS-5 implement 阶段：监工判大后人改图纸的重对账通过 → gatekeeper_rework effect 提取受影响仓 → 定向返工。
+      return item.phase === PHASE.implement
+        ? { effects: [{ kind: 'gatekeeper_rework' }] }
+        : requestAdvance(
+            item,
+            PHASE.split,
+            PHASE.implement,
+            'reconcile_passed',
+            openWaitReasonsOf(ev.payload),
+          );
     case 'reconcile_conflict':
       return onReconcileConflict(item, ev);
     case 'gatekeeper_passed':
@@ -115,6 +118,9 @@ export function requirementTransition(item: WorkItem, ev: WorkItemEvent): Transi
     case 'steer_directive':
       // WS-2：steer_apply effect 解析包工头报告后 emit 的结构化指令（redo_reconcile / rework / raise_human / none）。
       return onSteerDirective(item, ev);
+    case 'rework_requested':
+      // WS-5：gatekeeper_rework effect 提取受影响仓后 emit → 定向重派这些仓的 worker（同 WS-2.3 rework 幂等姿势）。
+      return onReworkRequested(item, ev);
     case 'liveness_stalled':
       // 容器活性看门（watchdog）发现 must-progress 单无任何在途工作 → 自曝；raise 病历让人重试当前阶段。
       return onLivenessStalled(item, ev);
@@ -179,7 +185,8 @@ function onRunCompleted(item: WorkItem, ev: WorkItemEvent): Transition {
 // owner 跨仓对账发现冲突/悬空 → raise 人（病历），停在拆解。人改对应单仓设计后 resolve 该 wait（onWaitResolved
 // 的 split 分支）触发重对账。与「监工判大 / 集成未决」同构：不放行红线、挂起、攒进晨审（PIVOT §5）。
 function onReconcileConflict(item: WorkItem, ev: WorkItemEvent): Transition {
-  if (item.phase !== PHASE.split) return {};
+  // WS-5：放宽到 implement——监工判大返工链里人改的图纸重对账仍冲突 → 再弹对账病历（不止拆解阶段）。
+  if (item.phase !== PHASE.split && item.phase !== PHASE.implement) return {};
   // 幂等：病历已 open 就别再 raise 一个孤儿 wait（reconcile_check 重跑、或并发触发）。
   if (openWaitReasonsOf(ev.payload).includes(RECONCILE_CONFLICT_REASON)) return {};
   return {
@@ -322,14 +329,20 @@ function onWaitResolved(item: WorkItem, ev: WorkItemEvent): Transition {
   // 无 run、无任何再触发 = 死状态。approved → 走各自的前进动作；declined（或错误 phase）→ reRaise 病历，
   // 留给人再裁决（要彻底放弃走 /cancel）。
   if (reason === RECONCILE_CONFLICT_REASON) {
-    return decision.approved && item.phase === PHASE.split
-      ? { dispatch: [ownerSpec(item, 'reconcile')] }
+    // WS-5：放宽到 implement——监工判大返工链里人改图纸后重对账仍冲突，也能 resolve 重对账。
+    return decision.approved && (item.phase === PHASE.split || item.phase === PHASE.implement)
+      ? { dispatch: [ownerSpec(item, STAGE.reconcile)] }
       : reRaiseWait(RECONCILE_CONFLICT_REASON);
   }
   if (reason === GATEKEEPER_BIG_REASON) {
-    return decision.approved && item.phase === PHASE.implement
-      ? { dispatch: [ownerSpec(item, 'assess')] }
-      : reRaiseWait(GATEKEEPER_BIG_REASON);
+    if (!(decision.approved && item.phase === PHASE.implement)) {
+      return reRaiseWait(GATEKEEPER_BIG_REASON);
+    }
+    // WS-5：红线出口不再只有「放行」。已改图纸·返工 → 派 owner 重对账人改过的图纸（reconcile_passed@implement
+    // → gatekeeper_rework → 定向返工）；无需改·放行（proceed / 无 action）→ 继续 assess（现状）。
+    return decisionActionOf(ev) === 'rework'
+      ? { dispatch: [ownerSpec(item, STAGE.reconcile)] }
+      : { dispatch: [ownerSpec(item, STAGE.assess)] };
   }
   if (reason === RUN_FAILED_REASON) {
     return decision.approved ? retryCurrentPhase(item) : reRaiseWait(RUN_FAILED_REASON);
@@ -410,8 +423,9 @@ function redoPhase(item: WorkItem): Transition {
   // 立项 gate 没有「审设计」式的真驳回（立项卡只有「立项完成」按钮）。防御性处理 approved=false
   // （只可能来自工作台/API）：料已齐，重弹立项 gate，杜绝「gate 被 resolve 后停在立项却无 open wait」死状态。
   if (item.phase === PHASE.intake) return raiseCheckpoint(PHASE.split, CHECKPOINT_WAIT_TTL_SEC);
-  // 灯③ 打回 → 回集成验证重核。
-  if (item.phase === PHASE.integrate) return { effects: [{ kind: 'integration_check' }] };
+  // WS-5 灯③ 打回 → 派 steer（读 handleCheckpointAction 在 resolve 前注入的打回意见，按 WS-2 指令集决定
+  // 返工哪些仓）；无意见时 steer prompt 规定 raise_human（打回但未说明原因，请群里补充）。不再空转 integration_check。
+  if (item.phase === PHASE.integrate) return { dispatch: [ownerSpec(item, STAGE.steer)] };
   return {};
 }
 
@@ -568,6 +582,23 @@ function onSteerDirective(item: WorkItem, ev: WorkItemEvent): Transition {
     return reRaiseWait(STEER_ESCALATED_REASON);
   }
   return {}; // none
+}
+
+// WS-5：gatekeeper_rework effect emit 的 rework_requested → 对 payload.repos 中仍在 item.repos 内、且当前
+// 无 running worker 的仓定向重派 worker（stage=rework，带 note）。幂等姿势同 WS-2.3 rework：effect 是
+// recovery:'rerun'，崩溃重跑会重 emit rework_requested，靠 runningWorkerRepos 守卫防重派（首跑派出的已 running）。
+function onReworkRequested(item: WorkItem, ev: WorkItemEvent): Transition {
+  if (item.phase !== PHASE.implement) return {};
+  const running = new Set(runningWorkerReposOf(ev.payload));
+  const note = steerNoteOf(ev.payload);
+  const targets = steerReposOf(ev.payload).filter((r) => item.repos.includes(r) && !running.has(r));
+  return { dispatch: targets.map((repo) => workerReworkSpec(item, repo, note)) };
+}
+
+// WS-5：从 checkpoint 决策 payload 读 action（监工判大三按钮把 value.action 透传进 decision.payload）。
+function decisionActionOf(ev: WorkItemEvent): string | undefined {
+  const v = asObject(checkpointDecisionOf(ev)?.payload).action;
+  return typeof v === 'string' ? v : undefined;
 }
 
 // 定向重派某仓 worker（rework 轮，WS-2.3 / WS-5）。note 经 dispatch payload 传给 worker prompt。

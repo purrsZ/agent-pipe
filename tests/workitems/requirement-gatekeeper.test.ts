@@ -3,6 +3,7 @@ import type { EffectContext } from '../../src/workitems/effects.js';
 import type { WorkItemEvent } from '../../src/workitems/types.js';
 import {
   createGatekeeperReviewHandler,
+  createGatekeeperReworkHandler,
   gatekeeperVerdict,
   parseWorkerRaises,
   partitionRaises,
@@ -145,5 +146,51 @@ describe('gatekeeper_review effect handler', () => {
     );
     await handler.run(ctx);
     expect(emitted[0]!.kind).toBe('gatekeeper_big');
+  });
+});
+
+// WS-5：监工判大后人已改图纸并重对账通过 → gatekeeper_rework 从最近一条 gatekeeper_big 的 raises 提取
+// 受影响仓 → emit rework_requested → 定向重派这些仓的 worker（红线不放松：图纸仍只有人能改）。
+const gatekeeperBig = (raises: unknown[]): WorkItemEvent => ({
+  id: 2,
+  workitemId: 'wi-1',
+  seq: 2,
+  kind: 'gatekeeper_big',
+  payload: { raises },
+  createdAt: 1000,
+});
+
+describe('gatekeeper_rework effect handler (WS-5)', () => {
+  const handler = createGatekeeperReworkHandler();
+
+  it('从最近一条 gatekeeper_big 的 raises 提取受影响仓 ∩ workitem.repos → emit rework_requested', async () => {
+    const { ctx, emitted } = fakeCtx({}, [
+      gatekeeperBig([{ interfaceId: 'createOrder', question: 'q', repo: '/repos/backend' }]),
+      gatekeeperBig([
+        { interfaceId: 'createOrder', question: 'q', repo: '/repos/backend' },
+        { interfaceId: 'x', question: 'q2', repo: '/repos/other' }, // 不在 workitem.repos → 过滤
+      ]),
+    ]);
+    (ctx.workitem as { repos: string[] }).repos = ['/repos/backend', '/repos/frontend'];
+    await handler.run(ctx);
+    expect(emitted[0]!.kind).toBe('rework_requested');
+    expect((emitted[0]!.payload as { repos: string[] }).repos).toEqual(['/repos/backend']);
+    expect((emitted[0]!.payload as { note: string }).note).toBeTruthy();
+  });
+
+  it('raises 无有效 repo → 回落 workitem.repos 全量（宁多勿漏）', async () => {
+    const { ctx, emitted } = fakeCtx({}, [
+      gatekeeperBig([{ interfaceId: 'x', question: 'q', repo: '' }]),
+    ]);
+    (ctx.workitem as { repos: string[] }).repos = ['/repos/a', '/repos/b'];
+    await handler.run(ctx);
+    expect((emitted[0]!.payload as { repos: string[] }).repos).toEqual(['/repos/a', '/repos/b']);
+  });
+
+  it('无 gatekeeper_big 事件 → 回落 workitem.repos 全量', async () => {
+    const { ctx, emitted } = fakeCtx({}, []);
+    (ctx.workitem as { repos: string[] }).repos = ['/repos/a'];
+    await handler.run(ctx);
+    expect((emitted[0]!.payload as { repos: string[] }).repos).toEqual(['/repos/a']);
   });
 });

@@ -314,11 +314,12 @@ describe('requirement lifecycle transitions', () => {
     expect(out.dispatch).toBeUndefined();
   });
 
-  it('灯③ rejected stays in 集成验证 and re-runs the integration对账 effect', () => {
+  it('灯③ rejected stays in 集成验证 and 派 steer 读打回意见决定返工（WS-5，不再空转 integration_check）', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.integrate });
     const out = t.onEvent(item, ev('wait_resolved', { decision: { approved: false } }));
     expect(out.phase).toBeUndefined();
-    expect(out.effects?.[0]).toMatchObject({ kind: 'integration_check' });
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'steer' } });
+    expect(out.effects ?? []).toHaveLength(0);
   });
 
   it('灯④ — close in 交付 terminates done; elsewhere close is inert', () => {
@@ -574,5 +575,92 @@ describe('requirement lifecycle transitions', () => {
   it('WS-2 steer run 失败 → 不弹病历（消息仍在窗口内，下个 owner run 会带上）', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.implement });
     expect(t.onEvent(item, ev('run_failed', { role: 'owner', stage: 'steer' }))).toEqual({});
+  });
+});
+
+describe('requirement WS-5 打回带意见 + 监工判大返工通道', () => {
+  it('灯③ declined → 派 steer 读打回意见决定返工（不再空转 integration_check）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.integrate, repos: ['repo-a'] });
+    const out = t.onEvent(
+      item,
+      ev('wait_resolved', {
+        decision: { approved: false },
+        resolvedWaitReason: `checkpoint:${PHASE.deliver}`,
+      }),
+    );
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'steer' } });
+    expect(out.effects ?? []).toHaveLength(0);
+  });
+
+  it('监工判大 resolve(approved, action=rework) → 派 owner reconcile（重对账）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a', 'repo-b'] });
+    const out = t.onEvent(
+      item,
+      ev('wait_resolved', {
+        decision: { approved: true, payload: { action: 'rework' } },
+        resolvedWaitReason: 'gatekeeper_big',
+      }),
+    );
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'reconcile' } });
+  });
+
+  it('监工判大 resolve(approved, proceed/无 action) → 派 owner assess（现状放行）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a'] });
+    const out = t.onEvent(
+      item,
+      ev('wait_resolved', {
+        decision: { approved: true, payload: { action: 'proceed' } },
+        resolvedWaitReason: 'gatekeeper_big',
+      }),
+    );
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'assess' } });
+  });
+
+  it('reconcile_passed(implement) → gatekeeper_rework effect（不推进阶段）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a'] });
+    const out = t.onEvent(item, ev('reconcile_passed', {}));
+    expect(out.effects?.[0]).toMatchObject({ kind: 'gatekeeper_rework' });
+    expect(out.phase).toBeUndefined();
+  });
+
+  it('rework_requested(implement) → 只对无 running worker 的仓派 rework worker', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a', 'repo-b'] });
+    const out = t.onEvent(
+      item,
+      ev('rework_requested', {
+        repos: ['repo-a', 'repo-b'],
+        note: '按新图纸返工',
+        runningWorkerRepos: ['repo-b'], // b 有 running worker → 跳过（幂等/防重派）
+      }),
+    );
+    expect(out.dispatch).toHaveLength(1);
+    expect(out.dispatch?.[0]).toMatchObject({
+      role: 'worker',
+      repo: 'repo-a',
+      payload: { stage: 'rework', note: '按新图纸返工' },
+    });
+  });
+
+  it('rework_requested 非 implement 相位 → 无动作', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.integrate, repos: ['repo-a'] });
+    expect(t.onEvent(item, ev('rework_requested', { repos: ['repo-a'] }))).toEqual({});
+  });
+
+  it('reconcile_conflict(implement)：人改图纸仍冲突 → 病历再弹（放宽相位守卫）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    const out = t.onEvent(item, ev('reconcile_conflict', { unresolved: [{}] }));
+    expect(out.waits?.[0]).toMatchObject({ kind: 'human', reason: 'reconcile_conflict' });
+  });
+
+  it('resolve reconcile_conflict(approved) in implement → 重派 owner reconcile', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    const out = t.onEvent(
+      item,
+      ev('wait_resolved', {
+        decision: { approved: true },
+        resolvedWaitReason: 'reconcile_conflict',
+      }),
+    );
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'reconcile' } });
   });
 });

@@ -550,6 +550,19 @@ export function buildQuestionFormCard(
 /** Callback-button payload value for a checkpoint 灯卡 (通过/打回). */
 export const CHECKPOINT_ACTION_KIND = 'ckpt';
 
+// WS-5：灯卡/病历卡的意见输入框（form 内）。打回/拍板意见随 form_value.opinion 回传，index.ts
+// handleCheckpointAction 在 resolveWait 之前经 injectHumanMessage 注入 → 落入下一轮 run 的 batch 窗口。
+// 真机风险（runbook）：一个 form 里放多个 submit 按钮各带 value——buildQuestionFormCard 已验证单 submit
+// 可行；多 submit 需真机确认各自 value 都到达，若不行回落方案见 OVERHAUL §5.1。
+function opinionInput(hint: string): object {
+  return {
+    tag: 'input',
+    name: 'opinion',
+    required: false,
+    placeholder: { tag: 'plain_text', content: `意见（可选）：${hint}` },
+  };
+}
+
 /** Routing carried in each 灯卡 button so a click resolves the right open wait. */
 export interface CheckpointCardRouting {
   itemId: string;
@@ -582,6 +595,8 @@ export function buildCheckpointCard(
     text: { tag: 'plain_text', content: text },
     type,
     width: 'default',
+    form_action_type: 'submit',
+    name: approved ? 'ckpt_pass' : 'ckpt_reject',
     behaviors: [
       {
         type: 'callback',
@@ -606,8 +621,15 @@ export function buildCheckpointCard(
       padding: '12px',
       elements: [
         { tag: 'markdown', content: lines },
-        button('通过', 'primary', true),
-        button('打回', 'default', false),
+        {
+          tag: 'form',
+          name: 'ckpt_form',
+          elements: [
+            opinionInput('打回原因 / 通过后想补充的方向'),
+            button('通过', 'primary', true),
+            button('打回', 'default', false),
+          ],
+        },
       ],
     },
   };
@@ -640,11 +662,18 @@ export function buildCaseFileCard(
     '',
     '处理好后点【已处理·继续】我接着往下推；这条推不动就点【取消整单】放弃。',
   ].join('\n');
-  const button = (text: string, type: string, extra: Record<string, unknown>): object => ({
+  const button = (
+    text: string,
+    type: string,
+    name: string,
+    extra: Record<string, unknown>,
+  ): object => ({
     tag: 'button',
     text: { tag: 'plain_text', content: text },
     type,
     width: 'default',
+    form_action_type: 'submit',
+    name,
     behaviors: [
       {
         type: 'callback',
@@ -669,8 +698,90 @@ export function buildCaseFileCard(
       padding: '12px',
       elements: [
         { tag: 'markdown', content: lines },
-        button('已处理·继续', 'primary', { approved: true }),
-        button('取消整单', 'danger', { cancel: true }),
+        {
+          tag: 'form',
+          name: 'case_form',
+          elements: [
+            opinionInput('我改了什么 / 为什么这么处理'),
+            button('已处理·继续', 'primary', 'case_proceed', { approved: true }),
+            button('取消整单', 'danger', 'case_cancel', { cancel: true }),
+          ],
+        },
+      ],
+    },
+  };
+}
+
+/**
+ * WS-5 监工判大专属卡：跨仓外溢/疑则上报后，红线出口不再只有「放行」——给三条前进方向：
+ * ①【已改图纸·重对账并返工】(approved,action:'rework') → 派 owner 重对账人改过的图纸 → 定向返工受影响仓；
+ * ②【无需改·放行】(approved,action:'proceed') → 继续评估（现状）；③【取消整单】(cancel)。设计仍只有人能改
+ * （agent 只重对账），红线不放松。opinion 输入框随 form 回传，handleCheckpointAction 注入下一轮 run。
+ */
+export function buildGatekeeperBigCard(
+  data: { title: string; label: string; detail?: string },
+  routing: CaseFileCardRouting,
+): object {
+  const title = data.title.length > 40 ? `${data.title.slice(0, 40)}…` : data.title;
+  const lines = [
+    `**${data.label}** — 有跨仓外溢，需要你裁决`,
+    ...(data.detail && data.detail.trim()
+      ? ['', `<font color="grey">${data.detail.trim()}</font>`]
+      : []),
+    '',
+    '· 要改跨仓图纸：你改好设计后点【已改图纸·重对账并返工】，我重对账并定向返工受影响的仓。',
+    '· 无需改：点【无需改·放行】继续评估。',
+    '· 彻底放弃：点【取消整单】。',
+  ].join('\n');
+  const button = (
+    text: string,
+    type: string,
+    name: string,
+    extra: Record<string, unknown>,
+  ): object => ({
+    tag: 'button',
+    text: { tag: 'plain_text', content: text },
+    type,
+    width: 'default',
+    form_action_type: 'submit',
+    name,
+    behaviors: [
+      {
+        type: 'callback',
+        value: {
+          kind: CHECKPOINT_ACTION_KIND,
+          itemId: routing.itemId,
+          waitId: routing.waitId,
+          caseLabel: data.label,
+          ...extra,
+        },
+      },
+    ],
+  });
+  return {
+    schema: '2.0',
+    header: {
+      template: 'red',
+      title: { tag: 'plain_text', content: `需要你裁决 · ${title}` },
+    },
+    body: {
+      direction: 'vertical',
+      padding: '12px',
+      elements: [
+        { tag: 'markdown', content: lines },
+        {
+          tag: 'form',
+          name: 'gk_form',
+          elements: [
+            opinionInput('改了哪些图纸 / 为什么放行'),
+            button('已改图纸·重对账并返工', 'primary', 'gk_rework', {
+              approved: true,
+              action: 'rework',
+            }),
+            button('无需改·放行', 'default', 'gk_proceed', { approved: true, action: 'proceed' }),
+            button('取消整单', 'danger', 'gk_cancel', { cancel: true }),
+          ],
+        },
       ],
     },
   };
