@@ -79,7 +79,8 @@ export function requirementTransition(item: WorkItem, ev: WorkItemEvent): Transi
     case 'run_completed':
       return onRunCompleted(item, ev);
     case 'run_failed':
-      // 容器对 run_failed 不自动重试（只对 stall/abort 重试），不处理就静默卡死全流程 → raise 人病历。
+      // 容器对 run_failed 不自动重试（只对 stall/abort 重试）。WS-8：worktype 首败自动重试一次（瞬时错误自愈），
+      // 再败 / write-guard fail-closed → raise 人病历（不静默卡死全流程）。
       return onRunFailed(item, ev);
     case 'repos_set':
       // 立项收尾把 repos 提升进 workitem 后才触发首个 owner 对账 run（确保 run 读到的 repos 已就位）。
@@ -322,14 +323,46 @@ const RUN_FAILED_REASON = 'run_failed';
 // 任意 run 报错（owner 对账 / worker 施工 / assess / fix）→ raise 人病历，不静默卡死。容器只把 assignment
 // 标 failed、不重试不升级；尤其末位 worker 以 run_failed 收尾时 fan-in（依赖 run_completed）不唤醒 owner、
 // 批次会永久挂起——病历让人看见并裁决（resolve 病历=重试当前阶段，见 onWaitResolved）。idempotent。
-function onRunFailed(_item: WorkItem, ev: WorkItemEvent): Transition {
+function onRunFailed(item: WorkItem, ev: WorkItemEvent): Transition {
   // WS-2.2(c)：steer run 只是答话，失败不值得弹病历（消息仍在窗口内，下一个 owner run 会带上；WS-8 的
   // 自动重试也不给 steer）。
   if (stageOf(ev.payload) === STAGE.steer) return {};
+  // WS-8（D-L）：瞬时错误（API 超时/网络抖动）自愈——首败（retries=0）自动重试一次，人只看到重复失败。
+  // 但 write-guard fail-closed（安全护栏失效）不能靠重试糊过去，直接弹病历。与容器 stall 重试同用
+  // assignment.retries 计数（那条覆盖 stall/abort，这条覆盖 run_failed），不会叠加成无限重试。
+  const err = errorTextOf(ev.payload);
+  if (!err.includes('write-guard fail-closed')) {
+    const retries = numberField(ev.payload, 'assignmentRetries') ?? 0;
+    if (retries === 0) return retryFailedRun(item, ev);
+  }
   if (openWaitReasonsOf(ev.payload).includes(RUN_FAILED_REASON)) return {};
   return {
     waits: [{ kind: 'human', reason: RUN_FAILED_REASON, deadlineTtlSec: CHECKPOINT_WAIT_TTL_SEC }],
   };
+}
+
+// WS-8：按失败结论的 role/repo/stage 原样重派一次（retries:1）。重派后的 run 再失败时 retries=1 → 走病历。
+function retryFailedRun(item: WorkItem, ev: WorkItemEvent): Transition {
+  const stage = stageOf(ev.payload);
+  const t = ttlsOf(item);
+  if (roleOf(ev.payload) === 'worker') {
+    const repo = repoOf(ev.payload);
+    return {
+      dispatch: [
+        {
+          role: 'worker',
+          repo: repo || undefined,
+          retries: 1,
+          deadlineTtlSec: t.deadlineTtlSec,
+          wallclockCapSec: t.wallclockCapSec,
+          payload: { stage: stage ?? 'implement', repo },
+        },
+      ],
+    };
+  }
+  // owner：ownerSpec 按 stage（缺失回落：拆解→reconcile，其它→assess）+ retries:1。
+  const ownerStage = stage ?? (item.phase === PHASE.split ? STAGE.reconcile : STAGE.assess);
+  return { dispatch: [{ ...ownerSpec(item, ownerStage), retries: 1 }] };
 }
 
 // WS-1.3：容器活性看门（watchdog）发现 must-progress 单无任何在途工作（running assignment / pending·running
@@ -552,6 +585,18 @@ function resolvedWaitReasonOf(payload: unknown): string | undefined {
 function roleOf(payload: unknown): string | undefined {
   const o = asObject(payload);
   return typeof o.role === 'string' ? o.role : undefined;
+}
+
+// WS-8：run 结论平铺的 repo（emitRunConclusion 带）。缺失 → ''。
+function repoOf(payload: unknown): string {
+  const v = asObject(payload).repo;
+  return typeof v === 'string' ? v : '';
+}
+
+// WS-8：run_failed 结论的错误文本（emitRunConclusion 平铺 error）。缺失 → ''。
+function errorTextOf(payload: unknown): string {
+  const v = asObject(payload).error;
+  return typeof v === 'string' ? v : '';
 }
 
 // In-flight sibling-worker count the container injects onto an owner-workers run conclusion

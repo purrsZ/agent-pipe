@@ -192,12 +192,14 @@ describe('requirement lifecycle transitions', () => {
     expect(declined.waits?.[0]).toMatchObject({ kind: 'human', reason: 'reconcile_conflict' });
   });
 
-  it('run_failed → raise 人病历（不静默卡死，容器对 run_failed 不自动重试）；幂等', () => {
-    const item = makeWorkItem('wi-1', { phase: PHASE.split });
-    const out = t.onEvent(item, ev('run_failed', { role: 'owner' }));
+  it('run_failed 重试再败（retries=1）→ raise 人病历（不静默卡死）；幂等', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.split, repos: ['repo-a', 'repo-b'] });
+    const out = t.onEvent(item, ev('run_failed', { role: 'owner', assignmentRetries: 1 }));
     expect(out.waits?.[0]).toMatchObject({ kind: 'human', reason: 'run_failed' });
     // 病历已 open（容器注入 openWaitReasons）→ 不重复 raise 孤儿病历。
-    expect(t.onEvent(item, ev('run_failed', { openWaitReasons: ['run_failed'] }))).toEqual({});
+    expect(
+      t.onEvent(item, ev('run_failed', { assignmentRetries: 1, openWaitReasons: ['run_failed'] })),
+    ).toEqual({});
   });
 
   it('resolve run_failed 病历（approved）→ 重试当前阶段入口工作', () => {
@@ -767,5 +769,72 @@ describe('requirement WS-7 交付清单 + 灯④ 关单', () => {
       ev('wait_resolved', { decision: { approved: false }, resolvedWaitReason: 'awaiting_close' }),
     );
     expect(declined.waits?.[0]).toMatchObject({ kind: 'human', reason: 'awaiting_close' });
+  });
+});
+
+describe('requirement WS-8 run_failed 先自动重试一次', () => {
+  it('worker 首败（retries=0）→ 自动重试同仓（不弹病历）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a'] });
+    const out = t.onEvent(
+      item,
+      ev('run_failed', {
+        role: 'worker',
+        repo: 'repo-a',
+        stage: 'implement',
+        assignmentRetries: 0,
+      }),
+    );
+    expect(out.waits ?? []).toHaveLength(0);
+    expect(out.dispatch?.[0]).toMatchObject({
+      role: 'worker',
+      repo: 'repo-a',
+      retries: 1,
+      payload: { stage: 'implement' },
+    });
+  });
+
+  it('worker 重试再败（retries=1）→ 弹病历', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a'] });
+    const out = t.onEvent(
+      item,
+      ev('run_failed', { role: 'worker', repo: 'repo-a', assignmentRetries: 1 }),
+    );
+    expect(out.waits?.[0]).toMatchObject({ reason: 'run_failed' });
+    expect(out.dispatch ?? []).toHaveLength(0);
+  });
+
+  it('错误含 write-guard fail-closed → 直接病历（护栏失效不重试，D-L）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a'] });
+    const out = t.onEvent(
+      item,
+      ev('run_failed', {
+        role: 'worker',
+        repo: 'repo-a',
+        assignmentRetries: 0,
+        error: 'write-guard fail-closed: probe rejected a write',
+      }),
+    );
+    expect(out.waits?.[0]).toMatchObject({ reason: 'run_failed' });
+    expect(out.dispatch ?? []).toHaveLength(0);
+  });
+
+  it('owner 首败 → 自动重试（ownerSpec + retries=1，按 stage）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.split, repos: ['repo-a', 'repo-b'] });
+    const out = t.onEvent(
+      item,
+      ev('run_failed', { role: 'owner', stage: 'reconcile', assignmentRetries: 0 }),
+    );
+    expect(out.dispatch?.[0]).toMatchObject({
+      role: 'owner',
+      retries: 1,
+      payload: { stage: 'reconcile' },
+    });
+  });
+
+  it('steer 失败 → 无动作（不重试不病历，WS-2.2c）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    expect(
+      t.onEvent(item, ev('run_failed', { role: 'owner', stage: 'steer', assignmentRetries: 0 })),
+    ).toEqual({});
   });
 });
