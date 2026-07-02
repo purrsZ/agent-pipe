@@ -41,6 +41,9 @@ export interface ReducerRuntimeDeps {
   cfg: WorkitemsConfig;
   logger?: LoggerLike;
   isRunClass?: (kind: string) => boolean;
+  // WS-0.2: run-class effect kinds for enrich's unconsumedHumanMessages watermark. Optional like
+  // isRunClass — tests may omit it (falls back to ['run']); the container wires effects.runKinds().
+  runKinds?: () => string[];
   // Required (v4 #11): an assembler that forgets to wire this would silently drop
   // every poke/abort — freshly committed run effects would sit pending forever and
   // stalled replacements would never start. Tests pass a no-op; the container wires
@@ -728,11 +731,33 @@ export class ReducerRuntime {
     // integration_check 都是 recovery:'rerun'）再次 emit 判定事件时，若对应 checkpoint/病历 已 open，
     // worktype 复用而非再 raise 一个孤儿 wait。容器只搬运字符串，不解释。
     const openWaitReasons = this.deps.store.listOpenWaits(item.id).map((w) => w.reason);
+    // WS-0.2 / WS-2.3: 三个中性字段并入**每一条** owner-workers 事件——runningOwners（owner 空闲判定；
+    // run 结论读于 closeRunConclusion 之后 → owner 自己的结论看到「其它 owner」数，与 runningWorkers 同
+    // 语义）、unconsumedHumanMessages（晚于最后一次 run 的群消息数：owner 忙时收尾补派 steer / 幂等）、
+    // runningWorkerRepos（当前在跑的 worker 所属仓，rework 定向派发防重）。全部纯计数/字符串，不解释业务。
+    const runningOwners = this.deps.store.countRunningByRole(item.id, 'owner');
+    const runKinds = this.deps.runKinds?.() ?? ['run'];
+    const unconsumedHumanMessages = this.deps.store.countEventsAfter(
+      item.id,
+      'human_message',
+      this.deps.store.lastRunEffectSeq(item.id, runKinds),
+    );
+    const runningWorkerRepos = this.deps.store
+      .listAssignments(item.id)
+      .filter(
+        (a) =>
+          a.status === 'running' &&
+          a.role === 'worker' &&
+          typeof a.repo === 'string' &&
+          a.repo.length > 0,
+      )
+      .map((a) => a.repo as string);
+    const common = { openWaitReasons, runningOwners, unconsumedHumanMessages, runningWorkerRepos };
     if (event.kind === 'run_completed' || event.kind === 'run_failed') {
       // Owner snapshot fan-in (T4): a pure worktype can't count its own in-flight workers, so hand
       // the run-conclusion event a strongly-consistent `runningWorkers` count.
       const runningWorkers = this.deps.store.countRunningWorkers(item.id);
-      return { ...event, payload: { ...base, runningWorkers, openWaitReasons } };
+      return { ...event, payload: { ...base, runningWorkers, ...common } };
     }
     // 立项收料事件：把该单截至此刻的 intake 填项历史（payload 序列）中性搬运给 worktype，由它自行
     // fold 出立项清单状态并判定 gate（容器不解释 payload 语义、不存清单状态——走纯事件溯源）。
@@ -741,7 +766,7 @@ export class ReducerRuntime {
         .listEvents(item.id)
         .filter((e) => e.kind === 'intake_field_set')
         .map((e) => e.payload);
-      return { ...event, payload: { ...base, priorIntakeEvents, openWaitReasons } };
+      return { ...event, payload: { ...base, priorIntakeEvents, ...common } };
     }
     // wait_resolved：把**被解析的那个 wait 的原始 reason** 中性搬运给 worktype（resolvedWaitReason），
     // 让它精确路由——区分 checkpoint p板 / 取消确认病历 / 对账病历 / run 失败病历，而不必靠 phase 猜或
@@ -752,12 +777,12 @@ export class ReducerRuntime {
       const wait = waitId ? this.deps.store.getWait(waitId) : undefined;
       return {
         ...event,
-        payload: { ...base, openWaitReasons, resolvedWaitReason: wait?.reason },
+        payload: { ...base, ...common, resolvedWaitReason: wait?.reason },
       };
     }
-    // 其它事件（reconcile_passed/_conflict、integration_check_passed/_failed …）：也带上 openWaitReasons，
+    // 其它事件（reconcile_passed/_conflict、integration_check_passed/_failed …）：也带上 common，
     // 使 worktype 的 reconcile_conflict 病历 / 灯③ checkpoint raise 幂等（崩溃恢复重跑 effect 不重复 raise）。
-    return { ...event, payload: { ...base, openWaitReasons } };
+    return { ...event, payload: { ...base, ...common } };
   }
 
   private releaseWakePending(item: WorkItem, seq: number, now: number): void {

@@ -655,6 +655,32 @@ export class WorkitemsStore {
     return row?.seq ?? 0;
   }
 
+  // WS-0.2: 该单最后一个 run 类 effect 的 seq（无 effectId 上界，取全历史）。enrich 用它作
+  // 「最后一次 run」水位——晚于它的 human_message 尚未被任何 run 的 batch 窗口消费。参照
+  // lastRunEffectSeqBefore 的动态占位符写法；无匹配 → 0。
+  lastRunEffectSeq(workitemId: string, runKinds: string[]): number {
+    if (runKinds.length === 0) return 0;
+    const placeholders = runKinds.map(() => '?').join(',');
+    const row = this.db
+      .prepare(
+        `SELECT COALESCE(MAX(seq), 0) AS seq FROM workitem_effects
+         WHERE workitem_id = ? AND kind IN (${placeholders})`,
+      )
+      .get(workitemId, ...runKinds) as { seq: number };
+    return row.seq;
+  }
+
+  // WS-0.2: 某 kind 且 seq > afterSeq 的事件数（中性计数）。enrich 组合 lastRunEffectSeq 算出
+  // unconsumedHumanMessages（未被任何后续 run 消费的群消息数）。
+  countEventsAfter(workitemId: string, kind: string, afterSeq: number): number {
+    const row = this.db
+      .prepare(
+        'SELECT COUNT(*) AS c FROM workitem_events WHERE workitem_id = ? AND kind = ? AND seq > ?',
+      )
+      .get(workitemId, kind, afterSeq) as { c: number };
+    return row.c;
+  }
+
   appendEvent(workitemId: string, seq: number, kind: string, payload?: unknown): number {
     const result = this.db
       .prepare(

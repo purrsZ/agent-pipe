@@ -348,4 +348,35 @@ describe('requirement lifecycle transitions', () => {
   it('isDecisionStale is never-stale without a contract change (PIVOT 砍合同变更引擎)', () => {
     expect(t.isDecisionStale({ data: {} }, [])).toBe(false);
   });
+
+  // WS-0.4: owner run 结论优先按 stage 路由（stage 随 run 结论透传），不再靠 phase 猜「owner run 是什么」。
+  it('WS-0 stage=reconcile 的 owner run 收尾 → reconcile_check（不限相位，implement 也生效）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    const out = t.onEvent(item, ev('run_completed', { role: 'owner', stage: 'reconcile' }));
+    expect(out.effects?.[0]).toMatchObject({ kind: 'reconcile_check' });
+  });
+
+  it('WS-0 stage=assess 的 owner run 收尾（implement 相位）→ 推进集成验证', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    const out = t.onEvent(item, ev('run_completed', { role: 'owner', stage: 'assess' }));
+    expect(out.phase).toEqual({ to: PHASE.integrate, reason: 'workers_done' });
+  });
+
+  it('WS-0 stage=steer 的 owner run 收尾 → steer_apply effect（带 reportPath）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    const out = t.onEvent(
+      item,
+      ev('run_completed', { role: 'owner', stage: 'steer', reportPath: 'assignments/x/report.md' }),
+    );
+    expect(out.effects?.[0]).toMatchObject({
+      kind: 'steer_apply',
+      payload: { reportPath: 'assignments/x/report.md' },
+    });
+  });
+
+  it('WS-0 stage 缺失 → 回落 phase 路由（拆解 owner → reconcile_check，与旧行为逐字节一致）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.split });
+    const out = t.onEvent(item, ev('run_completed', { role: 'owner' }));
+    expect(out.effects?.[0]).toMatchObject({ kind: 'reconcile_check' });
+  });
 });

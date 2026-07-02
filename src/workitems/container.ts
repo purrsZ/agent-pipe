@@ -55,6 +55,8 @@ export function createWorkitemsContainer(options: WorkitemsContainerOptions): Wo
     cfg,
     logger,
     isRunClass: (kind) => effects?.isRunClass(kind) ?? kind === 'run',
+    // WS-0.2: the run-class kind vocabulary for enrich's unconsumedHumanMessages watermark.
+    runKinds: () => effects?.runKinds() ?? ['run'],
     postCommit: (actions) => {
       for (const action of actions) {
         if (action.kind === 'abort_effect') {

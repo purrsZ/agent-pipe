@@ -26,6 +26,10 @@ export interface RunStrategy {
     assignment: Assignment;
     batch: WorkItemEvent[];
     readArtifact: (relPath: string) => string | undefined;
+    // WS-0.3: the concluding run effect's dispatch payload (stage / note / repo …). The requirement
+    // owner/worker prompts read `stage` to route composition (reconcile vs assess vs steer) and
+    // `note` for rework rounds. probe ignores it (zero regression). Optional so unit tests may omit.
+    effectPayload?: unknown;
   }): string;
   runOptions(args: { workitem: WorkItem; assignment: Assignment; cwd: string }): RunOptions;
   resolveCwd(args: { workitem: WorkItem; assignment: Assignment; defaultCwd: string }): string;
@@ -47,6 +51,10 @@ export interface RunStrategy {
     workitem: WorkItem;
     assignment: Assignment;
     writeArtifact: (relPath: string, content: string, message: string) => void;
+    // WS-0.4: the run effect's dispatch payload, so afterRun routes artifact writes by `stage`
+    // (reconcile → contract.json/reconcile.json; assess → impl-claims.json) instead of by phase —
+    // the precondition for WS-5's in-implement re-reconcile round. Optional; probe has no afterRun.
+    effectPayload?: unknown;
   }): void;
 }
 
@@ -170,6 +178,7 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
     assignment,
     batch,
     readArtifact: (rel) => ctx.readArtifact(rel),
+    effectPayload: ctx.effect.payload,
   });
   ctx.writeArtifact(`assignments/${assignment.id}/brief.md`, prompt, 'agent-run brief');
 
@@ -262,6 +271,7 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
         workitem,
         assignment,
         writeArtifact: (rel, content, msg) => ctx.writeArtifact(rel, content, msg),
+        effectPayload: ctx.effect.payload,
       });
     } catch (err) {
       deps.logger?.error?.(

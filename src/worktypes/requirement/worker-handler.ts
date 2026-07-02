@@ -45,6 +45,7 @@ export function createRequirementRunStrategy(opts: {
       followups,
       readArtifact,
       workitem,
+      effectPayload,
     }) => {
       if (assignment.role === 'worker') {
         const contract = readContract(readArtifact);
@@ -57,9 +58,10 @@ export function createRequirementRunStrategy(opts: {
           reworkNote: assignment.replacesAssignmentId ? priorReport : undefined,
         });
       }
-      // owner「拆解」phase run = 跨仓对账 run（PIVOT §3.1）：读各仓 ai-specs 设计目录的「外部方契约」节，
-      // 拼凑 + 对账成跨仓契约，afterRun 升格写 contract/contract.json + reconcile.json。立项书定位各仓设计。
-      if (workitem.phase === PHASE.split) {
+      // owner run 按 stage 优先分流（WS-0.4）：拆解 = 跨仓对账 run（读各仓设计「外部方契约」节，拼凑+对账），
+      // WS-5 起 implement 相位内也可重对账（stage=reconcile）。afterRun 升格写 contract.json + reconcile.json。
+      const stage = stageFromPayload(effectPayload);
+      if (stage === 'reconcile' || workitem.phase === PHASE.split) {
         return composeReconcilePrompt({
           title,
           repos: workitem.repos,
@@ -133,11 +135,12 @@ export function createRequirementRunStrategy(opts: {
     },
 
     // owner run 收尾的两件结构化产物（artifact-only，绝不把 run 翻成 failure；解析不到优雅降级）：
-    afterRun: ({ report, workitem, assignment, writeArtifact }) => {
+    afterRun: ({ report, workitem, assignment, writeArtifact, effectPayload }) => {
       if (assignment.role !== 'owner') return;
-      // 拆解（PIVOT §3.1）：跨仓对账 → 落两份：reconcile.json（完整对账结果，reconcile_check 据它判定）
-      // + contract.json（升格的跨仓契约快照，灯③ 对账基准 + worker 切片）。
-      if (workitem.phase === PHASE.split) {
+      const stage = stageFromPayload(effectPayload);
+      // 跨仓对账（拆解，或 WS-5 implement 相位内重对账 stage=reconcile）→ 落两份：reconcile.json（完整对账
+      // 结果，reconcile_check 据它判定）+ contract.json（升格的跨仓契约快照，灯③ 对账基准 + worker 切片）。
+      if (stage === 'reconcile' || workitem.phase === PHASE.split) {
         const result = parseReconcileResult(report);
         writeArtifact(
           'contract/reconcile.json',
@@ -156,7 +159,7 @@ export function createRequirementRunStrategy(opts: {
       // 提供**的接口 → contract/impl-claims.json，作为灯③ 集成对账的「实现侧」输入（契约=应实现，claims=
       // 实际实现，contractStructuralDiff 比出缺失/错配 → 灯③ 长牙）。单写口、无并发竞争（worker 不写）。
       // 解析不到 ≥1 条则不写——integration_check 走 no_claims 优雅放行（skeleton），不强行判失败。
-      if (workitem.phase === PHASE.implement) {
+      if (stage === 'assess' || (stage === undefined && workitem.phase === PHASE.implement)) {
         const entries = parseInternalApis(report);
         if (entries.length === 0) return;
         const claims = promoteToContract('impl', entries);
@@ -173,6 +176,14 @@ export function createRequirementRunStrategy(opts: {
 function branchFor(workitem: WorkItem, assignment: Assignment): string {
   const repo = (assignment.repo ?? 'repo').replace(/[^A-Za-z0-9._-]+/g, '-');
   return `req/${workitem.id.slice(3, 15)}/${repo}-${assignment.id.slice(3, 11)}`;
+}
+
+// WS-0.4: read the dispatch payload's stage so composePrompt/afterRun route by (role, stage) rather
+// than by phase — the precondition for WS-5's in-implement re-reconcile round. undefined ⇒ 回落 phase。
+function stageFromPayload(payload: unknown): string | undefined {
+  if (typeof payload !== 'object' || payload === null) return undefined;
+  const v = (payload as Record<string, unknown>).stage;
+  return typeof v === 'string' ? v : undefined;
 }
 
 function readContract(readArtifact: (rel: string) => string | undefined): ContractSnapshot {

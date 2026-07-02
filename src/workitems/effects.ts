@@ -62,6 +62,15 @@ export class EffectRuntime {
     return this.handlers.get(kind)?.recovery === 'resume-or-redispatch';
   }
 
+  // WS-0.2: the run-class effect kinds (recovery==='resume-or-redispatch'). The container wires
+  // this into the reducer so enrich can compute the "last run" watermark (unconsumedHumanMessages)
+  // from the same vocabulary contextFor uses for the batch window — no drift between the two.
+  runKinds(): string[] {
+    return [...this.handlers.values()]
+      .filter((handler) => handler.recovery === 'resume-or-redispatch')
+      .map((handler) => handler.kind);
+  }
+
   poke(workitemId: string): void {
     if (!this.intakeOpen) return;
     // drainPending is fire-and-forget; a synchronous throw (store/handler error) or a
@@ -283,13 +292,10 @@ export class EffectRuntime {
     if (!workitem) {
       throw new Error(`WorkItem not found for effect ${effect.id}: ${effect.workitemId}`);
     }
-    const runKinds = [...this.handlers.values()]
-      .filter((handler) => handler.recovery === 'resume-or-redispatch')
-      .map((handler) => handler.kind);
     const batchFromSeq = this.deps.store.lastRunEffectSeqBefore(
       effect.workitemId,
       effect.id,
-      runKinds,
+      this.runKinds(),
     );
 
     return {
@@ -360,6 +366,13 @@ export class EffectRuntime {
         effectId: effect.id,
         basedOnSeq: effect.seq,
         assignmentRetries: assignment?.retries ?? 0,
+        // WS-0.1 (D-C): neutrally surface the dispatch payload's stage so a pure worktype routes
+        // run conclusions by (role, stage) instead of guessing "what was this owner run" from the
+        // phase. Structurally identical to the role/repo passthrough below — container carries the
+        // string, never interprets it.
+        ...(isObject(effect.payload) && typeof effect.payload.stage === 'string'
+          ? { stage: effect.payload.stage }
+          : {}),
         // Surface role/repo so a pure worktype onEvent can route by them (owner vs
         // worker conclusions differ) without reaching into the store.
         ...(assignment?.role === undefined ? {} : { role: assignment.role }),

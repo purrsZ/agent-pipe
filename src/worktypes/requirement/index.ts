@@ -31,6 +31,17 @@ import { CHECKPOINT_REQUIRED_BEFORE, nextPhase, PHASE } from './phases.js';
 
 const CHECKPOINT_WAIT_TTL_SEC = 86_400;
 
+// WS-0.4 (D-C): dispatch payload.stage 词表——run 结论随 stage 中性透传（emitRunConclusion 平铺），
+// worktype 按 (role, stage) 精确路由，不再靠 phase 猜「这个 owner run 是对账 / assess / steer」。
+const STAGE = {
+  reconcile: 'reconcile',
+  assess: 'assess',
+  steer: 'steer',
+  implement: 'implement',
+  fix: 'fix',
+  rework: 'rework',
+} as const;
+
 export const requirementWorkType: WorkType = {
   id: 'requirement',
   triggers: { api: true },
@@ -106,6 +117,21 @@ export function requirementTransition(item: WorkItem, ev: WorkItemEvent): Transi
 
 function onRunCompleted(item: WorkItem, ev: WorkItemEvent): Transition {
   const role = roleOf(ev.payload);
+  const stage = stageOf(ev.payload);
+  // owner run 结论优先按 stage 精确路由（D-C）：reconcile 不限相位（拆解 + WS-5 implement 内重对账都靠它）；
+  // assess 在 implement 收尾推进集成验证；steer（WS-2）读报告落指令。stage 缺失（历史事件 / 纯单测手造）→
+  // 回落下方旧 phase 路由，保证逐字节兼容。
+  if (role === 'owner') {
+    if (stage === STAGE.reconcile) return { effects: [{ kind: 'reconcile_check' }] };
+    if (stage === STAGE.assess && item.phase === PHASE.implement) {
+      return enterPhase(item, PHASE.integrate, 'workers_done', ev);
+    }
+    if (stage === STAGE.steer) {
+      return {
+        effects: [{ kind: 'steer_apply', payload: { reportPath: reportPathOf(ev.payload) } }],
+      };
+    }
+  }
   switch (item.phase) {
     case PHASE.split:
       // owner 对账 run 收尾（afterRun 已落 contract/contract.json + contract/reconcile.json）→ 起静态
@@ -410,6 +436,18 @@ function roleOf(payload: unknown): string | undefined {
 function runningWorkersOf(payload: unknown): number {
   const v = asObject(payload).runningWorkers;
   return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : 0;
+}
+
+// WS-0.4: run 结论透传的 stage（emitRunConclusion 平铺）。缺失（历史事件 / 单测手造）→ undefined。
+function stageOf(payload: unknown): string | undefined {
+  const v = asObject(payload).stage;
+  return typeof v === 'string' ? v : undefined;
+}
+
+// WS-0.4: run_completed 结论携带的报告 artifact 路径（steer_apply 据它读 steer 报告）。
+function reportPathOf(payload: unknown): string | undefined {
+  const v = asObject(payload).reportPath;
+  return typeof v === 'string' ? v : undefined;
 }
 
 function ownerAssignmentIdOf(ev: WorkItemEvent | undefined): string | undefined {
