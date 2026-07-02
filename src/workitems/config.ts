@@ -12,6 +12,11 @@ export interface WorkitemsConfig {
   // WS-1.2 活性看门防抖窗口（秒）：must-progress 单持续无在途工作超过此时长才发 liveness_stalled，
   // 避免 run 结论与下一次 dispatch 之间的正常瞬时空窗被误报。默认 30。
   livenessGraceSec: number;
+  // WS-3 提醒策略：human wait 首催延迟（秒，默认 4h）。提醒不再看 deadline——
+  // 到 createdAt + waitRemindAfterSec 首催，之后每 waitRemindRepeatSec 复催一次。
+  waitRemindAfterSec: number;
+  // WS-3 提醒策略：human wait 复催间隔（秒，默认 24h）。
+  waitRemindRepeatSec: number;
 }
 
 export type WorkitemsEnv = Partial<Record<string, string | undefined>>;
@@ -26,6 +31,8 @@ const DEFAULTS: WorkitemsConfig = {
   defaultWallclockCapSec: 1800,
   maxWorkersPerItem: 2,
   livenessGraceSec: 30,
+  waitRemindAfterSec: 14_400,
+  waitRemindRepeatSec: 86_400,
 };
 
 function positiveInt(env: WorkitemsEnv, name: string, fallback: number): number {
@@ -70,5 +77,15 @@ export function loadWorkitemsConfig(env: WorkitemsEnv = process.env): WorkitemsC
       DEFAULTS.maxWorkersPerItem,
     ),
     livenessGraceSec: positiveInt(env, 'WORKITEMS_LIVENESS_GRACE_SEC', DEFAULTS.livenessGraceSec),
+    waitRemindAfterSec: positiveInt(
+      env,
+      'WORKITEMS_WAIT_REMIND_AFTER_SEC',
+      DEFAULTS.waitRemindAfterSec,
+    ),
+    waitRemindRepeatSec: positiveInt(
+      env,
+      'WORKITEMS_WAIT_REMIND_REPEAT_SEC',
+      DEFAULTS.waitRemindRepeatSec,
+    ),
   };
 }

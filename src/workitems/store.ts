@@ -64,6 +64,7 @@ type DbWait = {
   resolved_at: number | null;
   resolved_by: string | null;
   resolve_reason: string | null;
+  card_msg_id: string | null;
   created_at: number;
 };
 
@@ -88,7 +89,10 @@ type DbEvent = {
 };
 
 type WaitPatch = Partial<
-  Pick<Wait, 'resolvedAt' | 'resolvedBy' | 'resolveReason' | 'renewedCount' | 'remindedAt'>
+  Pick<
+    Wait,
+    'resolvedAt' | 'resolvedBy' | 'resolveReason' | 'renewedCount' | 'remindedAt' | 'cardMsgId'
+  >
 >;
 
 type WaitRenewalPatch = Pick<Wait, 'deadlineAt' | 'renewedCount' | 'remindedAt'>;
@@ -157,6 +161,7 @@ function toWait(row: DbWait): Wait {
     resolvedAt: row.resolved_at,
     resolvedBy: row.resolved_by,
     resolveReason: row.resolve_reason,
+    cardMsgId: row.card_msg_id,
     createdAt: row.created_at,
   };
 }
@@ -372,6 +377,14 @@ export class WorkitemsStore {
         PRAGMA user_version = 4;
       `);
     }
+    if (version < 5) {
+      // WS-3 卡片状态持久化：发过灯卡/病历卡的 wait 记 card_msg_id（飞书消息 id），重启后不重发、
+      // 发送失败下次事件/提醒重试。user_version 守卫使 ALTER 只跑一次——老库重开幂等不炸。
+      this.db.exec(`
+        ALTER TABLE workitem_waits ADD COLUMN card_msg_id TEXT;
+        PRAGMA user_version = 5;
+      `);
+    }
   }
 
   insertWorkItem(row: WorkItem): void {
@@ -549,10 +562,10 @@ export class WorkitemsStore {
       .prepare(
         `INSERT INTO workitem_waits (
           id, workitem_id, kind, origin_assignment_id, reason, deadline_at, renewed_count,
-          reminded_at, resolved_at, resolved_by, resolve_reason, created_at
+          reminded_at, resolved_at, resolved_by, resolve_reason, card_msg_id, created_at
         ) VALUES (
           @id, @workitemId, @kind, @originAssignmentId, @reason, @deadlineAt, @renewedCount,
-          @remindedAt, @resolvedAt, @resolvedBy, @resolveReason, @createdAt
+          @remindedAt, @resolvedAt, @resolvedBy, @resolveReason, @cardMsgId, @createdAt
         )`,
       )
       .run(row);
@@ -565,6 +578,7 @@ export class WorkitemsStore {
       resolveReason: 'resolve_reason',
       renewedCount: 'renewed_count',
       remindedAt: 'reminded_at',
+      cardMsgId: 'card_msg_id',
     });
     if (!clause) return;
     this.stmt(`UPDATE workitem_waits SET ${clause} WHERE id = @id`).run({ ...values, id });

@@ -58,6 +58,8 @@ export interface Wait {
   resolvedAt: number | null;
   resolvedBy: string | null;
   resolveReason: string | null;
+  // WS-3: 该 wait 对应的飞书卡片消息 id（发过卡则非空）。持久化 dedup——重启不重发、发失败下次重试。
+  cardMsgId: string | null;
   createdAt: number;
 }
 

@@ -130,6 +130,17 @@ export function anchorNoun(type: string): string {
   return type === 'requirement' ? '需求' : '调查';
 }
 
+// WS-3 催办文案用：把毫秒时长压成人话（分钟 / 小时 / 天 X 小时）。永不抛，负数归零。
+export function humanizeMs(ms: number): string {
+  const totalMin = Math.max(0, Math.floor(ms / 60_000));
+  if (totalMin < 60) return `${totalMin} 分钟`;
+  const totalHour = Math.floor(totalMin / 60);
+  if (totalHour < 24) return `${totalHour} 小时`;
+  const days = Math.floor(totalHour / 24);
+  const hours = totalHour % 24;
+  return hours > 0 ? `${days} 天 ${hours} 小时` : `${days} 天`;
+}
+
 // 病历(非 checkpoint 的 human wait)的飞书卡标签。返回 undefined ⇒ 不是病历(不发病历卡)。
 // 放 index(kernel-exempt 桥层),故可用业务词。
 export function caseFileLabel(reason: string): string | undefined {
@@ -1544,7 +1555,7 @@ export function createWorkitemsRuntime(deps: {
   config: Pick<Config, 'workitemsDbPath' | 'workitemsDir' | 'dataDir'>;
   logger: Logger;
   pool: AgentPool;
-  sender: Pick<Sender, 'replyCard' | 'sendCard' | 'updateCard' | 'replyCardInThread'>;
+  sender: Pick<Sender, 'replyCard' | 'sendCard' | 'updateCard' | 'replyCardInThread' | 'reply'>;
   kernelStore: Store;
   defaultCwd: string;
   createContainer?: typeof createWorkitemsContainer;
@@ -1569,10 +1580,9 @@ export function createWorkitemsRuntime(deps: {
     sender: deps.sender,
     logger: deps.logger,
   });
-  // T3: 灯卡 dedup — a checkpoint human wait gets exactly one interactive card. In-memory; a
-  // restart may re-post (best-effort, like the anchor refresh). A 打回 re-raises a fresh wait id
-  // → a new card, which is correct.
-  const cardedWaits = new Set<string>();
+  // WS-3: 灯卡 dedup 从内存 Set 改为 DB 上的 wait.cardMsgId——重启后不重发（DB 记得），发送失败
+  // cardMsgId 仍空、下次事件/提醒重试。一个 checkpoint human wait 只发一张卡；打回 re-raise 新 wait id
+  // → cardMsgId 为空 → 自动发新卡，语义正确。
   // Surface any new human checkpoint wait as an interactive 灯卡 replied under the anchor (so it
   // lands in the thread). The worktype owns the phase→灯 mapping (checkpointBoundaryOf/lights);
   // this kernel-exempt observer only renders + routes.
@@ -1582,13 +1592,12 @@ export function createWorkitemsRuntime(deps: {
     anchorMsgId: string,
   ): Promise<void> => {
     for (const w of workitems.store.listOpenWaits(workitemId)) {
-      if (w.kind !== 'human' || cardedWaits.has(w.id)) continue;
+      if (w.kind !== 'human' || w.cardMsgId !== null) continue;
       const boundary = checkpointBoundaryOf(w.reason);
       // 关卡灯(checkpoint:*) → 灯卡(通过/打回)；病历(对账冲突/监工判大/执行报错/集成未决) → 病历卡
       // (已处理·继续/取消整单)。二者皆非 → 跳过(如 cancel_confirm 走别的路径)。
       const caseLabel = boundary ? undefined : caseFileLabel(w.reason);
       if (!boundary && !caseLabel) continue;
-      cardedWaits.add(w.id);
       const card = boundary
         ? buildCheckpointCard(
             { title, gateLabel: checkpointGateLabel(boundary), rail: checkpointRail(boundary) },
@@ -1603,7 +1612,8 @@ export function createWorkitemsRuntime(deps: {
             { itemId: workitemId, waitId: w.id },
           );
       const posted = await deps.sender.replyCard(anchorMsgId, card);
-      if (!posted) cardedWaits.delete(w.id); // 发送失败 → 允许下一次事件重试
+      // 发卡成功 → 记 cardMsgId（重启不重发）；失败 → cardMsgId 仍空、下次事件/提醒重试。
+      if (posted) workitems.store.updateWait(w.id, { cardMsgId: posted });
     }
   };
   // M1b WI-7 → M2: outbound status bridge — subscribe to committed events and refresh the
@@ -1637,6 +1647,29 @@ export function createWorkitemsRuntime(deps: {
           );
         } else if (update) {
           deps.logger.warn({ workitemId }, 'no anchor to refresh');
+        }
+        // WS-3: wait_reminder 事件的飞书出口——系统在等人时会催（回在锚点卡下，群内可见）。
+        // 取不到 label（如 cancel_confirm 走专属确认流）则跳过不催。cardMsgId 为空的卡由下面的
+        // surfaceCheckpoints 自愈补发（提醒事件成为卡片重发的触发器）。
+        if (event.kind === 'wait_reminder' && anchorMsgId) {
+          const payload = event.payload;
+          const waitId =
+            typeof payload === 'object' &&
+            payload !== null &&
+            typeof (payload as { waitId?: unknown }).waitId === 'string'
+              ? (payload as { waitId: string }).waitId
+              : undefined;
+          const wait = waitId ? workitems.store.getWait(waitId) : undefined;
+          if (wait && wait.resolvedAt === null) {
+            const boundary = checkpointBoundaryOf(wait.reason);
+            const label = boundary ? checkpointGateLabel(boundary) : caseFileLabel(wait.reason);
+            if (label) {
+              await deps.sender.reply(
+                anchorMsgId,
+                `⏰ 这单已等你 ${humanizeMs(Date.now() - wait.createdAt)}：${label}`,
+              );
+            }
+          }
         }
         if (anchorMsgId) await surfaceCheckpoints(workitemId, item.title, anchorMsgId);
       } catch (err) {

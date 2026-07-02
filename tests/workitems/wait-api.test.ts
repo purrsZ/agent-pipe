@@ -116,31 +116,29 @@ function eventKinds(store: WorkitemsStore, itemId: string): string[] {
 }
 
 describe('wait API', () => {
-  it('renews a human wait and allows another reminder at the new deadline', () => {
+  it('renews a human wait and re-arms its reminder after the reset', () => {
     const { api, reducer, store, watchdog } = harness();
     const item = createItem(api);
     reducer.enqueue(item.id, { kind: 'human_wait' });
     const wait = singleOpenWait(store, item.id);
 
-    now = wait.deadlineAt;
+    // WS-3: 提醒不再看 deadline，改为 createdAt + waitRemindAfterSec（默认 4h）触发。
+    now = wait.createdAt + 14_400 * 1000;
     watchdog.tick();
     expect(store.getWait(wait.id)).toMatchObject({ remindedAt: now });
+    expect(eventKinds(store, item.id).filter((kind) => kind === 'wait_reminder')).toHaveLength(1);
 
     api.renewWait(wait.id, { operator: 'codex', deadlineTtlSec: 3 });
-
+    // 续期清空 remindedAt → due 回落到 createdAt+remindAfter（已过）→ 下一 tick 立即再催。
     expect(store.getWait(wait.id)).toMatchObject({
-      deadlineAt: 5000,
+      deadlineAt: now + 3000,
       renewedCount: 1,
       remindedAt: null,
     });
     expect(
       store.listEvents(item.id).find((event) => event.kind === 'wait_renewed')?.payload,
-    ).toEqual({ waitId: wait.id, operator: 'codex', newDeadlineAt: 5000 });
+    ).toEqual({ waitId: wait.id, operator: 'codex', newDeadlineAt: now + 3000 });
 
-    watchdog.tick();
-    expect(eventKinds(store, item.id).filter((kind) => kind === 'wait_reminder')).toHaveLength(1);
-
-    now = 5000;
     watchdog.tick();
     expect(eventKinds(store, item.id).filter((kind) => kind === 'wait_reminder')).toHaveLength(2);
     store.close();

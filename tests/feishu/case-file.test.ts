@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkItemEvent } from '../../src/workitems/types.js';
-import { caseFileDetail, caseFileLabel } from '../../src/index.js';
+import { caseFileDetail, caseFileLabel, humanizeMs } from '../../src/index.js';
 
 // 病历(非 checkpoint 的 human wait)→ 飞书卡标签/详情的桥层纯核心（B：病历飞书出口）。
 
@@ -22,6 +22,16 @@ describe('caseFileLabel', () => {
     expect(caseFileLabel('stalled_no_path')).toContain('卡死');
     expect(caseFileLabel('retry_exhausted')).toContain('重试');
     expect(caseFileLabel('thrash')).toContain('震荡');
+  });
+});
+
+describe('humanizeMs', () => {
+  it('把毫秒时长格式化成中文（分钟 / 小时 / 天）', () => {
+    expect(humanizeMs(30 * 60_000)).toBe('30 分钟');
+    expect(humanizeMs(4 * 3_600_000)).toBe('4 小时');
+    expect(humanizeMs(26 * 3_600_000)).toBe('1 天 2 小时');
+    expect(humanizeMs(48 * 3_600_000)).toBe('2 天');
+    expect(humanizeMs(-5)).toBe('0 分钟');
   });
 });
 

@@ -96,25 +96,41 @@ function createItem(api: WorkitemsApi): WorkItem {
 }
 
 describe('Watchdog.tick', () => {
-  it('emits one human wait reminder across repeated due ticks', () => {
+  it('does not remind a human wait before waitRemindAfterSec (4h default)', () => {
     const { api, store, watchdog } = harness();
     const item = createItem(api);
-    const wait = makeWait('wt-human', item.id, {
-      kind: 'human',
-      deadlineAt: 1000,
-      remindedAt: null,
-    });
-    store.insertWait(wait);
+    // WS-3: 提醒不再看 deadline，改为 createdAt + waitRemindAfterSec（默认 4h）触发。
+    store.insertWait(makeWait('wt-human', item.id, { kind: 'human', createdAt: 1000 }));
 
-    watchdog.tick();
-    watchdog.tick();
+    now = 1000 + 4 * 3_600 * 1000 - 1; // 差 1ms 到首催窗口
     watchdog.tick();
 
+    expect(store.listEvents(item.id).map((event) => event.kind)).toEqual(['workitem_created']);
+    store.close();
+  });
+
+  it('reminds a human wait at 4h, holds until 24h, then repeats', () => {
+    const { api, store, watchdog } = harness();
+    const item = createItem(api);
+    store.insertWait(makeWait('wt-human', item.id, { kind: 'human', createdAt: 1000 }));
+
+    now = 1000 + 4 * 3_600 * 1000; // 首催窗口到点
+    watchdog.tick();
+    watchdog.tick(); // 同一时刻再 tick 不应重复
     expect(store.listEvents(item.id).map((event) => event.kind)).toEqual([
       'workitem_created',
       'wait_reminder',
     ]);
-    expect(store.getWait(wait.id)!.remindedAt).toBe(1000);
+    expect(store.getWait('wt-human')!.remindedAt).toBe(now);
+
+    now += 24 * 3_600 * 1000 - 1; // 差 1ms 到重复窗口
+    watchdog.tick();
+    expect(store.listEvents(item.id).filter((e) => e.kind === 'wait_reminder')).toHaveLength(1);
+
+    now += 1; // 到 24h 重复点
+    watchdog.tick();
+    expect(store.listEvents(item.id).filter((e) => e.kind === 'wait_reminder')).toHaveLength(2);
+    expect(store.getWait('wt-human')!.remindedAt).toBe(now);
     store.close();
   });
 

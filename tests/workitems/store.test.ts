@@ -79,6 +79,7 @@ function waitRow(id: string, workitemId: string, overrides: Partial<Wait> = {}):
     resolvedAt: null,
     resolvedBy: null,
     resolveReason: null,
+    cardMsgId: null,
     createdAt: 1000,
     ...overrides,
   };
@@ -100,7 +101,7 @@ describe('WorkitemsStore migration', () => {
 
     const db = new Database(dbPath);
     expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(
-      4,
+      5,
     );
     expect(
       db
@@ -138,6 +139,22 @@ describe('WorkitemsStore migration', () => {
     expect(
       db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='tasks'").get(),
     ).toBe(undefined);
+    db.close();
+  });
+
+  it('adds card_msg_id column to workitem_waits (v5) and reopening is idempotent', () => {
+    // WS-3: 卡片消息 id 持久化——发过卡的 wait 记 card_msg_id，重启不重发。迁移幂等（老库重开不炸）。
+    new WorkitemsStore(dbPath, clock).close();
+    new WorkitemsStore(dbPath, clock).close();
+
+    const db = new Database(dbPath);
+    expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(
+      5,
+    );
+    const cols = (db.prepare('PRAGMA table_info(workitem_waits)').all() as { name: string }[]).map(
+      (c) => c.name,
+    );
+    expect(cols).toContain('card_msg_id');
     db.close();
   });
 });
@@ -192,6 +209,17 @@ describe('WorkitemsStore assignments and waits', () => {
       resolveReason: 'test',
     });
     expect(store.listOpenWaits('wi-1')).toHaveLength(0);
+    store.close();
+  });
+
+  it('roundtrips card_msg_id through insert/updateWait/getWait', () => {
+    const store = new WorkitemsStore(dbPath, clock);
+    store.insertWorkItem(item('wi-1'));
+    store.insertWait(waitRow('wt-1', 'wi-1'));
+    expect(store.getWait('wt-1')!.cardMsgId).toBeNull();
+
+    store.updateWait('wt-1', { cardMsgId: 'om_card_1' });
+    expect(store.getWait('wt-1')!.cardMsgId).toBe('om_card_1');
     store.close();
   });
 });

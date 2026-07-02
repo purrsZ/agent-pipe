@@ -59,10 +59,15 @@ export class Watchdog {
     const stalled = new Map<string, StalledCandidate>();
 
     for (const wait of this.deps.store.listOpenWaits()) {
-      if (wait.deadlineAt > now) continue;
-
+      // WS-3: human wait 提醒不再看 deadline——系统在等人时必须会催。首催在 createdAt +
+      // waitRemindAfterSec（默认 4h），之后每 waitRemindRepeatSec（默认 24h）复催。applyWaitReminder
+      // 每次都刷新 remindedAt，故 due 随之滚动；deadline 过期自然被复催窗口覆盖（不再单独处理）。
       if (wait.kind === 'human') {
-        if (wait.remindedAt === null) {
+        const due =
+          wait.remindedAt === null
+            ? wait.createdAt + this.deps.cfg.waitRemindAfterSec * 1000
+            : wait.remindedAt + this.deps.cfg.waitRemindRepeatSec * 1000;
+        if (now >= due) {
           this.safeEnqueue(wait.workitemId, {
             kind: 'wait_reminder',
             payload: { waitId: wait.id },
@@ -70,6 +75,9 @@ export class Watchdog {
         }
         continue;
       }
+
+      // timer/agent wait 仍按 deadline 到期触发。
+      if (wait.deadlineAt > now) continue;
 
       if (wait.kind === 'timer') {
         this.safeEnqueue(wait.workitemId, {

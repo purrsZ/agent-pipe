@@ -60,6 +60,7 @@ export function makeWait(id: string, workitemId: string, overrides: Partial<Wait
     resolvedAt: null,
     resolvedBy: null,
     resolveReason: null,
+    cardMsgId: null,
     createdAt: 1000,
     ...overrides,
   };

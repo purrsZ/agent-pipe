@@ -327,6 +327,7 @@ export class ReducerRuntime {
         resolvedAt: null,
         resolvedBy: null,
         resolveReason: null,
+        cardMsgId: null,
         createdAt: now,
       };
       this.deps.store.insertWait(wait);
@@ -415,7 +416,9 @@ export class ReducerRuntime {
     if (!isObject(event.payload)) return;
     const waitId = typeof event.payload.waitId === 'string' ? event.payload.waitId : undefined;
     const wait = waitId ? this.deps.store.getWait(waitId) : undefined;
-    if (wait && wait.resolvedAt === null && wait.remindedAt === null) {
+    // WS-3: 去掉 remindedAt===null 守卫——每次提醒都刷新 remindedAt，watchdog 据此把下一次
+    // due 滚到 remindedAt + waitRemindRepeatSec，实现「首催 + 周期复催」。resolved 守卫保留。
+    if (wait && wait.resolvedAt === null) {
       this.deps.store.updateWait(wait.id, { remindedAt: now });
     }
   }
@@ -856,6 +859,7 @@ export class ReducerRuntime {
         resolvedAt: null,
         resolvedBy: null,
         resolveReason: null,
+        cardMsgId: null,
         createdAt: now,
       });
       this.deps.store.updateWorkItem(item.id, {

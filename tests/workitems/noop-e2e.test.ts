@@ -200,7 +200,8 @@ describe('noop in-process e2e', () => {
     });
 
     const wait = container.store.listOpenWaits(item.id)[0]!;
-    advance(container, 2000);
+    // WS-3: 提醒改为 createdAt + waitRemindAfterSec（默认 4h）触发，跨过首催窗口。
+    advance(container, 14_400_000);
     expect(container.store.getWait(wait.id)).toMatchObject({ remindedAt: now });
     container.api.renewWait(wait.id, { operator: 'codex', deadlineTtlSec: 2 });
     expect(container.store.getWait(wait.id)).toMatchObject({ renewedCount: 1, remindedAt: null });
