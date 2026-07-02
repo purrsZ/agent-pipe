@@ -67,7 +67,10 @@ async function handle(
 }
 
 function redirectOr(res: http.ServerResponse, ok: boolean, id: string): void {
-  if (!ok) return send(res, 409, 'text/plain', 'rejected');
+  if (!ok) {
+    send(res, 409, 'text/plain', 'rejected');
+    return;
+  }
   res.writeHead(303, { location: `/item/${encodeURIComponent(id)}` });
   res.end();
 }

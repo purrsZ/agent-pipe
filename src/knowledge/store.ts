@@ -2,12 +2,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { assessFreshness } from './freshness.js';
-import type {
-  FreshnessPolicy,
-  FreshnessVerdict,
-  KnowledgeDoc,
-  RepoKnowledge,
-} from './types.js';
+import type { FreshnessPolicy, FreshnessVerdict, KnowledgeDoc, RepoKnowledge } from './types.js';
 
 // $DATA_DIR/knowledge/ is ONE git repo (write即commit, version史 free), with <repoKey>/ +
 // _system/ subdirs. NOT an ArtifactStore instance (that anchors a workitemId; this anchors a
@@ -81,7 +76,12 @@ export class KnowledgeStore {
   }
 
   // Freshness read for a repo: combine the stored manifest with the target repo's live HEAD.
-  assess(repoKey: string, repoPath: string, policy: FreshnessPolicy, now: number): FreshnessVerdict {
+  assess(
+    repoKey: string,
+    repoPath: string,
+    policy: FreshnessPolicy,
+    now: number,
+  ): FreshnessVerdict {
     const manifest = this.readManifest(repoKey);
     if (!manifest) return assessFreshness(repoKey, undefined, undefined, policy);
     const head = this.headDrift(repoPath, manifest.generatedAtCommit, manifest.generatedAt, now);

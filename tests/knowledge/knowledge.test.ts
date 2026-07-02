@@ -76,7 +76,12 @@ describe('selective injection (pure, budget-bounded)', () => {
   });
 
   it('renders a stale note when stale', () => {
-    const out = selectInjection({ repoKey: 'b', docs: { runbook: 'npm test' }, stale: true, budgetChars: 100 });
+    const out = selectInjection({
+      repoKey: 'b',
+      docs: { runbook: 'npm test' },
+      stale: true,
+      budgetChars: 100,
+    });
     const text = renderInjection(out);
     expect(text).toContain('可能已过时');
     expect(text).toContain('npm test');
@@ -109,12 +114,15 @@ describe('KnowledgeStore (git-backed)', () => {
 
     const store = new KnowledgeStore(path.join(tmpDir, 'knowledge'));
     store.ensureRepo();
-    store.writeManifest('target', manifest({ repoKey: 'target', generatedAtCommit: head, generatedAt: 1000 }));
+    store.writeManifest(
+      'target',
+      manifest({ repoKey: 'target', generatedAtCommit: head, generatedAt: 1000 }),
+    );
 
     // at the anchor: 0 commits behind, 0 days → fresh.
-    expect(store.assess('target', repo, { maxCommitsBehind: 200, maxDaysSince: 30 }, 1000).fresh).toBe(
-      true,
-    );
+    expect(
+      store.assess('target', repo, { maxCommitsBehind: 200, maxDaysSince: 30 }, 1000).fresh,
+    ).toBe(true);
 
     // drift the target by 3 commits, tighten the policy → stale.
     for (let i = 0; i < 3; i++) {

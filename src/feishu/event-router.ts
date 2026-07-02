@@ -125,12 +125,7 @@ export function createDispatcher(
         const chatType = message.chat_type as 'p2p' | 'group';
         if (chatType !== 'p2p' && chatType !== 'group') return;
         const msgType = message.message_type as string;
-        if (
-          msgType !== 'text' &&
-          msgType !== 'post' &&
-          msgType !== 'file' &&
-          msgType !== 'image'
-        )
+        if (msgType !== 'text' && msgType !== 'post' && msgType !== 'file' && msgType !== 'image')
           return;
 
         const rawMentions = (message.mentions ?? []) as Array<{
@@ -154,7 +149,9 @@ export function createDispatcher(
           if (!text) return;
         } else if (msgType === 'post') {
           // 富文本（post）：拍平正文为纯文本（含链接 URL），让群里粘带格式/文档链接的收料也能进。
-          text = extractPostText(content).replace(/@_user_\w+/g, '').trim();
+          text = extractPostText(content)
+            .replace(/@_user_\w+/g, '')
+            .trim();
           if (!text) return;
         } else if (msgType === 'file') {
           const fk = content.file_key;

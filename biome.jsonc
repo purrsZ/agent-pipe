@@ -6,7 +6,9 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!package-lock.json"]
+    // docs/ 下是设计原型 HTML/CSS/JS（文档演示用，非本仓源码）——不纳入代码 linter；
+    // web/ 是独立前端子项目（自带 tsconfig/vite/node_modules），由其自身工具链约束。
+    "includes": ["**", "!package-lock.json", "!docs", "!web"]
   },
   "formatter": {
     "enabled": true,

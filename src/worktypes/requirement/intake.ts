@@ -320,9 +320,10 @@ function jsonCandidates(raw: string): string[] {
   if (typeof raw !== 'string') return [];
   const out: string[] = [];
   const fence = /```(?:json)?\s*([\s\S]*?)```/gi;
-  let m: RegExpExecArray | null;
-  while ((m = fence.exec(raw)) !== null) {
+  let m = fence.exec(raw);
+  while (m !== null) {
     if (m[1]) out.push(m[1].trim());
+    m = fence.exec(raw);
   }
   const first = raw.indexOf('{');
   const last = raw.lastIndexOf('}');
@@ -345,7 +346,8 @@ function coerceExtraction(obj: unknown): IntakeExtraction | null {
     if (Array.isArray(r.value)) value = r.value.filter((v): v is string => typeof v === 'string');
     else if (typeof r.value === 'string') value = r.value;
     if (value === undefined) continue;
-    if (Array.isArray(value) ? value.length > 0 : value.trim().length > 0) fields.push({ key, value });
+    if (Array.isArray(value) ? value.length > 0 : value.trim().length > 0)
+      fields.push({ key, value });
   }
   const uiRequired = typeof o.uiRequired === 'boolean' ? o.uiRequired : undefined;
   if (fields.length === 0 && uiRequired === undefined) return null;
