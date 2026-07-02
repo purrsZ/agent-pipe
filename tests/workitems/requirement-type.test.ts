@@ -379,4 +379,89 @@ describe('requirement lifecycle transitions', () => {
     const out = t.onEvent(item, ev('run_completed', { role: 'owner' }));
     expect(out.effects?.[0]).toMatchObject({ kind: 'reconcile_check' });
   });
+
+  // WS-1.1: 活性不变式豁免声明——立项/交付合法休息，其它相位必须有在途工作。
+  it('WS-1 liveness：intake/deliver = may-rest；拆解/实现/集成 = must-progress', () => {
+    expect(t.liveness?.(makeWorkItem('wi-1', { phase: PHASE.intake }))).toBe('may-rest');
+    expect(t.liveness?.(makeWorkItem('wi-1', { phase: PHASE.deliver }))).toBe('may-rest');
+    for (const phase of [PHASE.split, PHASE.implement, PHASE.integrate]) {
+      expect(t.liveness?.(makeWorkItem('wi-1', { phase }))).toBe('must-progress');
+    }
+  });
+
+  // WS-1.3: 容器发的 liveness_stalled → raise stalled_no_path 病历；已 open 则幂等。
+  it('WS-1 liveness_stalled → 病历 stalled_no_path（幂等）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    const out = t.onEvent(item, ev('liveness_stalled', {}));
+    expect(out.waits?.[0]).toMatchObject({ kind: 'human', reason: 'stalled_no_path' });
+    expect(
+      t.onEvent(item, ev('liveness_stalled', { openWaitReasons: ['stalled_no_path'] })),
+    ).toEqual({});
+  });
+
+  it('WS-1 resolve stalled_no_path 病历：approved → 重试当前阶段；declined → 重弹', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.split });
+    const approved = t.onEvent(
+      item,
+      ev('wait_resolved', { decision: { approved: true }, resolvedWaitReason: 'stalled_no_path' }),
+    );
+    expect(approved.dispatch?.[0]).toMatchObject({
+      role: 'owner',
+      payload: { stage: 'reconcile' },
+    });
+    const declined = t.onEvent(
+      item,
+      ev('wait_resolved', { decision: { approved: false }, resolvedWaitReason: 'stalled_no_path' }),
+    );
+    expect(declined.waits?.[0]).toMatchObject({ kind: 'human', reason: 'stalled_no_path' });
+  });
+
+  // WS-1.5: 补全 retry_exhausted / thrash 显式分支；兜底收紧防「未知 reason 被误当 checkpoint 拍板」(#13)。
+  it('WS-1 resolve retry_exhausted（approved）→ 重试当前阶段，在 integrate 不误推进 deliver（修 #13）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.integrate });
+    const out = t.onEvent(
+      item,
+      ev('wait_resolved', { decision: { approved: true }, resolvedWaitReason: 'retry_exhausted' }),
+    );
+    expect(out.phase).toBeUndefined();
+    expect(out.effects?.[0]).toMatchObject({ kind: 'integration_check' });
+  });
+
+  it('WS-1 resolve retry_exhausted（declined）→ 重弹；thrash approved → {}，declined → 重弹', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.integrate });
+    expect(
+      t.onEvent(
+        item,
+        ev('wait_resolved', {
+          decision: { approved: false },
+          resolvedWaitReason: 'retry_exhausted',
+        }),
+      ).waits?.[0],
+    ).toMatchObject({ reason: 'retry_exhausted' });
+    const impl = makeWorkItem('wi-1', { phase: PHASE.implement });
+    expect(
+      t.onEvent(
+        impl,
+        ev('wait_resolved', { decision: { approved: true }, resolvedWaitReason: 'thrash' }),
+      ),
+    ).toEqual({});
+    expect(
+      t.onEvent(
+        impl,
+        ev('wait_resolved', { decision: { approved: false }, resolvedWaitReason: 'thrash' }),
+      ).waits?.[0],
+    ).toMatchObject({ reason: 'thrash' });
+  });
+
+  it('WS-1 兜底收紧：非 checkpoint 未知 reason resolve 不误推进（integrate + 未知 reason → {}）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.integrate });
+    const out = t.onEvent(
+      item,
+      ev('wait_resolved', {
+        decision: { approved: true },
+        resolvedWaitReason: 'some_container_reason',
+      }),
+    );
+    expect(out).toEqual({});
+  });
 });

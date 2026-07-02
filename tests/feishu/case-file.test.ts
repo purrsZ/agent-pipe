@@ -17,6 +17,12 @@ describe('caseFileLabel', () => {
     expect(caseFileLabel('checkpoint:requirement:交付')).toBeUndefined();
     expect(caseFileLabel('cancel_confirm')).toBeUndefined();
   });
+
+  it('WS-1 补三类容器/自检病历标签（stalled_no_path / retry_exhausted / thrash）', () => {
+    expect(caseFileLabel('stalled_no_path')).toContain('卡死');
+    expect(caseFileLabel('retry_exhausted')).toContain('重试');
+    expect(caseFileLabel('thrash')).toContain('震荡');
+  });
 });
 
 describe('caseFileDetail', () => {

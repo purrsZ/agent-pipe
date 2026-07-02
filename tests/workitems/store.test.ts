@@ -94,13 +94,13 @@ function tableNames(db: Database.Database): string[] {
 }
 
 describe('WorkitemsStore migration', () => {
-  it('creates an independent WAL sqlite database with the five workitem tables', () => {
+  it('creates an independent WAL sqlite database with the six workitem tables', () => {
     const store = new WorkitemsStore(dbPath, clock);
     store.close();
 
     const db = new Database(dbPath);
     expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(
-      3,
+      4,
     );
     expect(
       db
@@ -131,6 +131,7 @@ describe('WorkitemsStore migration', () => {
       'workitem_assignments',
       'workitem_effects',
       'workitem_events',
+      'workitem_parked',
       'workitem_waits',
       'workitems',
     ]);

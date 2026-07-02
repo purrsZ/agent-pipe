@@ -516,7 +516,7 @@ describe('requirement skeleton end-to-end', () => {
     expect(workers.map((w) => w.repo).sort()).toEqual(['repo-a', 'repo-b']);
   });
 
-  it('T4: an over-cap repo (repos > maxWorkersPerItem) is surfaced with a warning (R01.AC-9 gap)', async () => {
+  it('T4: 超 worker 并发上限的 repo 落 parked，并在 worker 收尾后补派直至全部完成（WS-1.4 补派）', async () => {
     const { store, api } = harness(); // cap = 2
     const item = api.createWorkItem({
       type: 'requirement',
@@ -527,11 +527,16 @@ describe('requirement skeleton end-to-end', () => {
 
     await walkToImplement(store, api, item.id, ['repo-a', 'repo-b', 'repo-c']);
 
-    // entering 并行实现 fans out 3 workers; cap=2 parks the third and logs it loudly.
-    await waitFor(() =>
-      expect(logger.warn.mock.calls.some((c) => String(c[1] ?? '').includes('over cap'))).toBe(
-        true,
-      ),
-    );
+    // 进并行实现 fan out 3 worker：cap=2 挡下第 3 个 → 落 parked（不再静默丢弃，旧 R01.AC-9 缺口）；
+    // 一个 worker 收尾即补派下一个，最终 3 仓 worker 全部完成、parked 清空。
+    await waitFor(() => {
+      const done = store
+        .listAssignments(item.id)
+        .filter((a) => a.role === 'worker' && a.status === 'done')
+        .map((a) => a.repo)
+        .sort();
+      expect(done).toEqual(['repo-a', 'repo-b', 'repo-c']);
+    });
+    expect(store.listParked(item.id)).toHaveLength(0);
   });
 });

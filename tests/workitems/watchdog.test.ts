@@ -61,6 +61,7 @@ function harness(lastBeat: (assignmentId: string) => number | undefined = () => 
     clock,
     logger,
     cfg,
+    registry,
   });
   return {
     api: new WorkitemsApi({ store, registry, reducer, artifacts }),
@@ -339,6 +340,7 @@ describe('Watchdog.tick', () => {
       clock,
       logger,
       cfg: loadWorkitemsConfig({}),
+      registry: new WorkTypeRegistry(),
     });
 
     expect(() => wd.tick()).not.toThrow();

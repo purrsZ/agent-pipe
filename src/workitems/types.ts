@@ -151,6 +151,11 @@ export interface WorkType {
   permissions: PermissionProfile;
   checkpoints: CheckpointPolicy;
   artifacts: ArtifactSpec;
+  // WS-1.1 活性不变式豁免声明（D-D）：非终态 workitem 必须「有 running assignment ∨ pending/running effect
+  // ∨ open wait」，否则容器（watchdog）发 liveness_stalled 事件让 worktype 自处理。声明 'may-rest' 的相位
+  // 豁免该检查（probe 全程休息、requirement 立项/交付合法休息）。缺省 ⇒ 恒 may-rest（probe/noop 零回归）。
+  // 容器调用此方法不算解释业务语义（先例 topology()）。
+  liveness?(item: WorkItem): 'must-progress' | 'may-rest';
 }
 
 export interface CreateInput {

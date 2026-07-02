@@ -69,7 +69,7 @@ export function createWorkitemsContainer(options: WorkitemsContainerOptions): Wo
     onCommitted: options.onCommitted,
   });
   effects = new EffectRuntime({ store, reducer, registry, artifacts, clock, logger });
-  const watchdog = new Watchdog({ store, reducer, effects, clock, logger, cfg });
+  const watchdog = new Watchdog({ store, reducer, effects, clock, logger, cfg, registry });
   const api = new WorkitemsApi({
     store,
     registry,

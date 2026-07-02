@@ -364,6 +364,11 @@ export class ReducerRuntime {
         cleaned += 1;
       }
     }
+    // WS-1.4：清空 parked（防终态后被补派复活成僵尸 run）。
+    for (const row of this.deps.store.listParked(item.id)) {
+      this.deps.store.deleteParked(row.id);
+      cleaned += 1;
+    }
     if (cleaned > 0) {
       this.appendAudit(item.id, 'terminal_cleanup', { resolved: cleaned });
     }
@@ -625,14 +630,13 @@ export class ReducerRuntime {
       return;
     }
     if (this.shouldWakePending(item, spec)) {
-      // An over-cap worker dispatch in owner-workers is parked on the wakePending flag, which
-      // owner-workers releaseWakePending does NOT re-dispatch yet (补派 / R01.AC-9 still open).
-      // Surface it loudly so a >maxWorkersPerItem-repo requirement doesn't silently drop a repo —
-      // the workaround is to raise WORKITEMS_MAX_WORKERS_PER_ITEM ≥ repos-per-requirement.
+      // WS-1.4：owner-workers 超 worker 并发上限的 dispatch 不再静默丢弃——完整 spec 序列化落
+      // workitem_parked，一个 worker 收尾时 releaseWakePending 反序列化补派（强一致计数保证不超发）。
       if (this.topologyOf(item) === 'owner-workers' && spec.role === 'worker') {
-        this.deps.logger?.warn?.(
+        this.deps.store.insertParked(item.id, seq, JSON.stringify(spec));
+        this.deps.logger?.info?.(
           { workitemId: item.id, repo: spec.repo ?? null, cap: this.deps.cfg.maxWorkersPerItem },
-          'owner-workers worker dispatch over cap → parked (补派 unimplemented, R01.AC-9); raise WORKITEMS_MAX_WORKERS_PER_ITEM',
+          'owner-workers worker dispatch over cap → parked（将由后续 worker 收尾补派）',
         );
       }
       this.deps.store.updateWorkItem(item.id, { wakePending: true, updatedAt: now });
@@ -788,10 +792,20 @@ export class ReducerRuntime {
   private releaseWakePending(item: WorkItem, seq: number, now: number): void {
     this.deps.store.updateWorkItem(item.id, { wakePending: false, updatedAt: now });
     if (this.topologyOf(item) === 'owner-workers') {
-      // In owner-workers, re-dispatch of a queued worker is driven by the worktype's
-      // onEvent (which carries the role/repo/parent context that a bare default solo
-      // run would lose). Just clear the flag — the conclusion that reached here already
-      // ran onEvent, which dispatches the next worker if its plan calls for one.
+      // WS-1.4 补派：一个 worker 收尾腾出一个并发坑（closeRunConclusion 已把它标 done）→ 反序列化 parked
+      // 的超额 dispatch 重派。先 delete 再重走 insertDispatchOrWake（仍超限会再次 park，强一致计数保证不
+      // 超发；先 delete 防重复）。坏 spec（反序列化失败）直接丢弃该行防毒。onEvent 派的新 worker 已在本次
+      // apply 的 dispatch 循环里处理，这里只补此前被挡下的 parked。
+      for (const row of this.deps.store.listParked(item.id)) {
+        this.deps.store.deleteParked(row.id);
+        let spec: NonNullable<Transition['dispatch']>[number] | undefined;
+        try {
+          spec = JSON.parse(row.spec) as NonNullable<Transition['dispatch']>[number];
+        } catch {
+          spec = undefined;
+        }
+        if (spec) this.insertDispatchOrWake(item, seq, spec, now);
+      }
       return;
     }
     if (this.hasInflightRunEffect(item.id)) return;

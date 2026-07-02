@@ -357,6 +357,21 @@ export class WorkitemsStore {
         PRAGMA user_version = 3;
       `);
     }
+    if (version < 4) {
+      // WS-1.4 补派：owner-workers 超 worker 并发上限的 dispatch 完整 spec 落此表，一个 worker 收尾时
+      // releaseWakePending 反序列化重派——不再静默丢弃（旧 R01.AC-9 缺口）。CREATE ... IF NOT EXISTS 幂等。
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS workitem_parked (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          workitem_id TEXT NOT NULL REFERENCES workitems(id) ON DELETE CASCADE,
+          seq INTEGER NOT NULL,
+          spec TEXT NOT NULL,
+          created_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_parked_item ON workitem_parked(workitem_id, id);
+        PRAGMA user_version = 4;
+      `);
+    }
   }
 
   insertWorkItem(row: WorkItem): void {
@@ -679,6 +694,25 @@ export class WorkitemsStore {
       )
       .get(workitemId, kind, afterSeq) as { c: number };
     return row.c;
+  }
+
+  // WS-1.4 parked dispatch：超并发上限的 dispatch spec 序列化落库，按 id 升序补派（FIFO）。
+  insertParked(workitemId: string, seq: number, spec: string): void {
+    this.db
+      .prepare(
+        'INSERT INTO workitem_parked (workitem_id, seq, spec, created_at) VALUES (?, ?, ?, ?)',
+      )
+      .run(workitemId, seq, spec, this.clock.now());
+  }
+
+  listParked(workitemId: string): Array<{ id: number; seq: number; spec: string }> {
+    return this.db
+      .prepare('SELECT id, seq, spec FROM workitem_parked WHERE workitem_id = ? ORDER BY id')
+      .all(workitemId) as Array<{ id: number; seq: number; spec: string }>;
+  }
+
+  deleteParked(id: number): void {
+    this.db.prepare('DELETE FROM workitem_parked WHERE id = ?').run(id);
   }
 
   appendEvent(workitemId: string, seq: number, kind: string, payload?: unknown): number {

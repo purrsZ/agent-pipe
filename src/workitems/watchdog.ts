@@ -1,5 +1,6 @@
 import type { WorkitemsConfig } from './config.js';
 import type { ReducerRuntime } from './reducer.js';
+import type { WorkTypeRegistry } from './registry.js';
 import type { LoggerLike } from './shared.js';
 import type { WorkitemsStore } from './store.js';
 import type { Clock } from './types.js';
@@ -15,6 +16,8 @@ export interface WatchdogDeps {
   clock: Clock;
   logger?: LoggerLike;
   cfg: WorkitemsConfig;
+  // WS-1.2: 活性看门需按 worktype 的 liveness() 声明判定是否豁免。容器调 worktype 方法不算解释业务语义。
+  registry: WorkTypeRegistry;
 }
 
 type StalledReason =
@@ -33,6 +36,8 @@ interface StalledCandidate {
 
 export class Watchdog {
   private interval: ReturnType<typeof setInterval> | undefined;
+  // WS-1.2 防抖：workitemId → 首次观测到活性违反的时刻。恢复正常即删除；持续 ≥ grace 才报警。
+  private readonly livenessViolations = new Map<string, number>();
 
   constructor(private readonly deps: WatchdogDeps) {}
 
@@ -128,6 +133,40 @@ export class Watchdog {
           ...(candidate.waitId === undefined ? {} : { waitId: candidate.waitId }),
         },
       });
+    }
+
+    this.scanLiveness(now);
+  }
+
+  // WS-1.2 活性不变式看门（D-D）：把「漏一个事件×相位分支 = 静默卡死」整类 bug 从真机暴露变成系统自曝。
+  // 对每个 must-progress 单，若持续「无 running assignment ∧ 无 pending/running effect ∧ 无 open wait」
+  // ≥ livenessGraceSec，enqueue liveness_stalled 让 worktype 自处理（requirement：raise stalled_no_path
+  // 病历）。防抖 Map 记首次违反时刻，恢复正常即清除。注意 wakePending 不算活路——owner-workers 停在
+  // wakePending 且无 running/effect/wait 就是死状态（WS-1.4 补派修好后有 parked 行也会被补派掉）。
+  private scanLiveness(now: number): void {
+    for (const item of this.deps.store.listNonTerminal()) {
+      const type = this.deps.registry.get(item.type);
+      if (type?.liveness?.(item) !== 'must-progress') {
+        this.livenessViolations.delete(item.id);
+        continue;
+      }
+      const alive =
+        this.deps.store.listAssignments(item.id).some((a) => a.status === 'running') ||
+        this.deps.store.listInflightEffects(item.id).length > 0 ||
+        this.deps.store.listOpenWaits(item.id).length > 0;
+      if (alive) {
+        this.livenessViolations.delete(item.id);
+        continue;
+      }
+      const firstAt = this.livenessViolations.get(item.id);
+      if (firstAt === undefined) {
+        this.livenessViolations.set(item.id, now);
+        continue;
+      }
+      if (now - firstAt < this.deps.cfg.livenessGraceSec * 1000) continue;
+      // 已 open 的 stalled_no_path 病历天然使 alive=true（上面已 return），故到此处必是首次报警；worktype
+      // 侧再靠 openWaitReasons 幂等兜一层。报警后本 tick reducer 同步 raise 病历 → 下 tick alive → 自动清除。
+      this.safeEnqueue(item.id, { kind: 'liveness_stalled', payload: {} });
     }
   }
 

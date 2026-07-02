@@ -141,6 +141,13 @@ export function caseFileLabel(reason: string): string | undefined {
       return '执行报错';
     case 'integration_unresolved':
       return '集成验证 · 未通过';
+    // WS-1.3/1.5：活性看门自曝 + 两类容器病历（此前无飞书卡，只能从管控台 resolve）→ 补齐同权。
+    case 'stalled_no_path':
+      return '流程卡死（系统自检出，无在途工作）';
+    case 'retry_exhausted':
+      return '重试用尽（stall/超时连续失败）';
+    case 'thrash':
+      return '决策震荡（连续被判过期）';
     default:
       return undefined;
   }

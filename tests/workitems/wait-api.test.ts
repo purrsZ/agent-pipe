@@ -52,6 +52,7 @@ function harness(): {
     clock,
     logger,
     cfg,
+    registry,
   });
   registry.register(workType());
   return {

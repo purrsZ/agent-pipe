@@ -56,6 +56,10 @@ export const requirementWorkType: WorkType = {
   // Single source of truth with crossesCheckpoint (phases.ts): 立项 gate + 灯③ 两道 checkpoint 边界.
   checkpoints: { requiredBefore: CHECKPOINT_REQUIRED_BEFORE },
   artifacts: { reportRequired: true },
+  // WS-1.1 (D-D)：立项/交付合法休息（收料等人 / 交付等关单，有 open wait 时不变式本就满足），其它相位必须
+  // 有在途工作，否则容器活性看门自曝 liveness_stalled（→ stalled_no_path 病历）。
+  liveness: (item) =>
+    item.phase === PHASE.intake || item.phase === PHASE.deliver ? 'may-rest' : 'must-progress',
 };
 
 export function registerRequirement(registry: { register(type: WorkType): void }): void {
@@ -108,6 +112,9 @@ export function requirementTransition(item: WorkItem, ev: WorkItemEvent): Transi
       return onIntegrationFailed(item, ev);
     case 'human_message':
       return onHumanMessage(item, ev);
+    case 'liveness_stalled':
+      // 容器活性看门（watchdog）发现 must-progress 单无任何在途工作 → 自曝；raise 病历让人重试当前阶段。
+      return onLivenessStalled(item, ev);
     case 'close_requested':
       return onClose(item);
     default:
@@ -177,6 +184,12 @@ function onReconcileConflict(item: WorkItem, ev: WorkItemEvent): Transition {
 const RECONCILE_CONFLICT_REASON = 'reconcile_conflict';
 const GATEKEEPER_BIG_REASON = 'gatekeeper_big';
 const INTEGRATION_UNRESOLVED_REASON = 'integration_unresolved';
+// WS-1.3：容器活性看门自曝的「非终态却无路可走」病历 reason。
+const STALLED_NO_PATH_REASON = 'stalled_no_path';
+// WS-1.5：容器（reducer）raise 的两类病历 reason——此前无显式 onWaitResolved 分支 + 无飞书卡（PIVOT 承认
+// 只能从管控台 resolve），补上后与其它病历同权，且防「未知 reason resolve 被误当 checkpoint 拍板」(#13)。
+const RETRY_EXHAUSTED_REASON = 'retry_exhausted';
+const THRASH_REASON = 'thrash';
 
 // 重弹一条同名 human 病历（declined 后防死状态：病历必须一直 open 到被 approve 或整单 /cancel）。
 function reRaiseWait(reason: string): Transition {
@@ -271,6 +284,14 @@ function onRunFailed(_item: WorkItem, ev: WorkItemEvent): Transition {
   };
 }
 
+// WS-1.3：容器活性看门（watchdog）发现 must-progress 单无任何在途工作（running assignment / pending·running
+// effect / open wait 皆空）→ liveness_stalled。raise 病历让人看见并重试当前阶段入口工作。幂等：病历已 open
+// 不重复 raise（watchdog 每 tick 都可能再发，靠容器注入的 openWaitReasons 幂等）。
+function onLivenessStalled(_item: WorkItem, ev: WorkItemEvent): Transition {
+  if (openWaitReasonsOf(ev.payload).includes(STALLED_NO_PATH_REASON)) return {};
+  return reRaiseWait(STALLED_NO_PATH_REASON);
+}
+
 // 按**被解析 wait 的原始 reason**（容器注入 resolvedWaitReason）精确路由，而非靠 phase 猜或依赖 resolve
 // 决策里恰好带 action 字段——杜绝「在 implement 阶段 resolve 一个取消/run失败病历被误判成阶段拍板、错推到
 // 集成验证」这类反向破坏。reason 缺省（纯单测手造事件无容器注入）时回落到「按 checkpoint 边界推进」。
@@ -305,9 +326,22 @@ function onWaitResolved(item: WorkItem, ev: WorkItemEvent): Transition {
       ? { effects: [{ kind: 'integration_check' }] }
       : reRaiseWait(INTEGRATION_UNRESOLVED_REASON);
   }
+  // WS-1.3/1.5：活性自曝病历 + 两类容器病历的显式分支（approved → 重试当前阶段入口 / declined → 重弹）。
+  if (reason === STALLED_NO_PATH_REASON) {
+    return decision.approved ? retryCurrentPhase(item) : reRaiseWait(STALLED_NO_PATH_REASON);
+  }
+  if (reason === RETRY_EXHAUSTED_REASON) {
+    return decision.approved ? retryCurrentPhase(item) : reRaiseWait(RETRY_EXHAUSTED_REASON);
+  }
+  if (reason === THRASH_REASON) {
+    // thrash 时容器已清 discardStreak；人确认即可（approved → {}），或重弹留观（declined）。
+    return decision.approved ? {} : reRaiseWait(THRASH_REASON);
+  }
 
-  // checkpoint p板（立项 gate / 灯③）：只在真正的 checkpoint 边界推进——杜绝把别的病历 resolve 误判成
-  // 阶段拍板（如 implement 阶段 nextPhase=integrate 但 integrate 非 checkpoint 边界 → 不推进）。
+  // checkpoint 拍板（立项 gate / 灯③）：兜底收紧（修 #13）——只有真正的 checkpoint wait（reason 以
+  // 'checkpoint:' 开头）或纯单测手造事件（reason undefined、无容器注入）才按 checkpoint 边界推进，杜绝把
+  // 别的容器病历 resolve 误判成阶段拍板（如 integrate resolve 一条 retry_exhausted → 误推到交付）。
+  if (reason !== undefined && !reason.startsWith('checkpoint:')) return {};
   const to = nextPhase(item.phase);
   if (!to || !crossesCheckpoint(to)) return {};
   if (decision.approved) return enterPhase(item, to, 'checkpoint_approved', ev);
