@@ -716,3 +716,56 @@ describe('requirement WS-6 复杂度自适应 lite 主线', () => {
     expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'reconcile' } });
   });
 });
+
+describe('requirement WS-7 交付清单 + 灯④ 关单', () => {
+  it('integration_check_passed（灯③ 首次 raise）→ 同批追加 deliver_manifest effect', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.integrate, repos: ['repo-a'] });
+    const out = t.onEvent(item, ev('integration_check_passed', { reason: 'no_contract' }));
+    expect(out.waits?.[0]).toMatchObject({ reason: `checkpoint:${PHASE.deliver}` });
+    expect((out.effects ?? []).some((e) => e.kind === 'deliver_manifest')).toBe(true);
+  });
+
+  it('integration_check_passed（灯③ 已 open，幂等重跑）→ 不重复生成 deliver_manifest', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.integrate, repos: ['repo-a'] });
+    const out = t.onEvent(
+      item,
+      ev('integration_check_passed', {
+        reason: 'no_contract',
+        openWaitReasons: [`checkpoint:${PHASE.deliver}`],
+      }),
+    );
+    expect(out.waits ?? []).toHaveLength(0);
+    expect(out.effects ?? []).toHaveLength(0);
+  });
+
+  it('灯③ approved → 进交付 + 挂 awaiting_close wait（灯④）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.integrate });
+    const out = t.onEvent(
+      item,
+      ev('wait_resolved', {
+        decision: { approved: true },
+        resolvedWaitReason: `checkpoint:${PHASE.deliver}`,
+      }),
+    );
+    expect(out.phase).toEqual({ to: PHASE.deliver, reason: 'checkpoint_approved' });
+    expect(out.waits?.[0]).toMatchObject({ kind: 'human', reason: 'awaiting_close' });
+  });
+
+  it('resolve awaiting_close(approved) in 交付 → terminal done；declined → 重弹', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.deliver });
+    expect(
+      t.onEvent(
+        item,
+        ev('wait_resolved', {
+          decision: { approved: true },
+          resolvedWaitReason: 'awaiting_close',
+        }),
+      ),
+    ).toEqual({ terminal: 'done' });
+    const declined = t.onEvent(
+      item,
+      ev('wait_resolved', { decision: { approved: false }, resolvedWaitReason: 'awaiting_close' }),
+    );
+    expect(declined.waits?.[0]).toMatchObject({ kind: 'human', reason: 'awaiting_close' });
+  });
+});

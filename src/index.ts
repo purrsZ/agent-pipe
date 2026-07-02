@@ -18,9 +18,11 @@ import {
   buildGatekeeperBigCard,
   buildCheckpointAnsweredCard,
   buildCheckpointCard,
+  buildClosureCard,
   buildProcessingCard,
   buildQuestionAnsweredCard,
   buildQuestionFormCard,
+  buildReportCard,
   buildResultCard,
   buildStatusCard,
   CHECKPOINT_ACTION_KIND,
@@ -65,6 +67,8 @@ import {
 import { createReconcileCheckHandler } from './worktypes/requirement/reconcile.js';
 import { createSteerApplyHandler } from './worktypes/requirement/steering.js';
 import { checkpointGateLabel, checkpointRail } from './worktypes/requirement/lights.js';
+import { createDeliverManifestHandler } from './worktypes/requirement/deliver.js';
+import { runWorktreeGc } from './worktypes/requirement/worktree-gc.js';
 import { createRequirementRunStrategy } from './worktypes/requirement/worker-handler.js';
 import { PendingIntakeStore } from './bridge/pending-intake.js';
 import { buildIntakeChecklistCard, type IntakeChecklistView } from './feishu/intake-card.js';
@@ -81,7 +85,7 @@ import {
   requiredProgress,
 } from './worktypes/requirement/intake.js';
 import { createIntakeFinalizeHandler } from './worktypes/requirement/intake-finalize.js';
-import { isIntakePhase } from './worktypes/requirement/phases.js';
+import { isIntakePhase, PHASE } from './worktypes/requirement/phases.js';
 
 const COMPACT_PROMPT = [
   '请把我们到目前为止的完整对话压缩成一份结构化摘要，供新会话继续使用。',
@@ -295,6 +299,30 @@ export function caseFileDetail(events: WorkItemEvent[], reason: string): string 
   return undefined;
 }
 
+// WS-7.3 灯③（集成→交付 gate）证据 note：读最后一条 integration_check_passed 的 reason，把「静态对账是否
+// 生效」如实注在灯③卡上。no_contract/no_claims = 静态对账未生效（单仓/无跨仓契约/各仓未声明改动）→ 提醒
+// 以交付清单人工验收；无 reason（真对账通过）→ 通过。
+export function deliverGateNote(events: WorkItemEvent[]): string | undefined {
+  let reason: string | undefined;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev?.kind !== 'integration_check_passed') continue;
+    const p = ev.payload;
+    reason =
+      typeof p === 'object' && p !== null
+        ? (p as { reason?: unknown }).reason?.toString()
+        : undefined;
+    break;
+  }
+  if (reason === 'no_contract') {
+    return '⚠️ 静态跨仓对账未生效（本单无跨仓契约）——请以下方交付清单与工人回执为准人工验收';
+  }
+  if (reason === 'no_claims') {
+    return '⚠️ 静态跨仓对账未生效（各仓未声明改动）——请以下方交付清单人工验收';
+  }
+  return '✅ 静态跨仓对账通过';
+}
+
 // 立项清单事件流 → feishu 清单卡的中性视图。kernel-exempt：index 可 import worktypes 的 intake 纯核心，
 // 把领域状态压成 feishu 层只认的 view（feishu 层不做 fold、不 import worktypes）。
 function foldIntakeState(events: WorkItemEvent[]): ReturnType<typeof foldIntake> {
@@ -479,6 +507,19 @@ async function main() {
       run: async (now: Date) => {
         store.purgeInboxBefore(now.getTime() - 30 * 24 * 60 * 60 * 1000);
         return undefined;
+      },
+    },
+    // WS-7.4: 终态且 7 天以上的单清 worktree（分支保留）；孤目录 30 天才清。
+    {
+      label: 'worktree-gc',
+      run: async (now: Date) => {
+        const r = runWorktreeGc({
+          store: workitems.store,
+          worktreesDir: path.join(config.dataDir, 'worktrees'),
+          logger,
+          now: now.getTime(),
+        });
+        return `removed=${r.removed} kept=${r.kept}`;
       },
     },
   ]);
@@ -1770,6 +1811,13 @@ export function createWorkitemsRuntime(deps: {
   ): Promise<void> => {
     for (const w of workitems.store.listOpenWaits(workitemId)) {
       if (w.kind !== 'human' || w.cardMsgId !== null) continue;
+      // WS-7.7 灯④：交付待关单卡（awaiting_close 非 checkpoint 非病历，需专属分支——之前「走别的路径」是空头）。
+      if (w.reason === 'awaiting_close') {
+        const closeCard = buildClosureCard({ title }, { itemId: workitemId, waitId: w.id });
+        const postedClose = await deps.sender.replyCard(anchorMsgId, closeCard);
+        if (postedClose) workitems.store.updateWait(w.id, { cardMsgId: postedClose });
+        continue;
+      }
       const boundary = checkpointBoundaryOf(w.reason);
       // 关卡灯(checkpoint:*) → 灯卡(通过/打回)；病历(对账冲突/监工判大/执行报错/集成未决) → 病历卡
       // (已处理·继续/取消整单)。二者皆非 → 跳过(如 cancel_confirm 走别的路径)。
@@ -1780,8 +1828,13 @@ export function createWorkitemsRuntime(deps: {
         : caseFileDetail(workitems.api.listEvents(workitemId), w.reason);
       let card: object;
       if (boundary) {
+        // WS-7.3 灯③ 厚化：交付 gate 卡带「静态对账是否生效」的证据 note，人拍板有据。
+        const note =
+          boundary === PHASE.deliver
+            ? deliverGateNote(workitems.api.listEvents(workitemId))
+            : undefined;
         card = buildCheckpointCard(
-          { title, gateLabel: checkpointGateLabel(boundary), rail: checkpointRail(boundary) },
+          { title, gateLabel: checkpointGateLabel(boundary), rail: checkpointRail(boundary), note },
           { itemId: workitemId, waitId: w.id, boundary },
         );
       } else if (w.reason === 'gatekeeper_big') {
@@ -1847,7 +1900,12 @@ export function createWorkitemsRuntime(deps: {
           const wait = waitId ? workitems.store.getWait(waitId) : undefined;
           if (wait && wait.resolvedAt === null) {
             const boundary = checkpointBoundaryOf(wait.reason);
-            const label = boundary ? checkpointGateLabel(boundary) : caseFileLabel(wait.reason);
+            // WS-7.7：awaiting_close（灯④）非 checkpoint 非病历，补一条 label，否则催办因取不到 label 被跳过。
+            const label = boundary
+              ? checkpointGateLabel(boundary)
+              : wait.reason === 'awaiting_close'
+                ? '交付待关单（灯④）'
+                : caseFileLabel(wait.reason);
             if (label) {
               await deps.sender.reply(
                 anchorMsgId,
@@ -1855,6 +1913,19 @@ export function createWorkitemsRuntime(deps: {
               );
             }
           }
+        }
+        // WS-7 交付清单：manifest_ready → 群内贴一张交付清单卡（每仓分支/diffstat/接手命令）。
+        if (event.kind === 'manifest_ready' && anchorMsgId) {
+          const summaryText =
+            typeof event.payload === 'object' &&
+            event.payload !== null &&
+            typeof (event.payload as { summaryText?: unknown }).summaryText === 'string'
+              ? (event.payload as { summaryText: string }).summaryText
+              : '(交付清单为空)';
+          await deps.sender.replyCard(
+            anchorMsgId,
+            buildReportCard(`交付清单 · ${item.title}`, summaryText),
+          );
         }
         if (anchorMsgId) await surfaceCheckpoints(workitemId, item.title, anchorMsgId);
       } catch (err) {
@@ -1876,8 +1947,11 @@ export function createWorkitemsRuntime(deps: {
   // read+inject — a never-indexed repo yields undefined and the prompt simply omits the block.
   const knowledgeStore = new KnowledgeStore(path.join(deps.config.dataDir, 'knowledge'));
   const freshnessPolicy = loadFreshnessPolicy();
+  // WS-7：worker worktree 根目录——worker-handler（建 worktree）与 deliver_manifest（读 diffstat）+ worktree-gc
+  // （清理）共用同一路径，抽成 const 避免三处写死字符串漂移。
+  const worktreesDir = path.join(deps.config.dataDir, 'worktrees');
   const requirementStrategy = createRequirementRunStrategy({
-    worktreesDir: path.join(deps.config.dataDir, 'worktrees'),
+    worktreesDir,
     knowledgeFor: (repo) =>
       composeRepoKnowledge(
         {
@@ -1913,6 +1987,8 @@ export function createWorkitemsRuntime(deps: {
   // WS-5 监工判大返工：人已改图纸并重对账通过（reconcile_passed@implement）→ 提取最近 gatekeeper_big 的受影响仓 →
   // emit rework_requested → worktype 定向重派这些仓的 worker。设计仍只有人能改（agent 只重对账），红线不放松。
   workitems.effects.registerHandler(createGatekeeperReworkHandler());
+  // WS-7 交付清单 effect: 灯③ 首次 raise 时生成每仓分支/diffstat/接手命令 → emit manifest_ready → postStatus 贴卡。
+  workitems.effects.registerHandler(createDeliverManifestHandler({ worktreesDir }));
   // 立项收尾 effect: 立项 gate 通过 → fold 立项填项历史 → 落立项书 intake/intake.md + 提升 repos
   // (emit repos_set)。注册在这里，与 agent-run / integration_check 同批，进理解时由 worktype 发起。
   workitems.effects.registerHandler(createIntakeFinalizeHandler());

@@ -70,6 +70,7 @@ export const REQUIREMENT_EVENT_KINDS = [
   'intake_field_set', // 立项收料：每填一项一条（fold 出立项清单状态，gateReady 时 raise 立项 gate）
   'steer_directive', // WS-2 消息必达：steer_apply 解析包工头报告后 emit 的结构化指令（redo_reconcile/rework/raise_human/none）
   'rework_requested', // WS-5 监工判大返工：gatekeeper_rework 提取受影响仓后 emit → 定向重派 worker
+  'manifest_ready', // WS-7 交付清单：deliver_manifest effect 生成每仓分支/diffstat/接手命令后 emit → postStatus 贴卡
 ] as const;
 
 export type RequirementEventKind = (typeof REQUIREMENT_EVENT_KINDS)[number];

@@ -8,6 +8,7 @@ import {
   buildCaseFileCard,
   buildCheckpointAnsweredCard,
   buildCheckpointCard,
+  buildClosureCard,
   buildErrorCard,
   buildGatekeeperBigCard,
   buildQuestionAnsweredCard,
@@ -185,6 +186,14 @@ describe('buildCheckpointCard (T3 灯卡)', () => {
     ]);
   });
 
+  it('WS-7：note 渲染为灰字（灯③ 证据厚化）', () => {
+    const card = buildCheckpointCard(
+      { title: 't', gateLabel: '灯③', rail: 'r', note: '⚠️ 静态对账未生效（本单无跨仓契约）' },
+      routing,
+    );
+    expect(JSON.stringify(card)).toContain('静态对账未生效');
+  });
+
   it('parseCardAction round-trips the 通过 button value (the consumer reads it back)', () => {
     const card = buildCheckpointCard({ title: 't', gateLabel: '灯①', rail: 'r' }, routing) as {
       body: { elements: Array<Record<string, unknown>> };
@@ -257,6 +266,31 @@ describe('buildCaseFileCard (病历卡)', () => {
       waitId: 'wt-9',
       cancel: true,
     });
+  });
+});
+
+describe('buildClosureCard (WS-7 灯④ 关单卡)', () => {
+  it('orange，确认关单/暂不 两 callback 按钮 + note', () => {
+    const card = buildClosureCard(
+      { title: '订单导出', note: '各仓已合并' },
+      { itemId: 'wi-1', waitId: 'wt-9' },
+    ) as { header: { template: string }; body: { elements: Array<Record<string, unknown>> } };
+    expect(card.header.template).toBe('orange');
+    const json = JSON.stringify(card);
+    expect(json).toContain('关单');
+    expect(json).toContain('各仓已合并');
+    const buttons = card.body.elements.filter((e) => e.tag === 'button');
+    expect(buttons).toHaveLength(2);
+    const values = buttons.map(
+      (b) => (b.behaviors as Array<{ value: Record<string, unknown> }>)[0]!.value,
+    );
+    expect(values[0]).toMatchObject({
+      kind: CHECKPOINT_ACTION_KIND,
+      itemId: 'wi-1',
+      waitId: 'wt-9',
+      approved: true,
+    });
+    expect(values[1]).toMatchObject({ approved: false });
   });
 });
 

@@ -108,13 +108,7 @@ export function requirementTransition(item: WorkItem, ev: WorkItemEvent): Transi
     case 'gatekeeper_big':
       return onGatekeeperBig(item, ev);
     case 'integration_check_passed':
-      return requestAdvance(
-        item,
-        PHASE.integrate,
-        PHASE.deliver,
-        'integration_passed',
-        openWaitReasonsOf(ev.payload),
-      );
+      return onIntegrationPassed(item, ev);
     case 'integration_check_failed':
       return onIntegrationFailed(item, ev);
     case 'human_message':
@@ -211,6 +205,8 @@ const RETRY_EXHAUSTED_REASON = 'retry_exhausted';
 const THRASH_REASON = 'thrash';
 // WS-2.3：包工头（steer）拿不准 / 用户要求超出范围 → 上报人裁决的病历 reason。
 const STEER_ESCALATED_REASON = 'steer_escalated';
+// WS-7.7：交付相位「等人关单」的 human wait reason（灯④）——可点关单卡 / 可催 / 活性看门可见。
+const AWAITING_CLOSE_REASON = 'awaiting_close';
 
 // 重弹一条同名 human 病历（declined 后防死状态：病历必须一直 open 到被 approve 或整单 /cancel）。
 function reRaiseWait(reason: string): Transition {
@@ -231,6 +227,20 @@ function onGatekeeperBig(item: WorkItem, ev: WorkItemEvent): Transition {
 
 // 集成验证 fix loop (R13.AC-4/AC-6, D-11): the failure's round (counted by the integration_check
 // handler, NOT assignment.retries) decides fix vs escalate.
+// 集成验证通过 → 升灯③（集成→交付 checkpoint）。WS-7：灯③ 首次 raise 时同批生成交付清单（deliver_manifest
+// effect），人拍板前就把每仓分支/diffstat/接手命令备好；已 open（幂等重跑 base={}）不重复生成。
+function onIntegrationPassed(item: WorkItem, ev: WorkItemEvent): Transition {
+  const base = requestAdvance(
+    item,
+    PHASE.integrate,
+    PHASE.deliver,
+    'integration_passed',
+    openWaitReasonsOf(ev.payload),
+  );
+  if (!base.waits || base.waits.length === 0) return base;
+  return { ...base, effects: [...(base.effects ?? []), { kind: 'deliver_manifest' }] };
+}
+
 function onIntegrationFailed(item: WorkItem, ev: WorkItemEvent): Transition {
   if (item.phase !== PHASE.integrate) return {};
   const round = numberField(ev.payload, 'round') ?? 1;
@@ -386,6 +396,13 @@ function onWaitResolved(item: WorkItem, ev: WorkItemEvent): Transition {
     // 说话即触发新 steer。
     return decision.approved ? {} : reRaiseWait(STEER_ESCALATED_REASON);
   }
+  if (reason === AWAITING_CLOSE_REASON) {
+    // WS-7.7 灯④：确认关单（approved）→ 整单 done（与 close_requested 等价出口）；declined「暂不关」→ 重弹
+    // 新 awaiting_close（保持可点可催，reRaise 产生新 waitId → cardMsgId 空 → surfaceCheckpoints 重发新卡）。
+    return decision.approved && item.phase === PHASE.deliver
+      ? { terminal: 'done' }
+      : reRaiseWait(AWAITING_CLOSE_REASON);
+  }
 
   // checkpoint 拍板（立项 gate / 灯③）：兜底收紧（修 #13）——只有真正的 checkpoint wait（reason 以
   // 'checkpoint:' 开头）或纯单测手造事件（reason undefined、无容器注入）才按 checkpoint 边界推进，杜绝把
@@ -435,8 +452,12 @@ function enterPhase(
       // 静态集成对账 effect（质检员，基准 = owner 对账出的跨仓契约）— emits integration_check_passed/failed.
       return { ...base, effects: [{ kind: 'integration_check' }] };
     case PHASE.deliver:
-      // 灯④: rest in non-terminal — no auto MR/上线. close_requested drives terminal (D-14).
-      return base;
+      // WS-7.7 灯④：交付相位挂一条 awaiting_close human wait——「安静等人关单」也必须是一条 open wait，否则
+      // 既不可点、也不可催、活性看门也看不见。人点关单卡 / 发 /done 都能关；不点则 WS-3 催办覆盖。无自动 MR/上线。
+      return {
+        ...base,
+        waits: [{ kind: 'human', reason: AWAITING_CLOSE_REASON, deadlineTtlSec: 7 * 86_400 }],
+      };
     default:
       return base;
   }

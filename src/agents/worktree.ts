@@ -60,6 +60,19 @@ export function worktreeIsDirty(worktreePath: string): boolean {
 }
 
 /**
+ * WS-7 交付清单：worktree 相对 base 的改动概览（`git diff --stat <base>...HEAD`）。worktree 已清理 /
+ * 命令失败 → 返回占位串，不抛（交付清单是尽力而为，不该因一个仓读不到而崩掉整份清单）。
+ */
+export function worktreeDiffStat(worktreePath: string, base: string): string {
+  try {
+    const out = git(worktreePath, ['diff', '--stat', `${base}...HEAD`]).trim();
+    return out || '(无改动)';
+  } catch {
+    return '(worktree 已清理或不可读)';
+  }
+}
+
+/**
  * Reset the checkout back to a clean baseline before a redispatch (R05.AC-5/AC-8). Hard
  * reset to base, then `git clean -fd` scoped to cleanDirs ONLY — never the whole tree, so
  * untracked-but-useful files outside the known output dirs survive (D-27 risk note).

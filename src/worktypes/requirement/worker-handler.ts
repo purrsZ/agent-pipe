@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import { worktreeAdd, worktreeIsDirty, worktreePathFor } from '../../agents/worktree.js';
 import type { Assignment, WorkItem } from '../../workitems/types.js';
 import type { RunStrategy } from '../agent-run/run-handler.js';
+import { branchFor } from './branch.js';
 import { type ContractSnapshot, EMPTY_SNAPSHOT } from './contract.js';
 import { parseInternalApis, promoteToContract } from './design.js';
 import { PHASE } from './phases.js';
@@ -186,11 +187,6 @@ export function createRequirementRunStrategy(opts: {
       }
     },
   };
-}
-
-function branchFor(workitem: WorkItem, assignment: Assignment): string {
-  const repo = (assignment.repo ?? 'repo').replace(/[^A-Za-z0-9._-]+/g, '-');
-  return `req/${workitem.id.slice(3, 15)}/${repo}-${assignment.id.slice(3, 11)}`;
 }
 
 // WS-0.4: read the dispatch payload's stage so composePrompt/afterRun route by (role, stage) rather

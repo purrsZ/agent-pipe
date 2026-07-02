@@ -20,7 +20,7 @@ describe('anchorAction ⇄ REQUIREMENT_EVENT_KINDS (no drift)', () => {
     }
   });
 
-  it('the authoritative list is non-empty and matches the count (PIVOT 10 + OVERHAUL steer_directive/rework_requested = 12)', () => {
-    expect(REQUIREMENT_EVENT_KINDS.length).toBe(12);
+  it('the authoritative list is non-empty and matches the count (PIVOT 10 + OVERHAUL steer_directive/rework_requested/manifest_ready = 13)', () => {
+    expect(REQUIREMENT_EVENT_KINDS.length).toBe(13);
   });
 });

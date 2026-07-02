@@ -578,7 +578,7 @@ export interface CheckpointCardRouting {
  * in the value, same as the AUQ card. A click funnels through the single inject门面 (resolveWait).
  */
 export function buildCheckpointCard(
-  data: { title: string; gateLabel: string; rail: string },
+  data: { title: string; gateLabel: string; rail: string; note?: string },
   routing: CheckpointCardRouting,
 ): object {
   const title = data.title.length > 40 ? `${data.title.slice(0, 40)}…` : data.title;
@@ -586,9 +586,11 @@ export function buildCheckpointCard(
     `**${data.gateLabel}** — 该你拍板了`,
     '',
     `<font color="grey">${data.rail}</font>`,
+    // WS-7 灯③ 厚化：把「对账是否生效 / 交付清单在哪」的证据以灰字注在卡上，人拍板有据。
+    ...(data.note && data.note.trim() ? ['', `<font color="grey">${data.note.trim()}</font>`] : []),
     '',
     '通过 → 进入下一步。',
-    '要改 → **直接在群里回复要改什么**，我据此重做（也可点【打回】退回重做）。',
+    '要改 → **点【打回】并填写意见**，我按意见安排返工（也可直接在群里回复）。',
   ].join('\n');
   const button = (text: string, type: string, approved: boolean): object => ({
     tag: 'button',
@@ -638,6 +640,56 @@ export function buildCheckpointCard(
 export interface CaseFileCardRouting {
   itemId: string;
   waitId: string;
+}
+
+/**
+ * WS-7.7 灯④ 关单卡：交付相位「等人关单」的 awaiting_close wait 出此卡（orange）。确认各仓分支已合并/上线后
+ * 点关单 → 整单 done；「暂不」→ 保持打开（重弹）。/done 命令是等价出口。普通 callback 按钮（无意见输入）。
+ */
+export function buildClosureCard(
+  data: { title: string; note?: string },
+  routing: CaseFileCardRouting,
+): object {
+  const title = data.title.length > 40 ? `${data.title.slice(0, 40)}…` : data.title;
+  const lines = [
+    '**交付待关单（灯④）** — 集成验证已过灯③，交付清单见上方卡片。',
+    ...(data.note && data.note.trim() ? ['', `<font color="grey">${data.note.trim()}</font>`] : []),
+    '',
+    '确认各仓分支已合并 / 上线后点【确认关单】收尾整单。',
+  ].join('\n');
+  const button = (text: string, type: string, approved: boolean): object => ({
+    tag: 'button',
+    text: { tag: 'plain_text', content: text },
+    type,
+    width: 'default',
+    behaviors: [
+      {
+        type: 'callback',
+        value: {
+          kind: CHECKPOINT_ACTION_KIND,
+          itemId: routing.itemId,
+          waitId: routing.waitId,
+          approved,
+        },
+      },
+    ],
+  });
+  return {
+    schema: '2.0',
+    header: {
+      template: 'orange',
+      title: { tag: 'plain_text', content: `交付待关单 · ${title}` },
+    },
+    body: {
+      direction: 'vertical',
+      padding: '12px',
+      elements: [
+        { tag: 'markdown', content: lines },
+        button('✅ 确认关单 · 整单完成', 'primary', true),
+        button('暂不，保持打开', 'default', false),
+      ],
+    },
+  };
 }
 
 /**
