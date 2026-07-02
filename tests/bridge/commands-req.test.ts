@@ -20,6 +20,7 @@ function makeMsg(text: string, over: Partial<IncomingMessage> = {}): IncomingMes
 function makeHandler() {
   const replies: string[] = [];
   const reqs: Array<{ description: string }> = [];
+  const cancels: IncomingMessage[] = [];
   const sender = {
     reply: async (_id: string, text: string) => {
       replies.push(text);
@@ -39,8 +40,9 @@ function makeHandler() {
     () => {}, // onProbe
     () => {}, // onDone
     (_msg, opts) => reqs.push(opts), // onRequirement
+    (msg) => cancels.push(msg), // onCancelUnit
   );
-  return { handler, replies, reqs };
+  return { handler, replies, reqs, cancels };
 }
 
 describe('/req dispatch (requirement 立项重塑, M-I2)', () => {
@@ -62,6 +64,14 @@ describe('/req dispatch (requirement 立项重塑, M-I2)', () => {
     await handler.dispatch(makeMsg('/req'));
     expect(reqs).toEqual([{ description: '' }]);
     expect(replies).toHaveLength(0);
+  });
+
+  it('WS-10.8 /cancel 转给 onCancelUnit（不再是「未知命令」死代码）', async () => {
+    const { handler, cancels, replies } = makeHandler();
+    const msg = makeMsg('/cancel');
+    await handler.dispatch(msg);
+    expect(cancels).toEqual([msg]);
+    expect(replies).toHaveLength(0); // 不再回「未知命令」
   });
 
   it('--repo 夹在描述中间也只保留描述部分', async () => {

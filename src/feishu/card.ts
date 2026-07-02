@@ -666,6 +666,50 @@ export interface CaseFileCardRouting {
 }
 
 /**
+ * WS-10.9 取消确认卡（red）：群里发 /cancel → 需求侧升起 cancel_confirm wait → 出此卡。确认 → 整单终态
+ * cancelled（在途 run 中止、worktree 分支保留）；「继续推进」→ 原有 waits/runs 原封不动。普通 callback 按钮。
+ */
+export function buildCancelConfirmCard(title: string, routing: CaseFileCardRouting): object {
+  const head = title.length > 40 ? `${title.slice(0, 40)}…` : title;
+  const button = (text: string, type: string, approved: boolean): object => ({
+    tag: 'button',
+    text: { tag: 'plain_text', content: text },
+    type,
+    width: 'default',
+    behaviors: [
+      {
+        type: 'callback',
+        value: {
+          kind: CHECKPOINT_ACTION_KIND,
+          itemId: routing.itemId,
+          waitId: routing.waitId,
+          approved,
+        },
+      },
+    ],
+  });
+  return {
+    schema: '2.0',
+    header: {
+      template: 'red',
+      title: { tag: 'plain_text', content: `确认取消整单 · ${head}` },
+    },
+    body: {
+      direction: 'vertical',
+      padding: '12px',
+      elements: [
+        {
+          tag: 'markdown',
+          content: '确认取消整单？各仓在途工作将被中止，已产出的 worktree 分支保留。',
+        },
+        button('⚠️ 确认取消', 'danger', true),
+        button('继续推进', 'default', false),
+      ],
+    },
+  };
+}
+
+/**
  * WS-7.7 灯④ 关单卡：交付相位「等人关单」的 awaiting_close wait 出此卡（orange）。确认各仓分支已合并/上线后
  * 点关单 → 整单 done；「暂不」→ 保持打开（重弹）。/done 命令是等价出口。普通 callback 按钮（无意见输入）。
  */

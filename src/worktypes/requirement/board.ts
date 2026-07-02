@@ -378,6 +378,11 @@ const EVENT_CAT: Record<string, EventKind> = {
   run_failed: 'error',
   human_message: 'human',
   wait_resolved: 'human',
+  // OVERHAUL 新事件（WS-2/5/7 + 容器活性看门）。
+  steer_directive: 'agent',
+  rework_requested: 'agent',
+  manifest_ready: 'ok',
+  liveness_stalled: 'error',
 };
 
 const EVENT_TEXT: Record<string, string> = {
@@ -395,6 +400,10 @@ const EVENT_TEXT: Record<string, string> = {
   run_failed: '一次执行失败',
   human_message: '你发来一条留言',
   wait_resolved: '一个等待已处理',
+  steer_directive: '包工头处理了你的留言',
+  rework_requested: '监工判大后定向返工',
+  manifest_ready: '交付清单已生成',
+  liveness_stalled: '流程卡死（系统自检出）',
 };
 
 function foldEvents(events: WorkItemEvent[], now: number): ReqEvent[] {

@@ -35,6 +35,7 @@ const HELP_TEXT = [
   '  /probe [--repo <path>] <问题>             只读代码调查：缺省查默认目录、--repo 指定项目，过程+报告回贴到话题',
   '  /done                                     关闭当前调查（在其话题里回复）',
   '  /req [需求一句话]                          发起需求：建专属群，群内引导式收齐前置料(仓库/PRD/UI/验收)再开干',
+  '  /cancel                                   在需求群里发起取消整单（需确认）',
   '  /help                                     本帮助',
   '',
   '普通消息（不带 /）：优先发给本会话当前任务；若无则发给本会话最近活跃。',
@@ -57,6 +58,8 @@ export class CommandHandler {
     private onProbe: (msg: IncomingMessage, opts: { repo?: string; description: string }) => void,
     private onDone: (msg: IncomingMessage, threadRoot: string) => void,
     private onRequirement: (msg: IncomingMessage, opts: { description: string }) => void,
+    // WS-10.8：/cancel 在需求群里发起取消整单（kernel 中性，与 onRequirement/onProbe 同型）。
+    private onCancelUnit: (msg: IncomingMessage) => void,
   ) {}
 
   private isAdmin(openId: string): boolean {
@@ -131,6 +134,10 @@ export class CommandHandler {
           return;
         case '/req':
           await this.handleRequirement(msg, rest);
+          return;
+        case '/cancel':
+          // WS-10.8：需求群里取消整单（需二次确认）。需求侧收到 /cancel 留言后升起取消确认。
+          this.onCancelUnit(msg);
           return;
         case '/help':
           await this.sender.reply(msg.messageId, HELP_TEXT);

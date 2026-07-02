@@ -14,6 +14,7 @@ import {
   AUQ_ACTION_KIND,
   AUQ_WORKITEM_ACTION_KIND,
   buildAnchorCard,
+  buildCancelConfirmCard,
   buildCaseFileAnsweredCard,
   buildCaseFileCard,
   buildGatekeeperBigCard,
@@ -287,8 +288,30 @@ export function caseFileDetail(events: WorkItemEvent[], reason: string): string 
         .slice(0, 3);
       return parts.length > 0 ? parts.join('；') : undefined;
     };
-    if (reason === 'reconcile_conflict') return pick(p.unresolved, 'detail');
-    if (reason === 'gatekeeper_big') return pick(p.raises, 'question');
+    if (reason === 'reconcile_conflict') {
+      // WS-10.2：病历详情带上受影响仓（unresolved[].repos 是 string[]，拍平去重）。
+      const detail = pick(p.unresolved, 'detail');
+      const repos = Array.isArray(p.unresolved)
+        ? [
+            ...new Set(
+              p.unresolved.flatMap((u) =>
+                typeof u === 'object' && u && Array.isArray((u as Record<string, unknown>).repos)
+                  ? ((u as { repos: unknown[] }).repos.filter(
+                      (r): r is string => typeof r === 'string' && r.length > 0,
+                    ) as string[])
+                  : [],
+              ),
+            ),
+          ].join('、')
+        : '';
+      return detail && repos ? `${detail}（涉及：${repos}）` : detail;
+    }
+    if (reason === 'gatekeeper_big') {
+      // WS-10.2：带上跨仓外溢涉及的仓（raises[].repo 为标量）。
+      const q = pick(p.raises, 'question');
+      const repos = pick(p.raises, 'repo');
+      return q && repos ? `${q}（涉及：${repos}）` : q;
+    }
     if (reason === 'steer_escalated') {
       return typeof p.note === 'string' && p.note.length > 0 ? p.note : undefined;
     }
@@ -1187,13 +1210,32 @@ async function main() {
       model: null,
     });
     store.clearAgentSessionId(taskId); // 每次抽取独立、无上轮串扰
+    // WS-10.1（诊断 #14）：该 run 不是 workitem effect，watchdog 管不到——pool.send 无超时会让用户永远停在
+    // 「🤔 正在提取…」。加 90s 超时（env INTAKE_EXTRACT_TIMEOUT_MS 可调）→ abort + 返回 null 落 fillIntakeDeterministic。
+    const timeoutMs = Number(process.env.INTAKE_EXTRACT_TIMEOUT_MS) || 90_000;
     try {
-      const r = await pool.send(task, prompt, undefined, { permission: { mode: 'readonly' } });
-      if (r.error) {
-        logger.warn({ err: r.error, itemId }, 'intake extract run error');
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timeout = new Promise<'timeout'>((resolve) => {
+        timer = setTimeout(() => resolve('timeout'), timeoutMs);
+      });
+      const raced = await Promise.race([
+        pool.send(task, prompt, undefined, { permission: { mode: 'readonly' } }),
+        timeout,
+      ]);
+      if (timer) clearTimeout(timer);
+      if (raced === 'timeout') {
+        pool.abort(taskId);
+        logger.warn(
+          { itemId, timeoutMs },
+          'intake extract timed out; falling back to deterministic',
+        );
         return null;
       }
-      return parseIntakeExtraction(r.fullText ?? '');
+      if (raced.error) {
+        logger.warn({ err: raced.error, itemId }, 'intake extract run error');
+        return null;
+      }
+      return parseIntakeExtraction(raced.fullText ?? '');
     } catch (err) {
       logger.warn({ err, itemId }, 'intake extract failed');
       return null;
@@ -1339,6 +1381,9 @@ async function main() {
     },
     (msg, opts) => {
       void runRequirement(msg, opts);
+    },
+    (msg) => {
+      void onCancelUnit(msg);
     },
   );
 
@@ -1503,6 +1548,45 @@ async function main() {
     }
   }
 
+  // WS-10.8：把「按 threadRoot claim → 群 chatId claim 找 managed 单元」的解析抽成 helper，dispatcher 普通消息
+  // 路由与 /cancel 命令两处共用，防两份判定漂移。owner 消失但 claim 残留 → 释放并回落普通路由。
+  const resolveManagedItem = (msg: IncomingMessage): WorkItem | undefined => {
+    const threadRoot = msg.threadId ?? msg.rootId ?? msg.parentId;
+    let managedKey: string | undefined;
+    let claim = threadRoot ? store.getThreadClaim(threadRoot) : undefined;
+    if (claim?.owner_kind === 'managed') {
+      managedKey = threadRoot;
+    } else if (msg.chatType === 'group') {
+      const byChat = store.getThreadClaim(msg.chatId);
+      if (byChat?.owner_kind === 'managed') {
+        claim = byChat;
+        managedKey = msg.chatId;
+      }
+    }
+    if (claim?.owner_kind !== 'managed' || !managedKey) return undefined;
+    const item = workitems.api.getWorkItem(claim.owner_id);
+    if (item) return item;
+    logger.warn({ managedKey, ownerId: claim.owner_id }, 'managed claim with missing owner');
+    store.releaseThreadClaim(managedKey);
+    return undefined;
+  };
+
+  // WS-10.8：群里发 /cancel 发起取消整单（修死代码——以 / 开头的消息先进 commands.dispatch，早于 managed 路由，
+  // 故 worktype 的 /cancel 分支从飞书路径本是死代码）。找不到 managed 单 → 提示；终态 → 复用「已结束」文案；
+  // 否则 injectHumanMessage('/cancel') → worktype raise cancel_confirm → surfaceCheckpoints 出确认卡。
+  async function onCancelUnit(msg: IncomingMessage): Promise<void> {
+    const item = resolveManagedItem(msg);
+    if (!item) {
+      await sender.reply(msg.messageId, '本会话没有进行中的需求单。');
+      return;
+    }
+    if (isTerminalStatus(item.status)) {
+      await sender.reply(msg.messageId, '该单元已结束，回复 `/done` 关闭后可重新发起。');
+      return;
+    }
+    workitems.api.injectHumanMessage(item.id, { text: '/cancel' });
+  }
+
   // WS-4: 入站处理主体抽成具名闭包，让「ws 推送（经 ingestMessage 持久去重）」「启动补投」「断线补拉」
   // 三条入口共用同一份处理。dispatcher 收到消息后走 ingestMessage(record→handle→mark)。
   const handleIncoming = async (msg: IncomingMessage): Promise<void> => {
@@ -1551,48 +1635,30 @@ async function main() {
     // managed (workitems) claim must not be swallowed by the bridge's root→task / recent-task
     // fallback. probe 按飞书话题 thread 认领；立项群按群 chatId 认领（群内消息常无 thread/root/
     // parent，故 thread 找不到再按 chatId 找）。
-    const threadRoot = msg.threadId ?? msg.rootId ?? msg.parentId;
-    let managedKey: string | undefined;
-    let claim = threadRoot ? store.getThreadClaim(threadRoot) : undefined;
-    if (claim?.owner_kind === 'managed') {
-      managedKey = threadRoot;
-    } else if (msg.chatType === 'group') {
-      const byChat = store.getThreadClaim(msg.chatId);
-      if (byChat?.owner_kind === 'managed') {
-        claim = byChat;
-        managedKey = msg.chatId;
-      }
-    }
-    if (claim?.owner_kind === 'managed' && managedKey) {
-      const item = workitems.api.getWorkItem(claim.owner_id);
-      if (item) {
-        // WI-7 P1: a terminal item (e.g. failed) keeps its claim until /done. Injecting a
-        // follow-up would hit the reducer terminal short-circuit (recorded, never dispatched)
-        // — so reply honestly instead of promising a report that never comes.
-        if (isTerminalStatus(item.status)) {
-          await sender.reply(msg.messageId, '该单元已结束，回复 `/done` 关闭后可重新发起。');
-          return;
-        }
-        // 立项收料：群内普通消息当作「当前待填项」的值（缺哪项填哪项），写 intake_field_set 事件并
-        // 刷新清单卡；非立项阶段才走普通追问注入。
-        if (isIntakePhase(item.phase)) {
-          await handleIntakeMessage(item, msg);
-          return;
-        }
-        workitems.api.injectHumanMessage(item.id, {
-          text: msg.text,
-          feishuMsgId: msg.messageId,
-        });
-        await sender.reply(
-          msg.messageId,
-          '已收到，交给包工头处理；他的回应稍后会以卡片形式出现在本群。',
-        );
+    const managedItem = resolveManagedItem(msg);
+    if (managedItem) {
+      // WI-7 P1: a terminal item (e.g. failed) keeps its claim until /done. Injecting a
+      // follow-up would hit the reducer terminal short-circuit (recorded, never dispatched)
+      // — so reply honestly instead of promising a report that never comes.
+      if (isTerminalStatus(managedItem.status)) {
+        await sender.reply(msg.messageId, '该单元已结束，回复 `/done` 关闭后可重新发起。');
         return;
       }
-      // Owner vanished but the claim lingered — release it and fall through to normal bridge
-      // routing instead of swallowing the message forever.
-      logger.warn({ managedKey, ownerId: claim.owner_id }, 'managed claim with missing owner');
-      store.releaseThreadClaim(managedKey);
+      // 立项收料：群内普通消息当作「当前待填项」的值（缺哪项填哪项），写 intake_field_set 事件并
+      // 刷新清单卡；非立项阶段才走普通追问注入。
+      if (isIntakePhase(managedItem.phase)) {
+        await handleIntakeMessage(managedItem, msg);
+        return;
+      }
+      workitems.api.injectHumanMessage(managedItem.id, {
+        text: msg.text,
+        feishuMsgId: msg.messageId,
+      });
+      await sender.reply(
+        msg.messageId,
+        '已收到，交给包工头处理；他的回应稍后会以卡片形式出现在本群。',
+      );
+      return;
     }
 
     const candidates = [msg.rootId, msg.parentId].filter((v): v is string => !!v);
@@ -1854,9 +1920,16 @@ export function createWorkitemsRuntime(deps: {
         if (postedClose) workitems.store.updateWait(w.id, { cardMsgId: postedClose });
         continue;
       }
+      // WS-10.9 取消确认卡（cancel_confirm 也非 checkpoint 非病历，之前「走别的路径」同样是空头）。
+      if (w.reason === 'cancel_confirm') {
+        const cancelCard = buildCancelConfirmCard(title, { itemId: workitemId, waitId: w.id });
+        const postedCancel = await deps.sender.replyCard(anchorMsgId, cancelCard);
+        if (postedCancel) workitems.store.updateWait(w.id, { cardMsgId: postedCancel });
+        continue;
+      }
       const boundary = checkpointBoundaryOf(w.reason);
       // 关卡灯(checkpoint:*) → 灯卡(通过/打回)；病历(对账冲突/监工判大/执行报错/集成未决) → 病历卡
-      // (已处理·继续/取消整单)。二者皆非 → 跳过(如 cancel_confirm 走别的路径)。
+      // (已处理·继续/取消整单)。二者皆非 → 跳过。
       const caseLabel = boundary ? undefined : caseFileLabel(w.reason);
       if (!boundary && !caseLabel) continue;
       const detail = boundary

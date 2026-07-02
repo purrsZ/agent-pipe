@@ -40,6 +40,7 @@ function makeHandler() {
     (_msg, opts) => probes.push(opts), // onProbe
     (_msg, threadRoot) => dones.push(threadRoot), // onDone
     () => {}, // onRequirement (covered in commands-req.test.ts)
+    () => {}, // onCancelUnit
   );
   return { handler, replies, probes, dones };
 }

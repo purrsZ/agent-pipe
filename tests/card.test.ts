@@ -3,6 +3,7 @@ import {
   anchorAction,
   AUQ_ACTION_KIND,
   buildAnchorCard,
+  buildCancelConfirmCard,
   buildCancelledCard,
   buildCaseFileAnsweredCard,
   buildCaseFileCard,
@@ -267,6 +268,29 @@ describe('buildCaseFileCard (病历卡)', () => {
       waitId: 'wt-9',
       cancel: true,
     });
+  });
+});
+
+describe('buildCancelConfirmCard (WS-10.9 取消确认卡)', () => {
+  it('red，确认取消/继续推进 两 callback 按钮', () => {
+    const card = buildCancelConfirmCard('订单导出', { itemId: 'wi-1', waitId: 'wt-9' }) as {
+      header: { template: string };
+      body: { elements: Array<Record<string, unknown>> };
+    };
+    expect(card.header.template).toBe('red');
+    expect(JSON.stringify(card)).toContain('确认取消整单');
+    const buttons = card.body.elements.filter((e) => e.tag === 'button');
+    expect(buttons).toHaveLength(2);
+    const values = buttons.map(
+      (b) => (b.behaviors as Array<{ value: Record<string, unknown> }>)[0]!.value,
+    );
+    expect(values[0]).toMatchObject({
+      kind: CHECKPOINT_ACTION_KIND,
+      itemId: 'wi-1',
+      waitId: 'wt-9',
+      approved: true,
+    });
+    expect(values[1]).toMatchObject({ approved: false });
   });
 });
 

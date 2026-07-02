@@ -23,6 +23,25 @@ describe('caseFileLabel', () => {
     expect(caseFileLabel('retry_exhausted')).toContain('重试');
     expect(caseFileLabel('thrash')).toContain('震荡');
   });
+
+  it('WS-10.3 全覆盖：所有走 caseFileLabel 的 human wait reason 都有卡（防新病历成无卡暗仓）', () => {
+    for (const r of [
+      'reconcile_conflict',
+      'gatekeeper_big',
+      'run_failed',
+      'integration_unresolved',
+      'retry_exhausted',
+      'thrash',
+      'stalled_no_path',
+      'steer_escalated',
+    ]) {
+      expect(caseFileLabel(r), r).toBeTruthy();
+    }
+    // 专属卡（非 caseFileLabel）：cancel_confirm → buildCancelConfirmCard（WS-10.9）、awaiting_close →
+    // buildClosureCard（WS-7.7）、checkpoint:* → buildCheckpointCard。surfaceCheckpoints 各有专属分支。
+    expect(caseFileLabel('cancel_confirm')).toBeUndefined();
+    expect(caseFileLabel('awaiting_close')).toBeUndefined();
+  });
 });
 
 describe('assembleAuqAnswers (WS-9 AUQ 答案组装)', () => {
