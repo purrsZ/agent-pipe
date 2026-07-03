@@ -99,6 +99,13 @@ describe('composeSteerPrompt', () => {
     expect(p).toContain('redo_reconcile');
     expect(p).toContain('rework');
     expect(p).toContain('raise_human');
+    // ENHANCE E3：raise_human 上报必须带建议方案与理由（人参考建议来裁决，不再独自从零想方案）。
+    expect(p).toContain('建议方案与理由');
+    // ENHANCE E6：衍生文本产物（测试用例/自测清单等）属包工头分内事，直接产出不上报不外推。
+    expect(p).toContain('衍生文本产物');
+    expect(p).toContain('分内事');
+    // ENHANCE E6：新增小型施工任务（补测试/补文档）走 rework 通道（语义放宽为定向施工指令）。
+    expect(p).toContain('新增小型施工任务');
   });
 });
 

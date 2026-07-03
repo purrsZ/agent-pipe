@@ -12,6 +12,18 @@ import { type AdvisoryContext, buildContextLines } from './steering.js';
 // 参谋 prompt（composeAdvisePrompt，复用 steering 的共享上下文中段——参谋看到与包工头逐字节一致的全景）。
 // 渲染函数一律防御式：坏 payload 回落「(事故详情缺失)」，永不抛（事故单缺字段不该把参谋 run 拖崩）。
 
+// ── 三类「派参谋」的业务事故 reason（单一来源，防漂移）。 ─────────────────────────────────────────────
+// E1：index.ts 三个 raise 点据此 raise 病历同批派参谋；E4：src/index.ts（kernel-exempt）出事故卡时据
+// INCIDENT_REASONS 追加「参谋在路上」提示。三处共用一份常量，杜绝两份清单漂移。
+export const GATEKEEPER_BIG_REASON = 'gatekeeper_big';
+export const RECONCILE_CONFLICT_REASON = 'reconcile_conflict';
+export const INTEGRATION_UNRESOLVED_REASON = 'integration_unresolved';
+export const INCIDENT_REASONS: readonly string[] = [
+  GATEKEEPER_BIG_REASON,
+  RECONCILE_CONFLICT_REASON,
+  INTEGRATION_UNRESOLVED_REASON,
+];
+
 // ── 事故单渲染（纯，防御式）：从事故事件 payload 抽关键字段拼成人话 + 机械明细，喂参谋 prompt。 ──────────
 
 // 监工判大：payload = { raises: WorkerRaise[] }（repo / interfaceId / question）。

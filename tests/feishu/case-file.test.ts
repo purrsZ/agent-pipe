@@ -7,6 +7,7 @@ import {
   deliverGateNote,
   humanizeMs,
   waitCardKindFor,
+  withAdvisorHint,
 } from '../../src/index.js';
 
 // 病历(非 checkpoint 的 human wait)→ 飞书卡标签/详情的桥层纯核心（B：病历飞书出口）。
@@ -175,5 +176,20 @@ describe('waitCardKindFor 全覆盖（审查修复 T3：每个会 raise 的 huma
 
   it('未知 reason → null（surfaceCheckpoints 跳过发卡）', () => {
     expect(waitCardKindFor('some_unknown_reason')).toBeNull();
+  });
+});
+
+describe('withAdvisorHint（ENHANCE E4：事故卡注明参谋在路上）', () => {
+  it('三类业务事故 → detail 尾部追加参谋提示；detail 为空时只给提示', () => {
+    for (const reason of ['gatekeeper_big', 'reconcile_conflict', 'integration_unresolved']) {
+      expect(withAdvisorHint(reason, '出事了'), reason).toContain('参谋正在分析');
+      expect(withAdvisorHint(reason, '出事了'), reason).toContain('出事了');
+      expect(withAdvisorHint(reason, undefined), reason).toContain('参谋正在分析');
+    }
+  });
+
+  it('机械故障病历不加提示（不派参谋，detail 原样透传）', () => {
+    expect(withAdvisorHint('run_failed', '报错了')).toBe('报错了');
+    expect(withAdvisorHint('retry_exhausted', undefined)).toBeUndefined();
   });
 });

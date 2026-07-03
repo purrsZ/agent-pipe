@@ -35,7 +35,11 @@ export function composeWorkerPrompt(input: WorkerPromptInput): string {
     lines.push('', '# 该仓知识（架构/约定/构建测试命令/坑）', input.knowledge.trim());
   }
   if (input.reworkNote && input.reworkNote.trim()) {
-    lines.push('', '# 返工说明（在原活基础上改，不要从零重来）', input.reworkNote.trim());
+    lines.push(
+      '',
+      '# 定向施工指令（在本仓现有产出基础上执行，不要从零重来）',
+      input.reworkNote.trim(),
+    );
   }
   // WS-2.5：用户在推进中途经 steer 给本仓的指示（steer_apply 落 steering/<repo>.md）——优先级最高，按此调整。
   if (input.steeringNote?.trim()) {

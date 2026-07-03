@@ -42,7 +42,7 @@ describe('composeWorkerPrompt (D-23: no readonly system句)', () => {
     expect(p).toContain('GET /orders/:id'); // backend provides it
     expect(p).toContain('该仓知识');
     expect(p).toContain('npm test');
-    expect(p).toContain('返工说明');
+    expect(p).toContain('定向施工指令'); // ENHANCE E6：标题中性化，覆盖返工与新增小活两种场景
     expect(p).toContain('amount 改成了分');
   });
 

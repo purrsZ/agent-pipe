@@ -6,6 +6,9 @@ import type {
   WorkType,
 } from '../../workitems/types.js';
 import {
+  GATEKEEPER_BIG_REASON,
+  INTEGRATION_UNRESOLVED_REASON,
+  RECONCILE_CONFLICT_REASON,
   renderGatekeeperIncident,
   renderIntegrationIncident,
   renderReconcileIncident,
@@ -217,9 +220,8 @@ function onReconcileConflict(item: WorkItem, ev: WorkItemEvent): Transition {
   };
 }
 
-const RECONCILE_CONFLICT_REASON = 'reconcile_conflict';
-const GATEKEEPER_BIG_REASON = 'gatekeeper_big';
-const INTEGRATION_UNRESOLVED_REASON = 'integration_unresolved';
+// 三类「派参谋」事故 reason（RECONCILE_CONFLICT_REASON / GATEKEEPER_BIG_REASON /
+// INTEGRATION_UNRESOLVED_REASON）移到 advisor.ts 单一来源（E1 派参谋 + E4 事故卡提示共用），见顶部 import。
 // WS-1.3：容器活性看门自曝的「非终态却无路可走」病历 reason。
 const STALLED_NO_PATH_REASON = 'stalled_no_path';
 // WS-1.5：容器（reducer）raise 的两类病历 reason——此前无显式 onWaitResolved 分支 + 无飞书卡（PIVOT 承认

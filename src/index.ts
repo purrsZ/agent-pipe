@@ -61,6 +61,7 @@ import { createAgentRunHandler } from './worktypes/agent-run/run-handler.js';
 import { registerProbe } from './worktypes/probe/index.js';
 import { checkpointBoundaryOf } from './worktypes/requirement/checkpoint.js';
 import { registerRequirement } from './worktypes/requirement/index.js';
+import { INCIDENT_REASONS } from './worktypes/requirement/advisor.js';
 import { createIntegrationCheckHandler } from './worktypes/requirement/integration.js';
 import {
   createGatekeeperReviewHandler,
@@ -278,6 +279,15 @@ export function caseFileLabel(reason: string): string | undefined {
     default:
       return undefined;
   }
+}
+
+// ENHANCE E4：三类业务事故（INCIDENT_REASONS，与 E1 派参谋同一份常量）弹卡时，参谋已同批派出——在
+// 卡片详情尾部注明「建议在路上」，避免人拿到最生的事故单就急着独自想方案。机械故障病历（run_failed 等）
+// 不派参谋，也不加此行。纯函数。
+export function withAdvisorHint(reason: string, detail: string | undefined): string | undefined {
+  if (!INCIDENT_REASONS.includes(reason)) return detail;
+  const hint = '🧭 参谋正在分析，建议稍后以卡片贴出——可参考后在上方意见框写下你的修正再点按钮。';
+  return detail ? `${detail}\n${hint}` : hint;
 }
 
 // 从事件历史里抽一句人类可读的病历详情(为什么卡住),喂进病历卡。永不抛,抽不到 → undefined。
@@ -1993,14 +2003,21 @@ export function createWorkitemsRuntime(deps: {
         );
       } else if (cardKind === 'gatekeeper-big') {
         // WS-5：监工判大用三按钮卡（已改图纸·重对账并返工 / 无需改·放行 / 终止需求），红线出口不再只有放行。
-        const detail = caseFileDetail(workitems.api.listEvents(workitemId), w.reason);
+        // E4：判大属 INCIDENT_REASONS，detail 尾部注明参谋在路上。
+        const detail = withAdvisorHint(
+          w.reason,
+          caseFileDetail(workitems.api.listEvents(workitemId), w.reason),
+        );
         card = buildGatekeeperBigCard(
           { title, label: caseFileLabel(w.reason)!, detail },
           { itemId: workitemId, waitId: w.id },
         );
       } else {
-        // 病历(对账冲突/执行报错/集成未决/…) → 病历卡(已处理·继续/终止需求)。
-        const detail = caseFileDetail(workitems.api.listEvents(workitemId), w.reason);
+        // 病历(对账冲突/执行报错/集成未决/…) → 病历卡(已处理·继续/终止需求)。E4：仅三类业务事故加参谋提示。
+        const detail = withAdvisorHint(
+          w.reason,
+          caseFileDetail(workitems.api.listEvents(workitemId), w.reason),
+        );
         card = buildCaseFileCard(
           { title, label: caseFileLabel(w.reason)!, detail },
           { itemId: workitemId, waitId: w.id },
