@@ -147,6 +147,59 @@ describe('gatekeeper_review effect handler', () => {
     await handler.run(ctx);
     expect(emitted[0]!.kind).toBe('gatekeeper_big');
   });
+
+  // F6：报告按 assignment 隔离永不覆盖，监工须每仓只看最新一条，否则返工链永不自收敛。
+  const workerRun = (repo: string, reportPath: string, seq: number): WorkItemEvent => ({
+    id: seq,
+    workitemId: 'wi-1',
+    seq,
+    kind: 'run_completed',
+    payload: { role: 'worker', repo, reportPath },
+    createdAt: 1000,
+  });
+
+  it('F6：同仓两轮 run_completed（旧带 raise 块、新无）→ 只读最新报告 → gatekeeper_passed', async () => {
+    const { ctx, emitted } = fakeCtx(
+      {
+        'assignments/init/report.md': block({
+          raises: [{ interfaceId: 'createOrder', question: '要加字段', repo: 'repo-a' }],
+        }),
+        'assignments/rework/report.md': 'ok，按新图纸返工，无上报',
+      },
+      [
+        workerRun('repo-a', 'assignments/init/report.md', 1), // 初始轮（带跨仓上报块）
+        workerRun('repo-a', 'assignments/rework/report.md', 2), // 返工轮（无块），监工只看这条
+      ],
+    );
+    await handler.run(ctx);
+    expect(emitted[0]!.kind).toBe('gatekeeper_passed');
+  });
+
+  it('F6：owner run_completed 的报告不参与监工扫描（只看 worker）', async () => {
+    const { ctx, emitted } = fakeCtx(
+      {
+        'assignments/owner/report.md': block({
+          raises: [
+            { interfaceId: 'x', question: 'owner 报告里的块不该被监工读到', repo: 'repo-a' },
+          ],
+        }),
+        'assignments/w/report.md': 'ok，无上报',
+      },
+      [
+        {
+          id: 1,
+          workitemId: 'wi-1',
+          seq: 1,
+          kind: 'run_completed',
+          payload: { role: 'owner', repo: 'repo-a', reportPath: 'assignments/owner/report.md' },
+          createdAt: 1000,
+        },
+        workerRun('repo-a', 'assignments/w/report.md', 2),
+      ],
+    );
+    await handler.run(ctx);
+    expect(emitted[0]!.kind).toBe('gatekeeper_passed');
+  });
 });
 
 // WS-5：监工判大后人已改图纸并重对账通过 → gatekeeper_rework 从最近一条 gatekeeper_big 的 raises 提取

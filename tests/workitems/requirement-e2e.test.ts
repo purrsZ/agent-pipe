@@ -571,23 +571,15 @@ describe('requirement skeleton end-to-end', () => {
       ).toBeGreaterThanOrEqual(2),
     );
 
-    // stub 局限：gatekeeper_review 重扫全部历史 run report，初始轮 repo-a 的上报块仍在 → rework 完成后会
-    // 再判大一次（真实场景工人新 report 覆盖旧的、监工只看当轮）。第二次以「无需改·放行」收口，验证链条最终
-    // 收敛到灯③（本用例的重点是上面的 rework 链：owner 重对账 → rework_requested → 定向重派 worker）。
-    await waitFor(() =>
-      expect(store.listOpenWaits(item.id).some((w) => w.reason === 'gatekeeper_big')).toBe(true),
-    );
-    const wait2 = store.listOpenWaits(item.id).find((w) => w.reason === 'gatekeeper_big')!;
-    api.resolveWait(wait2.id, {
-      operator: 'lichao',
-      reason: '无需改',
-      decision: { approved: true },
-    });
+    // F6 修复后：rework worker 按新图纸不再上报，且监工每仓只看最新报告（不重扫初始轮的上报块）→ 监工放行
+    // → assess → 集成 → 灯③，链路自收敛，无需人二次「无需改·放行」逃逸。
     await waitFor(() =>
       expect(
         store.listOpenWaits(item.id).some((w) => w.reason === `checkpoint:${PHASE.deliver}`),
       ).toBe(true),
     );
+    // 自收敛的证据：返工后没有再弹一条 gatekeeper_big。
+    expect(store.listOpenWaits(item.id).some((w) => w.reason === 'gatekeeper_big')).toBe(false);
   });
 
   it('run_failed：worker 施工报错 → raise run_failed 病历（不静默卡死）', async () => {

@@ -1,6 +1,7 @@
 # OVERHAUL 审查修复方案（WS-0~WS-10 三轮对照审查的遗留项）
 
-> 日期：2026-07-03 ｜ 状态：**待实施** ｜ 读者：**执行本方案的 AI**
+> 日期：2026-07-03 ｜ 状态：**已实施（2026-07-03，4 刀提交 b6d9ba9/37c23d0/e257a27/5d20924，766 测试全绿；
+> 复核后补记落地记要，复核新发现的 F6 已修复（768 测试全绿），见文末）** ｜ 读者：**执行本方案的 AI**
 > 来源：OVERHAUL 全部 11 个 WS 落地后，逐提交对照《OVERHAUL-消息必达-活性自证-自适应.md》做了三轮
 > 对抗式审查（WS-0~3 / WS-4~6 / WS-7~10 各一轮，每轮独立 agent 逐条核对 spec）。总体结论：实现高保真，
 > 架构红线零违反，738 测试全绿。本文档只收敛**审查确认的遗留缺陷与测试缺口**，每项自包含（问题 / 证据
@@ -277,3 +278,51 @@ gatekeeper_big 带 `raises: [{ repo: 'x' }]` → detail 含 x。
   降级占位串不回归；
 - 在本文档头部状态改「已实施」，末尾追加简短「✅ 落地记要」：逐项完成状态、与本方案的出入、跳过项及原因；
 - 不引入任何 OVERHAUL 文档 §2「明确不做」名单里的东西（自动 MR/push、常驻会话、stdin 注入等）。
+
+---
+
+## ✅ 落地记要（2026-07-03，执行 session 完成 + 复核 session 核对补记）
+
+执行：4 刀提交（`b6d9ba9` F1/T7/O2 → `37c23d0` F2~F5/O1 → `e257a27` T1~T9 → `5d20924` D1/D2），每刀
+`npm run check` 全绿，最终 **766 测试 / 97 文件**（基线 738，+28）。复核 session 逐刀独立核验（含实测跑通），
+逐项状态：**F1~F5 ✅ / T1~T9 ✅ / D1~D2 ✅ / O1 ✅（代码，测试跳过）/ O2 ✅**。
+
+### 与方案的出入（复核核实）
+
+1. **O2 上提到第 1 刀**（方案正文本就写「与 T7 同刀」，§0 表格里的第 2 刀归属笔误）——合理。
+2. **F2 给 `aiExtractIntake` 加 `msg` 参数**：原签名拿不到消息定位，按「超时发群提示」意图加参、唯一调用点透传——合理。
+3. **T9 测试 payload 需补主详情**：`caseFileDetail` 现状是「仅主详情非空才追加（涉及：仓）」——核实属实，合理。
+4. **T2 e2e 第二次判大以 proceed 收口**：执行者归因「e2e stub 局限，真实场景新 report 覆盖旧的、监工只看当轮」
+   ——**复核证明该解释错误**，实为生产缺陷，见下方 F6。e2e 行为本身忠实复现了生产链路，用例保留有效，但
+   `requirement-e2e.test.ts` 中该段注释与事实不符，修 F6 时一并更正。
+5. **F2 群提示发送失败静默吞**（reply→sendText→catch 空），无独立 log——微小，超时事件本身已有 logger.warn。
+6. **F4 prune 时机**：放在 purgeDir 之后（目录未删前 prune 无效）——比方案字面「catch 里」更正确。
+
+### 跳过项
+
+- **O1 单元测试**：纯内存清理、需触碰 private Map，方案标测试可选——跳过；主逻辑由 liveness.test.ts（含 T6）背书。
+
+### ✅ F6【复核新发现·已修】监工返工链不能自收敛——gatekeeper_review 重扫全部历史报告
+
+**问题**：`src/worktypes/requirement/gatekeeper.ts` `gatekeeperReview`（:136-141）经 `reportPathsFrom`（:157-165）
+收集**全部历史** `run_completed` 的 reportPath（且不过滤 role）；而报告落盘路径是
+`assignments/<assignmentId>/report.md`（`src/worktypes/agent-run/run-handler.ts:281`），按 assignment 隔离、
+**永不覆盖**——rework 轮是新 assignment 新路径，初始轮含 `interfaceId` 上报块的旧报告永远在。
+后果：人点「已改图纸·返工」→ rework worker 完成 → fan-in → gatekeeper_review 重读旧报告 → **必然再判大一次**，
+返工循环永不自收敛，人只能点「无需改·放行」逃逸。非死锁（判大卡有放行出口 + WS-3 催办覆盖），但 WS-5/D-G
+「循环收敛」意图落空，体验困惑（刚返完工又弹同一条判大）。
+
+**修法**：`reportPathsFrom` 改为「**每仓取最后一条** `role==='worker'` 的 run_completed reportPath」（byRepo
+覆盖写模式，先例 `deliver.ts` 的 manifest 收集，deliver.ts:33-45）。同时：
+- 修正 `tests/workitems/requirement-e2e.test.ts` T2 用例中「stub 局限/新 report 覆盖旧的」的错误注释；
+- T2 用例第二段（再判大→proceed 收口）改为直接断言 rework 后监工放行、链路自收敛到灯③；
+- `tests/workitems/requirement-gatekeeper.test.ts` 补单测：两轮同仓 run_completed（旧带 raise 块、新无）→
+  只读新报告 → gatekeeper_passed；owner run_completed 的 reportPath 不参与监工扫描。
+- 注意：单轮多 worker fan-in 语义不变（各仓各自最后一条都在扫描集内）。
+
+**已修（本 session）**：`reportPathsFrom` 改为按仓收敛——`byRepo` Map 每仓覆盖到最后一条 `role==='worker'`
+的 run_completed reportPath，排除 owner run（对账/assess/steer）；无 repo 的 worker 报告（仅手造事件出现，真实
+worker 恒带 repo）退化为全保留、不破坏既有用例。返工轮完成后监工只读该仓最新报告（无上报块）→ 放行 → 链路
+自收敛，人不再需要「无需改·放行」二次逃逸。`requirement-gatekeeper.test.ts` 补 2 单测（同仓两轮取最新→passed /
+owner 报告不参与扫描）；`requirement-e2e.test.ts` T2 删掉第二次判大→proceed 收口，改为直接断言返工后自收敛到灯③
+且不再弹 gatekeeper_big，并更正原「stub 局限」错误注释。`npm run check` 全绿（768 测试 / 97 文件，+2 例）。

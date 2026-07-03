@@ -154,14 +154,25 @@ async function gatekeeperReview(ctx: EffectContext): Promise<void> {
 }
 
 // ── helpers (pure) ──────────────────────────────────────────────────────────────────────
+// F6：监工只扫**每仓最后一条** role==='worker' 的 run_completed 报告——报告按 assignments/<assignmentId>/
+// report.md 隔离、永不覆盖，若收全部历史报告，返工轮完成后初始轮含 interfaceId 上报块的旧报告仍被重读 →
+// 必然再判大一次，返工循环永不自收敛。按仓收敛到最新（先例 deliver.ts 的 manifest 每仓收最后一条），并排除
+// owner run（对账/assess/steer）的报告——它们不是工人上报，不该进监工扫描。无 repo 的 worker 报告（仅手造
+// 事件会出现，真实 worker run_completed 恒带 repo）退化为全保留，保持旧行为。
 function reportPathsFrom(events: WorkItemEvent[]): string[] {
-  const out: string[] = [];
+  const byRepo = new Map<string, string>();
+  const noRepo: string[] = [];
   for (const ev of events) {
     if (ev.kind !== 'run_completed') continue;
     const p = ev.payload;
-    if (isObject(p) && typeof p.reportPath === 'string') out.push(p.reportPath);
+    if (!isObject(p) || p.role !== 'worker') continue;
+    const reportPath = typeof p.reportPath === 'string' ? p.reportPath : '';
+    if (!reportPath) continue;
+    const repo = typeof p.repo === 'string' ? p.repo : '';
+    if (repo) byRepo.set(repo, reportPath);
+    else noRepo.push(reportPath);
   }
-  return out;
+  return [...byRepo.values(), ...noRepo];
 }
 
 function gatekeeperBlocks(text: string): string[] {
