@@ -104,6 +104,65 @@ export function composeAdvisePrompt(
   return lines.join('\n');
 }
 
+// ── compose：集成实证质检员 prompt（ENHANCE E5，纯函数、无 IO）——机器结构比对是确定性地板，质检员到各仓
+// worktree 读真实改动，对照跨仓契约 + 验收标准逐条取证。**只取证不判定**：放行/打回由人在灯③卡上决定。它是
+// 全流程第一个「既见图纸（契约）又见实物（worktree 真实代码）」的角色，把灯③ 从「纯自述链」升级为三层证据。
+export function composeInspectPrompt(input: {
+  title: string;
+  repos: string[];
+  intakeBrief?: string; // 立项书（含验收标准），逐条据此核对
+  contract?: string; // 跨仓契约全文（contract.json 原文）；单仓无契约 → 改为对照立项书全量核对
+  digest?: string; // ENHANCE E2 大事记
+  worktrees: Array<{ repo: string; worktreePath: string }>; // 各仓最后一轮 worker 的 worktree（实物）
+  followups: string[]; // 质检跑动期间用户又说的话（一并回应，保证消息必达）
+}): string {
+  const repoList = input.repos.filter((r) => typeof r === 'string' && r.trim().length > 0);
+  const lines: string[] = [
+    '你是集成实证质检员。机器已做过契约结构比对（结论见灯③卡），你的任务是**到各仓 worktree 里读真实改动**，',
+    '对照跨仓契约与验收标准逐条取证。你只取证不判定——放行 / 打回由人在灯③卡上决定。',
+    '',
+    '# 需求',
+    input.title,
+  ];
+  if (input.intakeBrief?.trim()) {
+    lines.push('', '# 立项书（含验收标准，逐条据此核对）', input.intakeBrief.trim());
+  }
+  if (input.digest?.trim()) {
+    lines.push('', '# 本单大事记（供你了解全程来龙去脉）', input.digest.trim());
+  }
+  const worktrees = input.worktrees.filter((w) => w?.repo?.trim() && w?.worktreePath?.trim());
+  if (worktrees.length > 0) {
+    lines.push(
+      '',
+      '# 各仓实物（worker 改动所在 worktree 绝对路径，直接进去读真实代码）',
+      ...worktrees.map((w) => `- ${w.repo} → ${w.worktreePath}`),
+    );
+  }
+  if (repoList.length > 0) {
+    lines.push('', '# 涉及的仓库主目录（绝对路径）', ...repoList.map((r) => `- ${r}`));
+  }
+  if (input.contract?.trim()) {
+    lines.push('', '# 跨仓契约全文（取证基准）', input.contract.trim());
+  }
+  if (input.followups.length > 0) {
+    lines.push(
+      '',
+      '# 用户这批话（质检期间用户又说了话，请在取证时一并回应）',
+      ...input.followups.map((f) => `- ${f}`),
+    );
+  }
+  lines.push(
+    '',
+    '# 产出要求（你的实证报告会以卡片贴回群，供灯③拍板参考）',
+    '1. 逐契约条目：实现位置（file:line）→ 一致 / 偏差 / 存疑 + 依据摘录；',
+    '2. 验收标准逐条核对：能从代码确认的给证据，确认不了的如实标「需人工 / 真机验证」；',
+    '3. 若本单无跨仓契约（单仓）：改为对照立项书与验收标准全量核对；',
+    '4. 风险清单：把发现的隐患逐条列出；',
+    '5. 结尾固定加上这句：「以上为实证取证，供灯③拍板参考；有异议请在灯③卡意见框说明后打回，我方会按意见安排返工。」',
+  );
+  return lines.join('\n');
+}
+
 // ── 大事记摘要（ENHANCE E2）：把事件流渲染成人话时间线，供 steer/advise 了解全程来龙去脉（解决包工头「记忆
 // 靠接力、长链衰减」的痛点，也让参谋知晓全程）。requirement 纯核心解释自己的事件流合规；容器/agent-run 层只
 // opaque 透传事件（中性），解释权在这里。 ──────────────────────────────────────────────────────────────

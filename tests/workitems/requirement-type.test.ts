@@ -543,6 +543,23 @@ describe('requirement lifecycle transitions', () => {
     expect(t.onEvent(item, ev('run_failed', { role: 'owner', stage: 'advise' }))).toEqual({});
   });
 
+  it('ENHANCE E5 实证质检（inspect）收尾零流转 → {}；unconsumed>0 追加 steer（消息必达）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.integrate });
+    // 无未消费消息 → 纯 {}（实证报告只进人眼，不进状态机）。
+    expect(t.onEvent(item, ev('run_completed', { role: 'owner', stage: 'inspect' }))).toEqual({});
+    // 质检跑动期间攒下未消费群消息 → 收尾追加 steer 补派消费。
+    const noisy = t.onEvent(
+      item,
+      ev('run_completed', { role: 'owner', stage: 'inspect', unconsumedHumanMessages: 2 }),
+    );
+    expect(noisy.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'steer' } });
+  });
+
+  it('ENHANCE E5 实证质检（inspect）run_failed → {}（不弹病历；灯③ 有机器 note + 交付清单兜底）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.integrate });
+    expect(t.onEvent(item, ev('run_failed', { role: 'owner', stage: 'inspect' }))).toEqual({});
+  });
+
   it('WS-2 steer_directive redo_reconcile（implement + owner 空闲）→ 派 owner reconcile', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.implement });
     const out = t.onEvent(
@@ -742,14 +759,16 @@ describe('requirement WS-6 复杂度自适应 lite 主线', () => {
 });
 
 describe('requirement WS-7 交付清单 + 灯④ 关单', () => {
-  it('integration_check_passed（灯③ 首次 raise）→ 同批追加 deliver_manifest effect', () => {
+  it('integration_check_passed（灯③ 首次 raise）→ 同批追加 deliver_manifest effect + inspect 质检 dispatch', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.integrate, repos: ['repo-a'] });
     const out = t.onEvent(item, ev('integration_check_passed', { reason: 'no_contract' }));
     expect(out.waits?.[0]).toMatchObject({ reason: `checkpoint:${PHASE.deliver}` });
     expect((out.effects ?? []).some((e) => e.kind === 'deliver_manifest')).toBe(true);
+    // ENHANCE E5：灯③ 首次 raise 同批派实证质检 owner run（stage=inspect），与 deliver_manifest 共享幂等守卫。
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'inspect' } });
   });
 
-  it('integration_check_passed（灯③ 已 open，幂等重跑）→ 不重复生成 deliver_manifest', () => {
+  it('integration_check_passed（灯③ 已 open，幂等重跑）→ 不重复生成 deliver_manifest / inspect', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.integrate, repos: ['repo-a'] });
     const out = t.onEvent(
       item,
@@ -760,6 +779,8 @@ describe('requirement WS-7 交付清单 + 灯④ 关单', () => {
     );
     expect(out.waits ?? []).toHaveLength(0);
     expect(out.effects ?? []).toHaveLength(0);
+    // ENHANCE E5：rerun 不重派 inspect（与 deliver_manifest 同守卫）。
+    expect(out.dispatch ?? []).toHaveLength(0);
   });
 
   it('灯③ approved → 进交付 + 挂 awaiting_close wait（灯④）', () => {

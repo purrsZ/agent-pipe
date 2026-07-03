@@ -199,6 +199,43 @@ describe('requirement skeleton end-to-end', () => {
     await waitFor(() => expect(store.getWorkItem(item.id)!.status).toBe('done'));
   });
 
+  it('ENHANCE E5 满配主线：集成通过 → 派实证质检 owner run(inspect) → 合成质检报告收尾 → 灯③ 照常可拍板', async () => {
+    const { store, api } = harness();
+    const item = api.createWorkItem({
+      type: 'requirement',
+      title: '实证质检',
+      source: {},
+      repos: ['repo-a', 'repo-b'],
+    }).item;
+    await walkThroughIntake(store, api, item.id);
+
+    // 集成通过 → 灯③ raise 同批派 inspect owner run（generic handler 合成质检报告自动收尾，零流转）。
+    await waitFor(() =>
+      expect(
+        store.listOpenWaits(item.id).some((w) => w.reason === `checkpoint:${PHASE.deliver}`),
+      ).toBe(true),
+    );
+    // inspect run 派出并收尾的证据：run_completed 携带 stage=inspect（收尾零流转，不影响状态机）。
+    await waitFor(() =>
+      expect(
+        store
+          .listEvents(item.id)
+          .some(
+            (e) =>
+              e.kind === 'run_completed' &&
+              (e.payload as { stage?: string } | null)?.stage === 'inspect',
+          ),
+      ).toBe(true),
+    );
+
+    // 质检零流转 → 灯③ 照常可拍板 → 交付。
+    const gate = store
+      .listOpenWaits(item.id)
+      .find((w) => w.reason === `checkpoint:${PHASE.deliver}`)!;
+    api.resolveWait(gate.id, { operator: 'lichao', reason: 'ok', decision: { approved: true } });
+    await waitFor(() => expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.deliver));
+  });
+
   it('WS-6 lite 单仓主线：立项 gate 通过 → 跳过拆解直进并行实现 → 1 worker → 跳过 assess → 灯③ → done', async () => {
     const { store, api } = harness();
     const item = api.createWorkItem({
@@ -215,16 +252,17 @@ describe('requirement skeleton end-to-end', () => {
     await waitFor(() =>
       expect(store.listAssignments(item.id).some((a) => a.role === 'worker')).toBe(true),
     );
-    const owners = store.listAssignments(item.id).filter((a) => a.role === 'owner');
     // 直到灯③ 出现（worker done → 监工放行 → lite 跳过 assess 直接进集成 → no_contract 放行）。
     await waitFor(() =>
       expect(
         store.listOpenWaits(item.id).some((w) => w.reason === `checkpoint:${PHASE.deliver}`),
       ).toBe(true),
     );
-    // lite 全程无 owner run（对账 + assess 都跳过）。
-    expect(owners).toHaveLength(0);
-    expect(store.listAssignments(item.id).filter((a) => a.role === 'owner')).toHaveLength(0);
+    // lite 跳过对账 + assess；ENHANCE E5：灯③ 首次 raise 同批派 1 个实证质检 owner run（inspect），据此在
+    // no_contract 放行之外给出实证证据。故 lite 全程恰好 1 个 owner run（inspect），而非 0。
+    await waitFor(() =>
+      expect(store.listAssignments(item.id).filter((a) => a.role === 'owner')).toHaveLength(1),
+    );
     const workers = store.listAssignments(item.id).filter((a) => a.role === 'worker');
     expect(workers).toHaveLength(1);
     expect(workers[0]!.repo).toBe('repo-a');

@@ -35,7 +35,17 @@ export interface RunStrategy {
     // regression). Optional so pure unit tests may omit it (run-handler always supplies it).
     events?: WorkItemEvent[];
   }): string;
-  runOptions(args: { workitem: WorkItem; assignment: Assignment; cwd: string }): RunOptions;
+  runOptions(args: {
+    workitem: WorkItem;
+    assignment: Assignment;
+    cwd: string;
+    // E5: the concluding run effect's dispatch payload (stage) + full event history — the
+    // requirement inspect run reads `stage` to widen readableDirs with each worker's worktree
+    // (lastWorkerWorktrees). Same neutral pass-through as composePrompt's events; probe/worker
+    // ignore both. Optional so unit tests may omit them.
+    effectPayload?: unknown;
+    events?: WorkItemEvent[];
+  }): RunOptions;
   resolveCwd(args: { workitem: WorkItem; assignment: Assignment; defaultCwd: string }): string;
   /** Create/ready the cwd before the run (probe: mkdir; requirement worker: worktree add). */
   prepareWorkspace(args: { workitem: WorkItem; assignment: Assignment; cwd: string }): void;
@@ -257,7 +267,13 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
 
   // 4) Permission/options come from the strategy: probe → readonly; requirement worker →
   //    write + writableDirs=[worktree] (never full, R04.AC-6).
-  const options = strategy.runOptions({ workitem, assignment, cwd });
+  const options = strategy.runOptions({
+    workitem,
+    assignment,
+    cwd,
+    effectPayload: ctx.effect.payload,
+    events: allEvents,
+  });
 
   // 5) Abort bridge: container abort (stall / close) → SIGINT the runner.
   ctx.signal.addEventListener('abort', () => deps.pool.abort(task.id), { once: true });

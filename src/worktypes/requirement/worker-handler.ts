@@ -1,8 +1,8 @@
 import * as fs from 'node:fs';
 import { worktreeAdd, worktreeIsDirty, worktreePathFor } from '../../agents/worktree.js';
-import type { Assignment, WorkItem } from '../../workitems/types.js';
+import type { Assignment, WorkItem, WorkItemEvent } from '../../workitems/types.js';
 import type { RunStrategy } from '../agent-run/run-handler.js';
-import { composeAdvisePrompt, renderEventDigest } from './advisor.js';
+import { composeAdvisePrompt, composeInspectPrompt, renderEventDigest } from './advisor.js';
 import { branchFor } from './branch.js';
 import { type ContractSnapshot, EMPTY_SNAPSHOT } from './contract.js';
 import { parseInternalApis, promoteToContract } from './design.js';
@@ -108,6 +108,20 @@ export function createRequirementRunStrategy(opts: {
           incident: incidentFromPayload(effectPayload),
         });
       }
+      // ENHANCE E5：集成实证质检员 run（stage=inspect）——契约全文 + 立项书（验收标准）+ 大事记 + 各仓
+      // worktree 清单（runOptions 已把这些 worktree 加进 readableDirs，质检员由此看得见实物）。产出实证报告
+      // 贴回群，收尾无流转（index.ts inspect 分支 → {}）。灯③ 由此从「纯自述链」升级为三层证据。
+      if (stage === 'inspect') {
+        return composeInspectPrompt({
+          title,
+          repos: workitem.repos,
+          intakeBrief: readArtifact('intake/intake.md'),
+          contract: readArtifact('contract/contract.json'),
+          digest: renderEventDigest(events ?? []),
+          worktrees: lastWorkerWorktrees(events ?? [], opts.worktreesDir, workitem.id),
+          followups,
+        });
+      }
       if (stage === 'reconcile' || workitem.phase === PHASE.split) {
         return composeReconcilePrompt({
           title,
@@ -135,13 +149,25 @@ export function createRequirementRunStrategy(opts: {
       });
     },
 
-    runOptions: ({ workitem, assignment, cwd }) =>
+    runOptions: ({ workitem, assignment, cwd, effectPayload, events }) => {
       // worker → write + the worktree as the only writable dir (never full). owner → readonly,
       // but with EVERY involved repo as a readable dir (--add-dir) so a cross-repo 包工头 can read
       // all repos, not just cwd=repos[0]（真机暴露：理解 run 只看了第一个仓）。
-      assignment.role === 'worker'
-        ? mapWritePermission(cwd)
-        : { permission: { mode: 'readonly' }, readableDirs: reposReadable(workitem) },
+      if (assignment.role === 'worker') return mapWritePermission(cwd);
+      // ENHANCE E5：集成实证质检员（stage=inspect）readonly 不变，但 readableDirs 除全仓外再加各仓最后一轮
+      // worker 的 worktree——质检员由此成为全流程第一个「既见图纸又见实物」的角色。worktree 已被 GC / 不存在
+      // 的路径照传（agent 读不到会自己降级，与 diffstat 占位串同理）。
+      if (stageFromPayload(effectPayload) === 'inspect') {
+        const worktrees = lastWorkerWorktrees(events ?? [], opts.worktreesDir, workitem.id).map(
+          (w) => w.worktreePath,
+        );
+        return {
+          permission: { mode: 'readonly' },
+          readableDirs: [...reposReadable(workitem), ...worktrees],
+        };
+      }
+      return { permission: { mode: 'readonly' }, readableDirs: reposReadable(workitem) };
+    },
 
     resolveCwd: ({ workitem, assignment, defaultCwd }) =>
       workerCwd(workitem, assignment) ?? assignment.repo ?? workitem.repos[0] ?? defaultCwd,
@@ -233,6 +259,32 @@ function incidentFromPayload(payload: unknown): string {
   if (typeof payload !== 'object' || payload === null) return '';
   const v = (payload as Record<string, unknown>).incident;
   return typeof v === 'string' ? v : '';
+}
+
+// ENHANCE E5：每仓取最后一条 role==='worker' 的 run_completed（byRepo 覆盖写，多轮 fix/rework 后以最终为准；
+// 先例 deliver.ts:33-45），用 worktreePathFor 推出该仓最新 worker worktree 路径。质检员 run 据此把这些实物
+// 目录列进 readableDirs + prompt。纯函数（path.join，无 IO）：worktreesDir/workitemId 由调用方从 opts 闭包传入。
+export function lastWorkerWorktrees(
+  events: WorkItemEvent[],
+  worktreesDir: string,
+  workitemId: string,
+): Array<{ repo: string; worktreePath: string }> {
+  const byRepo = new Map<string, { repo: string; worktreePath: string }>();
+  for (const ev of events) {
+    if (ev.kind !== 'run_completed') continue;
+    const p = ev.payload;
+    if (typeof p !== 'object' || p === null) continue;
+    const o = p as Record<string, unknown>;
+    if (o.role !== 'worker') continue;
+    const repo = typeof o.repo === 'string' ? o.repo : '';
+    const assignmentId = typeof o.assignmentId === 'string' ? o.assignmentId : '';
+    if (!repo || !assignmentId) continue;
+    byRepo.set(repo, {
+      repo,
+      worktreePath: worktreePathFor(worktreesDir, workitemId, assignmentId, repo),
+    });
+  }
+  return [...byRepo.values()];
 }
 
 // assess / steer 共用：全历史 run_completed 报告路径 → 有界回执（最近 N 份、每份截断），防 prompt 随工人数 ×

@@ -44,6 +44,8 @@ const STAGE = {
   steer: 'steer',
   // ENHANCE E1：事故参谋 = 只读 owner run，读全部上下文出解读 + 建议，零行动权（收尾无流转）。
   advise: 'advise',
+  // ENHANCE E5：集成实证质检员 = 只读 owner run，进各仓 worktree 读真实改动、对照契约取证（收尾无流转）。
+  inspect: 'inspect',
   implement: 'implement',
   fix: 'fix',
   rework: 'rework',
@@ -156,6 +158,11 @@ function onRunCompleted(item: WorkItem, ev: WorkItemEvent): Transition {
     if (stage === STAGE.advise) {
       return withPendingSteer(item, ev, {});
     }
+    // ENHANCE E5：实证质检（inspect）收尾同参谋——零流转（实证报告已由流式卡贴群 + report.md 存档，只进人眼、
+    // 不进状态机）。仍包 withPendingSteer：质检跑动期间攒下的未消费群消息由补派 steer 消费（消息必达）。
+    if (stage === STAGE.inspect) {
+      return withPendingSteer(item, ev, {});
+    }
     // 其余 owner run（reconcile / assess / stage 缺失回落）：算出 base 后包 withPendingSteer——若期间来了
     // 未被消费的群消息，收尾时追加一个 steer run 去消费（消息必达，WS-2.2b）。
     if (stage === STAGE.reconcile) {
@@ -256,7 +263,14 @@ function onIntegrationPassed(item: WorkItem, ev: WorkItemEvent): Transition {
     openWaitReasonsOf(ev.payload),
   );
   if (!base.waits || base.waits.length === 0) return base;
-  return { ...base, effects: [...(base.effects ?? []), { kind: 'deliver_manifest' }] };
+  // ENHANCE E5：灯③ 首次 raise（base.waits 非空）时，除生成交付清单外再同批派一个集成实证质检员 owner run
+  // （stage=inspect），与 deliver_manifest 共享同一幂等守卫——已 open（幂等重跑 base={}）二者都不追加，rerun
+  // 不重派。时序同参谋（D-3）：灯③卡先到、实证报告随后贴出；人手快先拍板也不冲突（inspect 收尾零流转）。
+  return {
+    ...base,
+    effects: [...(base.effects ?? []), { kind: 'deliver_manifest' }],
+    dispatch: [...(base.dispatch ?? []), ownerSpec(item, STAGE.inspect)],
+  };
 }
 
 function onIntegrationFailed(item: WorkItem, ev: WorkItemEvent): Transition {
@@ -348,9 +362,16 @@ const RUN_FAILED_REASON = 'run_failed';
 function onRunFailed(item: WorkItem, ev: WorkItemEvent): Transition {
   // WS-2.2(c)：steer run 只是答话，失败不值得弹病历（消息仍在窗口内，下一个 owner run 会带上；WS-8 的
   // 自动重试也不给 steer）。ENHANCE E1：参谋（advise）失败同理——事故 wait 本来就 open 着，人照常裁决，
-  // 只是没建议可参考；不弹病历、不自动重试。
+  // 只是没建议可参考；不弹病历、不自动重试。ENHANCE E5：实证质检（inspect）失败同理——灯③ 还有机器 note
+  // 和交付清单兜底，人照常拍板；不弹病历、不自动重试。
   const failedStage = stageOf(ev.payload);
-  if (failedStage === STAGE.steer || failedStage === STAGE.advise) return {};
+  if (
+    failedStage === STAGE.steer ||
+    failedStage === STAGE.advise ||
+    failedStage === STAGE.inspect
+  ) {
+    return {};
+  }
   // WS-8（D-L）：瞬时错误（API 超时/网络抖动）自愈——首败（retries=0）自动重试一次，人只看到重复失败。
   // 但 write-guard fail-closed（安全护栏失效）不能靠重试糊过去，直接弹病历。与容器 stall 重试同用
   // assignment.retries 计数（那条覆盖 stall/abort，这条覆盖 run_failed），不会叠加成无限重试。

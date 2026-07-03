@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   composeAdvisePrompt,
+  composeInspectPrompt,
   renderEventDigest,
   renderGatekeeperIncident,
   renderIntegrationIncident,
@@ -120,6 +121,41 @@ describe('composeAdvisePrompt', () => {
     });
     expect(p).toContain('参谋');
     expect(p).not.toContain('用户这批话');
+  });
+});
+
+// ENHANCE E5：集成实证质检员 prompt——契约全文 + 立项书（验收标准）+ 各仓 worktree 清单 + 只取证不判定。
+describe('composeInspectPrompt（集成实证质检员）', () => {
+  it('织入契约 + 验收标准 + worktree 清单 + followups + 只取证不判定 + 灯③结尾；不产 steer 块', () => {
+    const p = composeInspectPrompt({
+      title: '加跨端下单接口',
+      repos: ['/repos/backend', '/repos/frontend'],
+      intakeBrief: '# 立项书\n\n## 验收标准 / 完成定义\n下单成功返回单号',
+      contract: '{"interfaces":[{"id":"createOrder","signature":"POST /orders"}]}',
+      digest: '- [07-03 10:00] 进入「集成验证中」',
+      worktrees: [
+        { repo: '/repos/backend', worktreePath: '/wt/backend' },
+        { repo: '/repos/frontend', worktreePath: '/wt/frontend' },
+      ],
+      followups: ['注意兼容旧客户端'],
+    });
+    expect(p).toContain('实证质检员'); // 角色（非包工头/参谋）
+    expect(p).toContain('只取证不判定'); // 只取证不判定
+    expect(p).toContain('下单成功返回单号'); // 验收标准在场
+    expect(p).toContain('createOrder'); // 契约全文在场
+    expect(p).toContain('/wt/backend'); // worktree 清单（实物）在场
+    expect(p).toContain('/wt/frontend');
+    expect(p).toContain('注意兼容旧客户端'); // followups 一并回应
+    expect(p).toContain('灯③'); // 结尾引导人在灯③卡意见框写修正
+    expect(p).not.toContain('```steer'); // 质检员零行动权，不产 steer 块
+  });
+
+  it('单仓无契约 / 空 worktree → 缺省不炸，仍出质检员角色 + 结尾', () => {
+    const p = composeInspectPrompt({ title: 't', repos: ['/a'], worktrees: [], followups: [] });
+    expect(p).toContain('实证质检员');
+    expect(p).toContain('只取证不判定');
+    expect(p).not.toContain('用户这批话'); // followups 空 → 不加段
+    expect(p).not.toContain('跨仓契约全文'); // contract 缺省 → 不加段（单仓对照立项书全量核对）
   });
 });
 

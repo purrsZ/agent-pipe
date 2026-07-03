@@ -5,7 +5,11 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { worktreePathFor } from '../../src/agents/worktree.js';
 import { PHASE } from '../../src/worktypes/requirement/phases.js';
-import { createRequirementRunStrategy } from '../../src/worktypes/requirement/worker-handler.js';
+import {
+  createRequirementRunStrategy,
+  lastWorkerWorktrees,
+} from '../../src/worktypes/requirement/worker-handler.js';
+import type { WorkItemEvent } from '../../src/workitems/types.js';
 import { makeAssignment, makeWorkItem } from '../helpers/workitems.js';
 
 let tmpDir: string;
@@ -633,5 +637,120 @@ describe('requirement steer run 织入大事记 (stage=steer)', () => {
       events,
     });
     expect(assess).not.toContain('本单大事记');
+  });
+});
+
+// ENHANCE E5：集成实证质检——lastWorkerWorktrees（每仓取最后一轮 worker）+ inspect run 的 readableDirs/prompt。
+describe('requirement 集成实证质检 (stage=inspect)', () => {
+  const worktreesDir = () => path.join(tmpDir, 'worktrees');
+  const owner = () => makeAssignment('as-o1', 'wi-1', { role: 'owner' });
+  const done = (repo: string, assignmentId: string, seq: number): WorkItemEvent => ({
+    id: seq,
+    workitemId: 'wi-1',
+    seq,
+    kind: 'run_completed',
+    payload: {
+      role: 'worker',
+      repo,
+      assignmentId,
+      reportPath: `assignments/${assignmentId}/report.md`,
+    },
+    createdAt: 1000 + seq,
+  });
+
+  it('lastWorkerWorktrees：每仓取最后一轮 worker（覆盖写）；无 worker → 空数组', () => {
+    const wtDir = worktreesDir();
+    const events: WorkItemEvent[] = [
+      done('/repos/pos', 'as-w1', 1),
+      done('/repos/pos', 'as-w2', 2), // 同仓第二轮 → 覆盖 as-w1
+      done('/repos/portal', 'as-w3', 3),
+    ];
+    const got = lastWorkerWorktrees(events, wtDir, 'wi-1');
+    expect(got).toHaveLength(2);
+    expect(got.find((w) => w.repo === '/repos/pos')?.worktreePath).toBe(
+      worktreePathFor(wtDir, 'wi-1', 'as-w2', '/repos/pos'),
+    );
+    expect(got.find((w) => w.repo === '/repos/portal')?.worktreePath).toBe(
+      worktreePathFor(wtDir, 'wi-1', 'as-w3', '/repos/portal'),
+    );
+    // 无 worker run_completed（空流 / 只有 owner）→ 空。
+    expect(lastWorkerWorktrees([], wtDir, 'wi-1')).toEqual([]);
+    expect(
+      lastWorkerWorktrees(
+        [
+          {
+            id: 1,
+            workitemId: 'wi-1',
+            seq: 1,
+            kind: 'run_completed',
+            payload: { role: 'owner' },
+            createdAt: 1,
+          },
+        ],
+        wtDir,
+        'wi-1',
+      ),
+    ).toEqual([]);
+  });
+
+  it('inspect runOptions：readonly + readableDirs = 全仓 + 各仓最后一轮 worker worktree', () => {
+    const s = createRequirementRunStrategy({ worktreesDir: worktreesDir() });
+    const multi = makeWorkItem('wi-1', {
+      type: 'requirement',
+      phase: PHASE.integrate,
+      repos: ['/repos/pos', '/repos/portal'],
+    });
+    const events: WorkItemEvent[] = [
+      done('/repos/pos', 'as-w1', 1),
+      done('/repos/pos', 'as-w2', 2), // 覆盖
+      done('/repos/portal', 'as-w3', 3),
+    ];
+    const opts = s.runOptions({
+      workitem: multi,
+      assignment: owner(),
+      cwd: '/repos/pos',
+      effectPayload: { stage: 'inspect' },
+      events,
+    });
+    expect(opts.permission).toEqual({ mode: 'readonly' });
+    expect(opts.readableDirs).toContain('/repos/pos'); // 全仓主目录
+    expect(opts.readableDirs).toContain('/repos/portal');
+    expect(opts.readableDirs).toContain(
+      worktreePathFor(worktreesDir(), 'wi-1', 'as-w2', '/repos/pos'),
+    );
+    expect(opts.readableDirs).toContain(
+      worktreePathFor(worktreesDir(), 'wi-1', 'as-w3', '/repos/portal'),
+    );
+    // 同仓被覆盖的旧轮 worktree 不列入。
+    expect(opts.readableDirs).not.toContain(
+      worktreePathFor(worktreesDir(), 'wi-1', 'as-w1', '/repos/pos'),
+    );
+  });
+
+  it('inspect composePrompt：织入契约全文 + worktree 清单 + 只取证不判定（走 composeInspectPrompt）', () => {
+    const s = createRequirementRunStrategy({ worktreesDir: worktreesDir() });
+    const multi = makeWorkItem('wi-1', {
+      type: 'requirement',
+      phase: PHASE.integrate,
+      repos: ['/repos/pos'],
+    });
+    const contract = JSON.stringify({
+      interfaces: [{ id: 'createOrder', signature: 'POST /orders' }],
+    });
+    const prompt = s.composePrompt({
+      title: '加下单接口',
+      followups: [],
+      workitem: multi,
+      assignment: owner(),
+      batch: [],
+      readArtifact: (rel) => (rel === 'contract/contract.json' ? contract : undefined),
+      effectPayload: { stage: 'inspect' },
+      events: [done('/repos/pos', 'as-w1', 1)],
+    });
+    expect(prompt).toContain('实证质检员');
+    expect(prompt).toContain('只取证不判定');
+    expect(prompt).toContain('createOrder'); // 契约全文织入
+    expect(prompt).toContain(worktreePathFor(worktreesDir(), 'wi-1', 'as-w1', '/repos/pos')); // worktree 清单
+    expect(prompt).not.toContain('```steer');
   });
 });
