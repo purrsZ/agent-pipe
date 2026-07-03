@@ -522,6 +522,13 @@ describe('requirement skeleton end-to-end', () => {
       expect(store.listOpenWaits(item.id).some((w) => w.reason === 'gatekeeper_big')).toBe(true),
     );
     expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.implement);
+    // ENHANCE E1：判大同批派参谋 only-read run（owner, stage=advise）。lite 单仓平时全程无 owner run，此处出现
+    // 一个 owner assignment 即参谋被派的证据；参谋收尾零流转，不影响后续 resolve→集成的收敛。
+    await waitFor(() =>
+      expect(
+        store.listAssignments(item.id).filter((a) => a.role === 'owner').length,
+      ).toBeGreaterThanOrEqual(1),
+    );
     // 监工回写图纸留痕（判大也记）。
     expect(api.listEvents(item.id).some((e) => e.kind === 'gatekeeper_big')).toBe(true);
 

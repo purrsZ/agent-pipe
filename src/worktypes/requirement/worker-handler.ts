@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import { worktreeAdd, worktreeIsDirty, worktreePathFor } from '../../agents/worktree.js';
 import type { Assignment, WorkItem } from '../../workitems/types.js';
 import type { RunStrategy } from '../agent-run/run-handler.js';
+import { composeAdvisePrompt } from './advisor.js';
 import { branchFor } from './branch.js';
 import { type ContractSnapshot, EMPTY_SNAPSHOT } from './contract.js';
 import { parseInternalApis, promoteToContract } from './design.js';
@@ -83,6 +84,23 @@ export function createRequirementRunStrategy(opts: {
           integrationReport: readArtifact('contract/integration-report.md'),
           recentReports: boundedReports(priorReportPaths, readArtifact),
           priorSteerReport: priorReport,
+        });
+      }
+      // ENHANCE E1：参谋 run（stage=advise）——与 steer 同款全景上下文 + 事故单（incident，adviseSpec 从事故
+      // payload 渲染好放 dispatch payload）。产出解读 + 建议贴回群，收尾无流转（index.ts advise 分支 → {}）。
+      if (stage === 'advise') {
+        return composeAdvisePrompt({
+          title,
+          phase: workitem.phase,
+          repos: workitem.repos,
+          intakeBrief: readArtifact('intake/intake.md'),
+          followups,
+          contractSummary: renderContractSummary(readContract(readArtifact)),
+          gatekeeperLog: readArtifact('contract/gatekeeper-log.md'),
+          integrationReport: readArtifact('contract/integration-report.md'),
+          recentReports: boundedReports(priorReportPaths, readArtifact),
+          priorSteerReport: priorReport,
+          incident: incidentFromPayload(effectPayload),
         });
       }
       if (stage === 'reconcile' || workitem.phase === PHASE.split) {
@@ -202,6 +220,14 @@ function noteFromPayload(payload: unknown): string | undefined {
   if (typeof payload !== 'object' || payload === null) return undefined;
   const v = (payload as Record<string, unknown>).note;
   return typeof v === 'string' && v.trim().length > 0 ? v : undefined;
+}
+
+// ENHANCE E1：dispatch payload 的 incident（adviseSpec 渲染好的事故单）。空/缺失 → ''（composeAdvisePrompt
+// 内部回落「(事故详情缺失)」，不抛）。仿 noteFromPayload 防御式。
+function incidentFromPayload(payload: unknown): string {
+  if (typeof payload !== 'object' || payload === null) return '';
+  const v = (payload as Record<string, unknown>).incident;
+  return typeof v === 'string' ? v : '';
 }
 
 // assess / steer 共用：全历史 run_completed 报告路径 → 有界回执（最近 N 份、每份截断），防 prompt 随工人数 ×

@@ -6,6 +6,11 @@ import type {
   WorkType,
 } from '../../workitems/types.js';
 import {
+  renderGatekeeperIncident,
+  renderIntegrationIncident,
+  renderReconcileIncident,
+} from './advisor.js';
+import {
   checkpointDecisionOf,
   checkpointReason,
   crossesCheckpoint,
@@ -37,6 +42,8 @@ const STAGE = {
   reconcile: 'reconcile',
   assess: 'assess',
   steer: 'steer',
+  // ENHANCE E1：事故参谋 = 只读 owner run，读全部上下文出解读 + 建议，零行动权（收尾无流转）。
+  advise: 'advise',
   implement: 'implement',
   fix: 'fix',
   rework: 'rework',
@@ -144,6 +151,11 @@ function onRunCompleted(item: WorkItem, ev: WorkItemEvent): Transition {
         effects: [{ kind: 'steer_apply', payload: { reportPath: reportPathOf(ev.payload) } }],
       };
     }
+    // ENHANCE E1：参谋（advise）收尾零流转——建议只进人眼、不进状态机（D-1）。仍包 withPendingSteer：参谋
+    // 跑动期间攒下的未消费群消息由补派 steer 消费（消息必达，不因参谋占 owner 窗口而漏）。
+    if (stage === STAGE.advise) {
+      return withPendingSteer(item, ev, {});
+    }
     // 其余 owner run（reconcile / assess / stage 缺失回落）：算出 base 后包 withPendingSteer——若期间来了
     // 未被消费的群消息，收尾时追加一个 steer run 去消费（消息必达，WS-2.2b）。
     if (stage === STAGE.reconcile) {
@@ -188,10 +200,13 @@ function onReconcileConflict(item: WorkItem, ev: WorkItemEvent): Transition {
   if (item.phase !== PHASE.split && item.phase !== PHASE.implement) return {};
   // 幂等：病历已 open 就别再 raise 一个孤儿 wait（reconcile_check 重跑、或并发触发）。
   if (openWaitReasonsOf(ev.payload).includes(RECONCILE_CONFLICT_REASON)) return {};
+  // ENHANCE E1：raise 病历的同批派一个参谋 only-read run（读事故上下文出建议贴回群）。openWaitReasons 幂等守卫
+  // 已保证事故只 raise 一次 → 参谋只派一次（crash 重跑不重复）。
   return {
     waits: [
       { kind: 'human', reason: RECONCILE_CONFLICT_REASON, deadlineTtlSec: CHECKPOINT_WAIT_TTL_SEC },
     ],
+    dispatch: [adviseSpec(item, renderReconcileIncident(ev.payload))],
   };
 }
 
@@ -219,10 +234,12 @@ function reRaiseWait(reason: string): Transition {
 function onGatekeeperBig(item: WorkItem, ev: WorkItemEvent): Transition {
   if (item.phase !== PHASE.implement) return {};
   if (openWaitReasonsOf(ev.payload).includes(GATEKEEPER_BIG_REASON)) return {};
+  // ENHANCE E1：判大 raise 病历的同批派参谋 run（幂等同上）。
   return {
     waits: [
       { kind: 'human', reason: GATEKEEPER_BIG_REASON, deadlineTtlSec: CHECKPOINT_WAIT_TTL_SEC },
     ],
+    dispatch: [adviseSpec(item, renderGatekeeperIncident(ev.payload))],
   };
 }
 
@@ -249,7 +266,12 @@ function onIntegrationFailed(item: WorkItem, ev: WorkItemEvent): Transition {
     // 连续集成失败 → 契约/拆解可能有问题，升级 human wait（病历）。幂等：已 open 不重复 raise（integration_check
     // 是 recovery:'rerun'，崩溃重跑会再 emit failed）。
     if (openWaitReasonsOf(ev.payload).includes(INTEGRATION_UNRESOLVED_REASON)) return {};
-    return reRaiseWait(INTEGRATION_UNRESOLVED_REASON);
+    // ENHANCE E1：集成修不动升级 raise 时同批派参谋（从本条 integration_check_failed 的 round/affectedRepos/
+    // breaking 渲染事故单）。幂等同上（已 open 则上面已 return {}，不重复派）。
+    return {
+      ...reRaiseWait(INTEGRATION_UNRESOLVED_REASON),
+      dispatch: [adviseSpec(item, renderIntegrationIncident(ev.payload))],
+    };
   }
   const repos = stringArrayField(ev.payload, 'affectedRepos');
   const targets = repos.length > 0 ? repos : item.repos.length > 0 ? item.repos : [''];
@@ -325,8 +347,10 @@ const RUN_FAILED_REASON = 'run_failed';
 // 批次会永久挂起——病历让人看见并裁决（resolve 病历=重试当前阶段，见 onWaitResolved）。idempotent。
 function onRunFailed(item: WorkItem, ev: WorkItemEvent): Transition {
   // WS-2.2(c)：steer run 只是答话，失败不值得弹病历（消息仍在窗口内，下一个 owner run 会带上；WS-8 的
-  // 自动重试也不给 steer）。
-  if (stageOf(ev.payload) === STAGE.steer) return {};
+  // 自动重试也不给 steer）。ENHANCE E1：参谋（advise）失败同理——事故 wait 本来就 open 着，人照常裁决，
+  // 只是没建议可参考；不弹病历、不自动重试。
+  const failedStage = stageOf(ev.payload);
+  if (failedStage === STAGE.steer || failedStage === STAGE.advise) return {};
   // WS-8（D-L）：瞬时错误（API 超时/网络抖动）自愈——首败（retries=0）自动重试一次，人只看到重复失败。
   // 但 write-guard fail-closed（安全护栏失效）不能靠重试糊过去，直接弹病历。与容器 stall 重试同用
   // assignment.retries 计数（那条覆盖 stall/abort，这条覆盖 run_failed），不会叠加成无限重试。
@@ -538,6 +562,12 @@ function ownerSpec(item: WorkItem, stage: string): AssignmentSpec {
     wallclockCapSec: t.wallclockCapSec,
     payload: { stage },
   };
+}
+
+// ENHANCE E1：事故参谋 spec——仿 ownerSpec（只读 owner 全套基建），payload 额外带渲染好的事故单 incident，
+// 供 composeAdvisePrompt 织入。收尾无任何流转（onRunCompleted 的 advise 分支）；即便报告出现 ```steer 也无消费方。
+function adviseSpec(item: WorkItem, incident: string): AssignmentSpec {
+  return { ...ownerSpec(item, STAGE.advise), payload: { stage: STAGE.advise, incident } };
 }
 
 function workerDispatches(

@@ -499,3 +499,30 @@ describe('requirement assess 实现登记 (并行实现 phase owner → impl-cla
     expect(prompt).toContain('本仓重构了缓存层');
   });
 });
+
+// ENHANCE E1：参谋 run（owner, stage=advise）——composePrompt 路由到 composeAdvisePrompt（事故单 + 全景 + 只出建议）。
+describe('requirement 事故参谋 run (stage=advise owner → composeAdvisePrompt)', () => {
+  const worktreesDir = () => path.join(tmpDir, 'worktrees');
+  const owner = () => makeAssignment('as-o1', 'wi-1', { role: 'owner' });
+
+  it('composePrompt 参谋分支：织入事故单(incident) + 参谋角色 + 仅供参考结尾；不产 steer 块', () => {
+    const s = createRequirementRunStrategy({ worktreesDir: worktreesDir() });
+    const prompt = s.composePrompt({
+      title: '加跨端下单接口',
+      followups: [],
+      workitem: makeWorkItem('wi-1', {
+        type: 'requirement',
+        phase: PHASE.implement,
+        repos: ['/repos/backend'],
+      }),
+      assignment: owner(),
+      batch: [],
+      readArtifact: () => undefined,
+      effectPayload: { stage: 'advise', incident: '事故类型：监工判大——要给 createOrder 加字段' },
+    });
+    expect(prompt).toContain('参谋'); // 参谋角色（非包工头）
+    expect(prompt).toContain('要给 createOrder 加字段'); // incident 织入
+    expect(prompt).toContain('以上仅供参考'); // 固定结尾提示
+    expect(prompt).not.toContain('```steer'); // 参谋零行动权，不产 steer 块
+  });
+});

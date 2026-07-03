@@ -18,27 +18,25 @@ export interface SteerDirective {
 
 const EMPTY_DIRECTIVE: SteerDirective = { action: 'none', repos: [], note: '' };
 
-// ── compose：包工头「答复用户 + 决定是否调整施工」的 prompt（纯函数，对齐 composeOwnerPrompt 织入风格）──
-export function composeSteerPrompt(input: {
+// steer/advise 共享的上下文输入（除各自的角色句 / followups / 产出要求外的中段）。参谋（advise）复用它，
+// 保证它看到与包工头（steer）逐字节一致的全景（立项书 / 契约摘要 / 回执 / 监工日志 / 集成报告）。
+export interface AdvisoryContext {
   title: string;
   phase: string;
   repos: string[];
   intakeBrief?: string;
-  followups: string[]; // 用户这批话（run-handler 已算好）——最高优先级
   contractSummary?: string; // 条数 + 逐条 signature
   gatekeeperLog?: string;
   integrationReport?: string;
   recentReports?: string[]; // 各仓最近回执（已截断）
   priorSteerReport?: string;
-}): string {
+}
+
+// 共享上下文中段（从「# 需求」到「上一轮答复」）：steer 与 advise 织入同一份上下文。角色句、followups、
+// 产出要求由各 compose 自己拼。返回以空行打头，供角色句之后直接 push（与旧 composeSteerPrompt 逐字节等价）。
+export function buildContextLines(input: AdvisoryContext): string[] {
   const repoList = input.repos.filter((r) => typeof r === 'string' && r.trim().length > 0);
-  const lines: string[] = [
-    '你是这个需求的包工头，负责在推进过程中**答复用户在群里说的话**并决定是否调整施工。',
-    '你只读浏览相关仓库，不改代码（改代码是各仓 worker 的事）。',
-    '',
-    '# 需求',
-    input.title,
-  ];
+  const lines: string[] = ['', '# 需求', input.title];
   if (input.intakeBrief?.trim()) {
     lines.push('', '# 立项书（前置已收齐的需求材料，据此推进）', input.intakeBrief.trim());
   }
@@ -65,6 +63,20 @@ export function composeSteerPrompt(input: {
   if (input.priorSteerReport?.trim()) {
     lines.push('', '# 上一轮你的答复（延续，不要重复）', input.priorSteerReport.trim());
   }
+  return lines;
+}
+
+// ── compose：包工头「答复用户 + 决定是否调整施工」的 prompt（纯函数，对齐 composeOwnerPrompt 织入风格）──
+export function composeSteerPrompt(
+  input: AdvisoryContext & {
+    followups: string[]; // 用户这批话（run-handler 已算好）——最高优先级
+  },
+): string {
+  const lines: string[] = [
+    '你是这个需求的包工头，负责在推进过程中**答复用户在群里说的话**并决定是否调整施工。',
+    '你只读浏览相关仓库，不改代码（改代码是各仓 worker 的事）。',
+  ];
+  lines.push(...buildContextLines(input));
   lines.push(
     '',
     '# 用户这批话（最高优先级，请据此答复 / 决定调整）',

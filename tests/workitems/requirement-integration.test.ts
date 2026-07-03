@@ -130,7 +130,21 @@ describe('requirementTransition integration_check_failed → fix vs escalate', (
       item,
       ev('integration_check_failed', { round: 3, affectedRepos: ['backend'] }),
     );
-    expect(out.dispatch).toBeUndefined();
+    // ENHANCE E1：升级 raise 病历的同批派参谋 only-read run（stage=advise），不再是 undefined；事故单从本条
+    // integration_check_failed 的 round/affectedRepos/breaking 渲染。
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'advise' } });
+    expect((out.dispatch?.[0]?.payload as { incident: string }).incident).toContain('backend');
     expect(out.waits?.[0]).toMatchObject({ kind: 'human', reason: 'integration_unresolved' });
+    // 幂等：病历已 open → return {}（不重复 raise、不重复派参谋）。
+    expect(
+      requirementWorkType.onEvent(
+        item,
+        ev('integration_check_failed', {
+          round: 3,
+          affectedRepos: ['backend'],
+          openWaitReasons: ['integration_unresolved'],
+        }),
+      ),
+    ).toEqual({});
   });
 });

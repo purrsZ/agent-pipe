@@ -158,9 +158,11 @@ describe('requirement lifecycle transitions', () => {
     );
     expect(out.phase).toBeUndefined();
     expect(out.waits?.[0]).toMatchObject({ kind: 'human', reason: 'reconcile_conflict' });
+    // ENHANCE E1：raise 病历的同批派参谋 only-read run（stage=advise）。
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'advise' } });
   });
 
-  it('reconcile_conflict 幂等：病历已 open（openWaitReasons 含它）→ 不重复 raise', () => {
+  it('reconcile_conflict 幂等：病历已 open（openWaitReasons 含它）→ 不重复 raise（也不派参谋）', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.split });
     const out = t.onEvent(
       item,
@@ -271,6 +273,9 @@ describe('requirement lifecycle transitions', () => {
       ev('gatekeeper_big', { raises: [{ interfaceId: 'x', question: 'q' }] }),
     );
     expect(out.waits?.[0]).toMatchObject({ kind: 'human', reason: 'gatekeeper_big' });
+    // ENHANCE E1：判大 raise 同批派参谋 only-read run（stage=advise）。
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'advise' } });
+    // 幂等路径（病历已 open）：raise 前 return {} → 不派参谋。
     expect(t.onEvent(item, ev('gatekeeper_big', { openWaitReasons: ['gatekeeper_big'] }))).toEqual(
       {},
     );
@@ -519,6 +524,23 @@ describe('requirement lifecycle transitions', () => {
     );
     expect(steer.effects?.[0]).toMatchObject({ kind: 'steer_apply' });
     expect(steer.dispatch ?? []).toHaveLength(0);
+  });
+
+  it('ENHANCE E1 参谋（advise）收尾零流转 → {}；unconsumed>0 追加 steer（消息必达，不因参谋占窗口而漏）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    // 无未消费消息 → 纯 {}（建议只进人眼，不进状态机）。
+    expect(t.onEvent(item, ev('run_completed', { role: 'owner', stage: 'advise' }))).toEqual({});
+    // 参谋跑动期间攒下未消费群消息 → 收尾追加 steer 补派消费。
+    const noisy = t.onEvent(
+      item,
+      ev('run_completed', { role: 'owner', stage: 'advise', unconsumedHumanMessages: 2 }),
+    );
+    expect(noisy.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'steer' } });
+  });
+
+  it('ENHANCE E1 参谋（advise）run_failed → {}（不弹病历、不自动重试；事故 wait 本就 open 着）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    expect(t.onEvent(item, ev('run_failed', { role: 'owner', stage: 'advise' }))).toEqual({});
   });
 
   it('WS-2 steer_directive redo_reconcile（implement + owner 空闲）→ 派 owner reconcile', () => {
