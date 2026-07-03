@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { WorkItemEvent } from '../../src/workitems/types.js';
-import { assembleAuqAnswers, caseFileDetail, caseFileLabel, humanizeMs } from '../../src/index.js';
+import {
+  assembleAuqAnswers,
+  caseFileDetail,
+  caseFileLabel,
+  deliverGateNote,
+  humanizeMs,
+} from '../../src/index.js';
 
 // 病历(非 checkpoint 的 human wait)→ 飞书卡标签/详情的桥层纯核心（B：病历飞书出口）。
 
@@ -106,5 +112,23 @@ describe('caseFileDetail', () => {
   it('抽不到 → undefined（永不抛）', () => {
     expect(caseFileDetail([], 'reconcile_conflict')).toBeUndefined();
     expect(caseFileDetail([ev('run_failed', {})], 'run_failed')).toBeUndefined();
+  });
+});
+
+describe('deliverGateNote (WS-7.3 灯③ 证据 note，审查修复 F3)', () => {
+  it('真对账通过带 interfaceCount → 文案标注契约条数', () => {
+    expect(deliverGateNote([ev('integration_check_passed', { interfaceCount: 3 })])).toBe(
+      '✅ 静态跨仓对账通过（契约 3 条接口）',
+    );
+  });
+
+  it('历史事件无 interfaceCount → 回落原通过文案', () => {
+    expect(deliverGateNote([ev('integration_check_passed', {})])).toBe('✅ 静态跨仓对账通过');
+  });
+
+  it('no_contract → 提示人工验收（reason 分支不被 interfaceCount 改动干扰）', () => {
+    expect(deliverGateNote([ev('integration_check_passed', { reason: 'no_contract' })])).toContain(
+      '静态跨仓对账未生效',
+    );
   });
 });

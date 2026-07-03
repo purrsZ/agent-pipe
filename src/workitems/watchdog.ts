@@ -152,7 +152,14 @@ export class Watchdog {
   // 病历）。防抖 Map 记首次违反时刻，恢复正常即清除。注意 wakePending 不算活路——owner-workers 停在
   // wakePending 且无 running/effect/wait 就是死状态（WS-1.4 补派修好后有 parked 行也会被补派掉）。
   private scanLiveness(now: number): void {
-    for (const item of this.deps.store.listNonTerminal()) {
+    const items = this.deps.store.listNonTerminal();
+    // O1：终态单不再出现在 listNonTerminal，其防抖条目再也走不到下面的 delete → 每轮按本轮存活集合清扫
+    // 一次陈旧 key（微量内存，无正确性影响，但顺手清干净）。
+    const liveIds = new Set(items.map((i) => i.id));
+    for (const id of [...this.livenessViolations.keys()]) {
+      if (!liveIds.has(id)) this.livenessViolations.delete(id);
+    }
+    for (const item of items) {
       const type = this.deps.registry.get(item.type);
       if (type?.liveness?.(item) !== 'must-progress') {
         this.livenessViolations.delete(item.id);

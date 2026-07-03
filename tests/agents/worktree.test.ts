@@ -7,6 +7,7 @@ import {
   worktreeAdd,
   worktreeIsDirty,
   worktreePathFor,
+  worktreePrune,
   worktreeRemove,
   worktreeReset,
 } from '../../src/agents/worktree.js';
@@ -84,5 +85,16 @@ describe('worktree lifecycle (D-27)', () => {
   it('worktreeAdd throws on a missing base (caller raises its hand, R05.AC-6)', () => {
     const wt = worktreePathFor(tmpDir, 'scope3', 'run3', 'repo');
     expect(() => worktreeAdd(repoPath, wt, 'feature/z', 'nonexistent-base')).toThrow();
+  });
+
+  // 审查修复 F4：worktreePrune 清主仓里工作目录已消失的陈旧注册（GC 里 worktreeRemove 失败降级 rm 后补的一手）。
+  it('worktreePrune 清除工作目录已消失的陈旧注册，幂等不抛', () => {
+    const wt = worktreePathFor(tmpDir, 'scopeP', 'runP', 'repo');
+    worktreeAdd(repoPath, wt, 'feature/p', 'main');
+    fs.rmSync(wt, { recursive: true, force: true }); // 模拟降级 rm：删工作目录、留主仓注册
+    expect(git(repoPath, ['worktree', 'list'])).toContain(wt); // 陈旧注册仍在
+    worktreePrune(repoPath);
+    expect(git(repoPath, ['worktree', 'list'])).not.toContain(wt); // prune 清除
+    expect(() => worktreePrune(repoPath)).not.toThrow(); // 再跑一次无残留也不抛
   });
 });

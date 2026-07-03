@@ -77,6 +77,7 @@ describe('integration_check handler', () => {
     });
     await handler.run(ctx);
     expect(emitted[0]!.kind).toBe('integration_check_passed');
+    expect(emitted[0]!.payload).toMatchObject({ interfaceCount: 1 }); // WS-7.3：真通过带契约条数
     expect(written['contract/integration-report.md']).toContain('集成验证差异报告');
   });
 

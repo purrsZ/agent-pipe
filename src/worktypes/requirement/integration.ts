@@ -59,7 +59,8 @@ async function integrationCheck(ctx: EffectContext): Promise<void> {
       semanticFlagged: diff.semanticFlagged,
     });
   } else {
-    ctx.emit('integration_check_passed', {});
+    // WS-7.3：真对账通过时带上契约接口条数，灯③ note 据此显示「（契约 N 条接口）」。
+    ctx.emit('integration_check_passed', { interfaceCount: frozen.interfaces.length });
   }
 }
 

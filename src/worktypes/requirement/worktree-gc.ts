@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { worktreeRemove } from '../../agents/worktree.js';
+import { mainRepoOf, worktreePrune, worktreeRemove } from '../../agents/worktree.js';
 
 interface GcLogger {
   info(o: unknown, m?: string): void;
@@ -59,15 +59,33 @@ export function runWorktreeGc(deps: {
       continue;
     }
     // 终态且够老 → 先对每个叶子 worktree（结构 <workitemId>/<sanitizedRepo>/<runId>）跑 worktree remove（清 git
-    // 注册、留分支），再整目录兜底删。
+    // 注册、留分支），再整目录兜底删。remove 失败降级 rm 会在主仓 .git/worktrees/ 留下陈旧注册 → 记下主仓，
+    // 兜底删后补 git worktree prune（WS-7.4「降级 rm + prune」）。
+    const pruneRepos = new Set<string>();
     for (const wt of leafWorktrees(dir)) {
+      // wt 目录删除后 mainRepoOf 就算不出了，故 remove 前先缓存主仓路径（本身可能抛，包 try）。
+      let repo: string | undefined;
+      try {
+        repo = mainRepoOf(wt);
+      } catch {
+        repo = undefined;
+      }
       try {
         worktreeRemove(wt);
       } catch (err) {
         deps.logger.warn({ err, wt }, 'worktree gc: worktree remove failed, will rm dir');
+        if (repo) pruneRepos.add(repo);
       }
     }
     purgeDir(dir, deps.logger);
+    for (const repo of pruneRepos) {
+      // 主仓被删的极端情形 prune 会抛 → 跳过即可（与 spec「主仓被删直接 rm」一致）。
+      try {
+        worktreePrune(repo);
+      } catch (err) {
+        deps.logger.warn({ err, repo }, 'worktree gc: worktree prune failed');
+      }
+    }
     removed++;
   }
 

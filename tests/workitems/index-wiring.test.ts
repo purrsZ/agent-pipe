@@ -107,6 +107,9 @@ describe('index workitems wiring', () => {
     expect(source).toContain('composeIntakeExtractPrompt');
     expect(source).toContain('parseIntakeExtraction');
     expect(source).toContain('fillIntakeDeterministic');
+    // WS-10.1（审查修复 F2）：抽取带超时（raceWithTimeout）+ 超时群提示，别让用户干等「正在提取」。
+    expect(source).toContain('raceWithTimeout(');
+    expect(source).toContain('AI 提取超时，改为逐项收料。');
   });
 
   it('wires repo-knowledge selective injection into the requirement worker strategy (T5)', () => {

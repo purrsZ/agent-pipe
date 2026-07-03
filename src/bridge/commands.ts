@@ -301,7 +301,8 @@ export class CommandHandler {
       await this.sender.reply(msg.messageId, '用法: /diag-claim <root_id> managed|bridge');
       return;
     }
-    this.store.claimThread(rootId, kind, msg.userId);
+    // 带上 chat_id/chat_type，手动登记的 managed claim 才进 listManagedClaimChatIds 补拉枚举。
+    this.store.claimThread(rootId, kind, msg.userId, undefined, msg.chatId, msg.chatType);
     await this.sender.reply(msg.messageId, `已登记认领: ${rootId} → ${kind}`);
   }
 

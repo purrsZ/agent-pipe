@@ -157,6 +157,21 @@ export function humanizeMs(ms: number): string {
   return hours > 0 ? `${days} 天 ${hours} 小时` : `${days} 天`;
 }
 
+// 带超时的 Promise 竞速：p 按时 settle → 返回其值；ms 内未决 → 返回 'timeout'（不抛）。抽出来为可测；
+// 竞速前给 p 挂一个吞异常的 catch —— 超时侧赢下后 p 若再 reject 不会成 unhandled rejection。
+export async function raceWithTimeout<T>(p: Promise<T>, ms: number): Promise<T | 'timeout'> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), ms);
+  });
+  p.catch(() => {}); // race 输家兜底
+  try {
+    return await Promise.race([p, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 // WS-4 持久 inbox 的入站处理一环：recordInbox 权威去重 → handle → markInboxProcessed。首见返回
 // 'ingested'，重复 'duplicate'（含补拉重投同一条），handle 抛错 'error'（不标记 → 重启补投）。
 export async function ingestMessage(
@@ -328,14 +343,16 @@ export function caseFileDetail(events: WorkItemEvent[], reason: string): string 
 // 以交付清单人工验收；无 reason（真对账通过）→ 通过。
 export function deliverGateNote(events: WorkItemEvent[]): string | undefined {
   let reason: string | undefined;
+  let interfaceCount: number | undefined;
   for (let i = events.length - 1; i >= 0; i--) {
     const ev = events[i];
     if (ev?.kind !== 'integration_check_passed') continue;
     const p = ev.payload;
-    reason =
-      typeof p === 'object' && p !== null
-        ? (p as { reason?: unknown }).reason?.toString()
-        : undefined;
+    if (typeof p === 'object' && p !== null) {
+      reason = (p as { reason?: unknown }).reason?.toString();
+      const n = (p as { interfaceCount?: unknown }).interfaceCount;
+      if (typeof n === 'number' && n > 0) interfaceCount = n;
+    }
     break;
   }
   if (reason === 'no_contract') {
@@ -344,7 +361,10 @@ export function deliverGateNote(events: WorkItemEvent[]): string | undefined {
   if (reason === 'no_claims') {
     return '⚠️ 静态跨仓对账未生效（各仓未声明改动）——请以下方交付清单人工验收';
   }
-  return '✅ 静态跨仓对账通过';
+  // 真对账通过：有条数（新事件）→ 标注契约规模；读不到（历史事件无 interfaceCount）→ 回落原文案。
+  return interfaceCount !== undefined
+    ? `✅ 静态跨仓对账通过（契约 ${interfaceCount} 条接口）`
+    : '✅ 静态跨仓对账通过';
 }
 
 // WS-9：AUQ 表单答案组装（bridge task 与 workitem run 两条回灌路径共用，避免两份逻辑漂移）。每题 input
@@ -1130,7 +1150,7 @@ async function main() {
     const text = msg.text.trim();
     if (!text) return;
     await sender.sendText(msg.chatId, '🤔 正在从你的描述里提取立项信息…');
-    const ex = await aiExtractIntake(item.id, item.title, text);
+    const ex = await aiExtractIntake(item.id, item.title, text, msg);
     if (!ex || ex.fields.length === 0) {
       if (ex?.uiRequired !== undefined) {
         workitems.api.injectIntakeField(item.id, { uiRequired: ex.uiRequired });
@@ -1188,6 +1208,7 @@ async function main() {
     itemId: string,
     title: string,
     text: string,
+    msg: IncomingMessage,
   ): Promise<ReturnType<typeof parseIntakeExtraction>> {
     const state = foldIntakeState(workitems.api.listEvents(itemId));
     const filled = state.fields.map(
@@ -1214,21 +1235,23 @@ async function main() {
     // 「🤔 正在提取…」。加 90s 超时（env INTAKE_EXTRACT_TIMEOUT_MS 可调）→ abort + 返回 null 落 fillIntakeDeterministic。
     const timeoutMs = Number(process.env.INTAKE_EXTRACT_TIMEOUT_MS) || 90_000;
     try {
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<'timeout'>((resolve) => {
-        timer = setTimeout(() => resolve('timeout'), timeoutMs);
-      });
-      const raced = await Promise.race([
+      const raced = await raceWithTimeout(
         pool.send(task, prompt, undefined, { permission: { mode: 'readonly' } }),
-        timeout,
-      ]);
-      if (timer) clearTimeout(timer);
+        timeoutMs,
+      );
       if (raced === 'timeout') {
         pool.abort(taskId);
         logger.warn(
           { itemId, timeoutMs },
           'intake extract timed out; falling back to deterministic',
         );
+        // spec §WS-10.1：超时不再静默——群里明说改逐项收料，别让用户干等「🤔 正在提取…」。通知失败只忽略。
+        const hint = 'AI 提取超时，改为逐项收料。';
+        try {
+          await sender.reply(msg.messageId, hint);
+        } catch {
+          await sender.sendText(msg.chatId, hint).catch(() => {});
+        }
         return null;
       }
       if (raced.error) {

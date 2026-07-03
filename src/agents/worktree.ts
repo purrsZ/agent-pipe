@@ -54,6 +54,15 @@ export function worktreeRemove(worktreePath: string): void {
   git(repoPath, ['worktree', 'remove', '--force', worktreePath]);
 }
 
+/**
+ * `git worktree prune` — drop stale administrative registrations under the main repo's
+ * `.git/worktrees/` for checkouts whose directory was removed out-of-band (e.g. a GC fell
+ * back to `rm` when `worktree remove` failed). Keeps same-path/same-branch reuse from tripping.
+ */
+export function worktreePrune(repoPath: string): void {
+  git(repoPath, ['worktree', 'prune']);
+}
+
 /** Dirty = any tracked change or untracked file (`git status --porcelain` non-empty). */
 export function worktreeIsDirty(worktreePath: string): boolean {
   return git(worktreePath, ['status', '--porcelain']).trim().length > 0;
@@ -87,7 +96,7 @@ export function worktreeReset(worktreePath: string, base: string, cleanDirs: str
   }
 }
 
-function mainRepoOf(worktreePath: string): string {
+export function mainRepoOf(worktreePath: string): string {
   // common-dir points at the shared `.git` of the primary checkout; its parent is the repo
   // toplevel. Running `worktree remove` from there avoids "cannot run from the worktree
   // being removed".
