@@ -30,6 +30,10 @@ export interface RunStrategy {
     // owner/worker prompts read `stage` to route composition (reconcile vs assess vs steer) and
     // `note` for rework rounds. probe ignores it (zero regression). Optional so unit tests may omit.
     effectPayload?: unknown;
+    // E2: full event history (opaque, seq-ascending). A worktype strategy may render it into prompt
+    // context (same neutral pass-through as priorReportPaths); probe/worker ignore it (zero
+    // regression). Optional so pure unit tests may omit it (run-handler always supplies it).
+    events?: WorkItemEvent[];
   }): string;
   runOptions(args: { workitem: WorkItem; assignment: Assignment; cwd: string }): RunOptions;
   resolveCwd(args: { workitem: WorkItem; assignment: Assignment; defaultCwd: string }): string;
@@ -173,8 +177,10 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
   const priorReportPath = lastRunCompletedReportPath(batch);
   const priorReport = priorReportPath ? ctx.readArtifact(priorReportPath) : undefined;
   // B 阶段（回执语义）：全历史的 run_completed 报告路径——owner assess 据此聚合各仓工人完成回执（assess 的
-  // batch 里没有工人报告，它们在 assess 被派之前就落了）。probe/worker 不读它。
-  const priorReportPaths = allRunCompletedReportPaths(ctx.eventsSince(0));
+  // batch 里没有工人报告，它们在 assess 被派之前就落了）。probe/worker 不读它。E2：同一次全历史事件流也
+  // opaque 透传给策略（复用，避免二次 eventsSince）。
+  const allEvents = ctx.eventsSince(0);
+  const priorReportPaths = allRunCompletedReportPaths(allEvents);
   const followups = batch
     .filter((e) => e.kind === 'human_message')
     .map(humanMessageText)
@@ -189,6 +195,7 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
     batch,
     readArtifact: (rel) => ctx.readArtifact(rel),
     effectPayload: ctx.effect.payload,
+    events: allEvents,
   });
   ctx.writeArtifact(`assignments/${assignment.id}/brief.md`, prompt, 'agent-run brief');
 

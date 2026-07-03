@@ -1,3 +1,4 @@
+import type { WorkItemEvent } from '../../workitems/types.js';
 import { type AdvisoryContext, buildContextLines } from './steering.js';
 
 // 事故参谋域（ENHANCE E1，worktypes 层纯核心）。
@@ -101,6 +102,130 @@ export function composeAdvisePrompt(
     '按钮——你的话会被下一轮执行读到。」',
   );
   return lines.join('\n');
+}
+
+// ── 大事记摘要（ENHANCE E2）：把事件流渲染成人话时间线，供 steer/advise 了解全程来龙去脉（解决包工头「记忆
+// 靠接力、长链衰减」的痛点，也让参谋知晓全程）。requirement 纯核心解释自己的事件流合规；容器/agent-run 层只
+// opaque 透传事件（中性），解释权在这里。 ──────────────────────────────────────────────────────────────
+const MAX_DIGEST_LINES = 40;
+const MAX_DIGEST_CHARS = 2500;
+const DIGEST_HEAD_KEEP = 6;
+
+export function renderEventDigest(events: WorkItemEvent[]): string {
+  const lines = asArray(events)
+    .map((e) => renderEventLine(e))
+    .filter((l) => l.length > 0);
+  if (lines.length === 0) return '';
+  return boundDigest(lines).join('\n');
+}
+
+// 上界：≤40 行 / ≤2500 字符，超出保头（立项/拆解节点）保尾（最近事件），中间折叠为「-（中间 N 件事略）」。
+function boundDigest(lines: string[]): string[] {
+  if (lines.length <= MAX_DIGEST_LINES && lines.join('\n').length <= MAX_DIGEST_CHARS) return lines;
+  const head = lines.slice(0, DIGEST_HEAD_KEEP);
+  const headChars = head.join('\n').length;
+  const tail: string[] = [];
+  let tailChars = 0;
+  // 尾部从最近事件往前收，撞行数或字符上界即停（预留 40 字符给折叠行）。
+  for (let i = lines.length - 1; i >= DIGEST_HEAD_KEEP; i--) {
+    const line = lines[i] ?? '';
+    if (head.length + tail.length + 1 >= MAX_DIGEST_LINES) break;
+    if (headChars + tailChars + line.length + 40 > MAX_DIGEST_CHARS) break;
+    tail.unshift(line);
+    tailChars += line.length + 1;
+  }
+  const omitted = lines.length - head.length - tail.length;
+  return omitted > 0 ? [...head, `-（中间 ${omitted} 件事略）`, ...tail] : [...head, ...tail];
+}
+
+// 单事件 → 一行「- [MM-DD HH:mm] 事实」。只渲染人关心的节点，其余跳过。防御式：坏 payload 降级为 kind 名。
+function renderEventLine(ev: unknown): string {
+  const e = asObject(ev);
+  const kind = asString(e.kind);
+  const prefix = `- [${stampOf(e.createdAt)}] `;
+  const p = asObject(e.payload);
+  try {
+    switch (kind) {
+      case 'phase_changed':
+        return `${prefix}进入「${asString(p.to) || '?'}」${phaseReasonHuman(asString(p.reason))}`;
+      case 'wait_resolved': {
+        // 容器 resolve（origin_terminal 等）无 decision → 非人裁决，跳过。人裁决带 decision + reason(意见原文)。
+        if (p.decision === undefined) return '';
+        const opinion = asString(p.reason);
+        const approved = asObject(p.decision).approved === true;
+        return `${prefix}人裁决：${approved ? '通过' : '打回'}${opinion ? `（意见：${truncate(opinion, 60)}）` : ''}`;
+      }
+      case 'gatekeeper_big': {
+        const r = asObject(asArray(p.raises)[0]);
+        const iface = asString(r.interfaceId);
+        const repo = asString(r.repo);
+        return `${prefix}监工判大${iface ? `：接口 ${iface}` : ''}${repo ? `（${repo}）` : ''}`;
+      }
+      case 'steer_directive': {
+        const action = asString(p.action) || 'none';
+        if (action === 'none') return ''; // 审计留痕、无实质动作 → 跳过
+        const note = asString(p.note);
+        return `${prefix}包工头指令：${action}${note ? `（${truncate(note, 40)}）` : ''}`;
+      }
+      case 'rework_requested': {
+        const repos = asStringList(p.repos);
+        return `${prefix}定向返工${repos.length ? `：${repos.join('、')}` : ''}`;
+      }
+      case 'integration_check_failed':
+        return `${prefix}集成验证第 ${numberOr(p.round, 1)} 轮未过`;
+      case 'run_failed': {
+        const role = asString(p.role);
+        const repo = asString(p.repo);
+        return `${prefix}执行报错${role ? `：${role}` : ''}${repo ? `（${repo}）` : ''}`;
+      }
+      case 'manifest_ready':
+        return `${prefix}交付清单已生成`;
+      default:
+        return ''; // 其余 kind 一律跳过
+    }
+  } catch {
+    return kind ? `${prefix}${kind}` : '';
+  }
+}
+
+// phase_changed 的 reason → 人话（lite_single_repo=单仓直跳 等）。未知 reason 原样括号显示。
+function phaseReasonHuman(reason: string): string {
+  switch (reason) {
+    case 'created':
+      return '（立项）';
+    case 'intake_ready':
+      return '（立项料齐）';
+    case 'lite_single_repo':
+      return '（单仓直跳实现）';
+    case 'reconcile_passed':
+      return '（对账通过）';
+    case 'lite_skip_assess':
+      return '（单仓跳过评估）';
+    case 'workers_done':
+      return '（施工完成）';
+    case 'integration_passed':
+      return '（集成通过）';
+    case 'checkpoint_approved':
+      return '（关卡放行）';
+    default:
+      return reason ? `（${reason}）` : '';
+  }
+}
+
+// 时间戳 MM-DD HH:mm（本地时区，供人看）。createdAt 缺失回落 epoch 0，永不抛。
+function stampOf(createdAt: unknown): string {
+  const ms = typeof createdAt === 'number' && Number.isFinite(createdAt) ? createdAt : 0;
+  const d = new Date(ms);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function truncate(s: string, n: number): string {
+  return s.length > n ? `${s.slice(0, n)}…` : s;
+}
+
+function numberOr(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
 // ── helpers (pure, 防御式) ────────────────────────────────────────────────────────────────

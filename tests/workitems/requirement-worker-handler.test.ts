@@ -525,4 +525,113 @@ describe('requirement 事故参谋 run (stage=advise owner → composeAdviseProm
     expect(prompt).toContain('以上仅供参考'); // 固定结尾提示
     expect(prompt).not.toContain('```steer'); // 参谋零行动权，不产 steer 块
   });
+
+  it('E2：参谋 prompt 织入大事记（events → renderEventDigest → 大事记标题 + 内容）', () => {
+    const s = createRequirementRunStrategy({ worktreesDir: worktreesDir() });
+    const prompt = s.composePrompt({
+      title: 't',
+      followups: [],
+      workitem: makeWorkItem('wi-1', {
+        type: 'requirement',
+        phase: PHASE.implement,
+        repos: ['/repos/backend'],
+      }),
+      assignment: owner(),
+      batch: [],
+      readArtifact: () => undefined,
+      effectPayload: { stage: 'advise', incident: 'x' },
+      events: [
+        {
+          id: 1,
+          workitemId: 'wi-1',
+          seq: 1,
+          kind: 'gatekeeper_big',
+          payload: { raises: [{ interfaceId: 'createOrder', repo: '/repos/backend' }] },
+          createdAt: 1000,
+        },
+      ],
+    });
+    expect(prompt).toContain('本单大事记'); // 大事记标题织入
+    expect(prompt).toContain('监工判大'); // digest 内容织入
+  });
+});
+
+// ENHANCE E2：包工头(steer) prompt 同样织入大事记（reconcile/assess 不织，见 E2.3）。
+describe('requirement steer run 织入大事记 (stage=steer)', () => {
+  const worktreesDir = () => path.join(tmpDir, 'worktrees');
+  const owner = () => makeAssignment('as-o1', 'wi-1', { role: 'owner' });
+
+  it('steer prompt 含大事记标题 + phase 变迁行', () => {
+    const s = createRequirementRunStrategy({ worktreesDir: worktreesDir() });
+    const prompt = s.composePrompt({
+      title: 't',
+      followups: ['随手一句'],
+      workitem: makeWorkItem('wi-1', {
+        type: 'requirement',
+        phase: PHASE.implement,
+        repos: ['/repos/backend'],
+      }),
+      assignment: owner(),
+      batch: [],
+      readArtifact: () => undefined,
+      effectPayload: { stage: 'steer' },
+      events: [
+        {
+          id: 1,
+          workitemId: 'wi-1',
+          seq: 1,
+          kind: 'phase_changed',
+          payload: { to: 'requirement:并行实现', reason: 'reconcile_passed' },
+          createdAt: 1000,
+        },
+      ],
+    });
+    expect(prompt).toContain('包工头');
+    expect(prompt).toContain('本单大事记');
+    expect(prompt).toContain('对账通过'); // digest reason 人话织入
+  });
+
+  it('reconcile / assess prompt 不织大事记（E2.3：窄上下文防膨胀）', () => {
+    const s = createRequirementRunStrategy({ worktreesDir: worktreesDir() });
+    const events = [
+      {
+        id: 1,
+        workitemId: 'wi-1',
+        seq: 1,
+        kind: 'phase_changed',
+        payload: { to: 'requirement:并行实现', reason: 'reconcile_passed' },
+        createdAt: 1000,
+      },
+    ];
+    // 拆解 phase owner → reconcile prompt
+    const reconcile = s.composePrompt({
+      title: 't',
+      followups: [],
+      workitem: makeWorkItem('wi-1', {
+        type: 'requirement',
+        phase: PHASE.split,
+        repos: ['/a', '/b'],
+      }),
+      assignment: owner(),
+      batch: [],
+      readArtifact: () => undefined,
+      events,
+    });
+    expect(reconcile).not.toContain('本单大事记');
+    // 实现 phase owner → assess prompt
+    const assess = s.composePrompt({
+      title: 't',
+      followups: [],
+      workitem: makeWorkItem('wi-1', {
+        type: 'requirement',
+        phase: PHASE.implement,
+        repos: ['/repos/backend'],
+      }),
+      assignment: owner(),
+      batch: [],
+      readArtifact: () => undefined,
+      events,
+    });
+    expect(assess).not.toContain('本单大事记');
+  });
 });

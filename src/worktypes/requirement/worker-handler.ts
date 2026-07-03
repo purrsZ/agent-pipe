@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import { worktreeAdd, worktreeIsDirty, worktreePathFor } from '../../agents/worktree.js';
 import type { Assignment, WorkItem } from '../../workitems/types.js';
 import type { RunStrategy } from '../agent-run/run-handler.js';
-import { composeAdvisePrompt } from './advisor.js';
+import { composeAdvisePrompt, renderEventDigest } from './advisor.js';
 import { branchFor } from './branch.js';
 import { type ContractSnapshot, EMPTY_SNAPSHOT } from './contract.js';
 import { parseInternalApis, promoteToContract } from './design.js';
@@ -49,6 +49,7 @@ export function createRequirementRunStrategy(opts: {
       readArtifact,
       workitem,
       effectPayload,
+      events,
     }) => {
       if (assignment.role === 'worker') {
         const contract = readContract(readArtifact);
@@ -84,6 +85,8 @@ export function createRequirementRunStrategy(opts: {
           integrationReport: readArtifact('contract/integration-report.md'),
           recentReports: boundedReports(priorReportPaths, readArtifact),
           priorSteerReport: priorReport,
+          // E2 大事记：包工头据此了解全程来龙去脉（解决「记忆靠接力、长链衰减」）。
+          digest: renderEventDigest(events ?? []),
         });
       }
       // ENHANCE E1：参谋 run（stage=advise）——与 steer 同款全景上下文 + 事故单（incident，adviseSpec 从事故
@@ -100,6 +103,8 @@ export function createRequirementRunStrategy(opts: {
           integrationReport: readArtifact('contract/integration-report.md'),
           recentReports: boundedReports(priorReportPaths, readArtifact),
           priorSteerReport: priorReport,
+          // E2 大事记：参谋据此知晓全程，建议更贴合上下文。
+          digest: renderEventDigest(events ?? []),
           incident: incidentFromPayload(effectPayload),
         });
       }

@@ -30,6 +30,7 @@ export interface AdvisoryContext {
   integrationReport?: string;
   recentReports?: string[]; // 各仓最近回执（已截断）
   priorSteerReport?: string;
+  digest?: string; // ENHANCE E2：大事记摘要（renderEventDigest 产物），织入「当前阶段」之后、「涉及仓库」之前
 }
 
 // 共享上下文中段（从「# 需求」到「上一轮答复」）：steer 与 advise 织入同一份上下文。角色句、followups、
@@ -41,6 +42,9 @@ export function buildContextLines(input: AdvisoryContext): string[] {
     lines.push('', '# 立项书（前置已收齐的需求材料，据此推进）', input.intakeBrief.trim());
   }
   lines.push('', '# 当前阶段', phaseHuman(input.phase));
+  if (input.digest?.trim()) {
+    lines.push('', '# 本单大事记（供你了解全程来龙去脉）', input.digest.trim());
+  }
   if (repoList.length > 0) {
     lines.push('', '# 涉及的仓库（绝对路径）', ...repoList.map((r) => `- ${r}`));
   }
