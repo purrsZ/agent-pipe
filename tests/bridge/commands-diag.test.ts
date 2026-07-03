@@ -41,6 +41,7 @@ function makeHandler(claims: unknown[][]) {
     () => {}, // onDone
     () => {}, // onRequirement
     () => {}, // onCancelUnit
+    () => {}, // onDelegate
   );
 }
 

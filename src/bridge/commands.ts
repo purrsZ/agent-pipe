@@ -36,6 +36,7 @@ const HELP_TEXT = [
   '  /done                                     关闭当前调查（在其话题里回复）',
   '  /req [需求一句话]                          发起需求：建专属群，群内引导式收齐前置料(仓库/PRD/UI/验收)再开干',
   '  /cancel                                   在需求群里发起终止需求（需确认）',
+  '  /delegate 8h                              开启本单委托（三灯到点自动通过）；/delegate off 撤销',
   '  /help                                     本帮助',
   '',
   '普通消息（不带 /）：优先发给本会话当前任务；若无则发给本会话最近活跃。',
@@ -60,6 +61,9 @@ export class CommandHandler {
     private onRequirement: (msg: IncomingMessage, opts: { description: string }) => void,
     // WS-10.8：/cancel 在需求群里发起终止需求（kernel 中性，与 onRequirement/onProbe 同型）。
     private onCancelUnit: (msg: IncomingMessage) => void,
+    // DELEGATE D2.2：/delegate 在需求群里开启/撤销本单委托。参数原样透传（时长解析在 index 侧，
+    // 本文件 kernel 中性、不掺业务语义）。
+    private onDelegate: (msg: IncomingMessage, args: string[]) => void,
   ) {}
 
   private isAdmin(openId: string): boolean {
@@ -138,6 +142,10 @@ export class CommandHandler {
         case '/cancel':
           // WS-10.8：需求群里终止需求（需二次确认）。需求侧收到 /cancel 留言后升起取消确认。
           this.onCancelUnit(msg);
+          return;
+        case '/delegate':
+          // DELEGATE D2.2：需求群里开启/撤销本单委托（睡前放权）。
+          this.onDelegate(msg, rest);
           return;
         case '/help':
           await this.sender.reply(msg.messageId, HELP_TEXT);

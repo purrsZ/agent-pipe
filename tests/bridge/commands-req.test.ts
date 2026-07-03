@@ -21,6 +21,7 @@ function makeHandler() {
   const replies: string[] = [];
   const reqs: Array<{ description: string }> = [];
   const cancels: IncomingMessage[] = [];
+  const delegates: Array<{ msg: IncomingMessage; args: string[] }> = [];
   const sender = {
     reply: async (_id: string, text: string) => {
       replies.push(text);
@@ -41,8 +42,9 @@ function makeHandler() {
     () => {}, // onDone
     (_msg, opts) => reqs.push(opts), // onRequirement
     (msg) => cancels.push(msg), // onCancelUnit
+    (msg, args) => delegates.push({ msg, args }), // onDelegate
   );
-  return { handler, replies, reqs, cancels };
+  return { handler, replies, reqs, cancels, delegates };
 }
 
 describe('/req dispatch (requirement 立项重塑, M-I2)', () => {
@@ -78,5 +80,16 @@ describe('/req dispatch (requirement 立项重塑, M-I2)', () => {
     const { handler, reqs } = makeHandler();
     await handler.dispatch(makeMsg('/req 给 --repo /tmp/x 订单加导出'));
     expect(reqs).toEqual([{ description: '给 订单加导出' }]);
+  });
+
+  it('DELEGATE /delegate 原样透传参数给 onDelegate（时长解析在 index 侧）', async () => {
+    const { handler, delegates, replies } = makeHandler();
+    const msg = makeMsg('/delegate 8h');
+    await handler.dispatch(msg);
+    expect(delegates).toEqual([{ msg, args: ['8h'] }]);
+    expect(replies).toHaveLength(0);
+
+    await handler.dispatch(makeMsg('/delegate off'));
+    expect(delegates[1]!.args).toEqual(['off']);
   });
 });

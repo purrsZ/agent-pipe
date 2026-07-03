@@ -233,6 +233,23 @@ const STEER_ESCALATED_REASON = 'steer_escalated';
 // WS-7.7：交付相位「等人关单」的 human wait reason（灯④）——可点关单卡 / 可催 / 活性看门可见。
 const AWAITING_CLOSE_REASON = 'awaiting_close';
 
+// DELEGATE D-2：可委托 wait reason 白名单——**只含推进型三灯，永不扩到事故类**。/delegate 命令入口只接受
+// 这份列表（容器对语义零感知，只做 opaque 字符串匹配）：
+//   灯②（拆解拍板，split→implement 边界的 checkpoint）——注意：PIVOT 后主线该边界不设 checkpoint
+//   （reconcile_passed 直进并行实现），此 reason 的 wait 当前不会出现；保留声明属前向保护，灯② 若长回来
+//   自动被覆盖，平时是死而无害的一行。
+//   灯③（验收，integrate→deliver 的 checkpoint）——桥层另有机器信号 guard（D-4）：静态对账真通过才放行。
+//   灯④（awaiting_close 关单）——关单前灯③已人批或真通过，无需 guard。
+// 硬排除（D-2，勿重开）：立项 gate（checkpointReason(PHASE.split)，料没收齐自动过无意义）、监工判大
+// gatekeeper_big（自动放行=监工白判）、一切病历（run_failed / reconcile_conflict / integration_unresolved /
+// retry_exhausted / thrash / stalled_no_path / steer_escalated——「已处理·继续」意味着人做过处置，自动点=
+// 空转）、cancel_confirm（破坏性）。守护断言钉死于 tests/workitems/requirement-delegation.test.ts。
+export const DELEGABLE_WAIT_REASONS: readonly string[] = [
+  checkpointReason(PHASE.implement),
+  checkpointReason(PHASE.deliver),
+  AWAITING_CLOSE_REASON,
+];
+
 // 重弹一条同名 human 病历（declined 后防死状态：病历必须一直 open 到被 approve 或整单 /cancel）。
 function reRaiseWait(reason: string): Transition {
   return { waits: [{ kind: 'human', reason, deadlineTtlSec: CHECKPOINT_WAIT_TTL_SEC }] };

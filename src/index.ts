@@ -48,6 +48,7 @@ import { Store } from './store.js';
 import { composeRepoKnowledge, KNOWLEDGE_BUDGET_CHARS } from './knowledge/compose.js';
 import { loadFreshnessPolicy } from './knowledge/freshness.js';
 import { KnowledgeStore } from './knowledge/store.js';
+import { loadWorkitemsConfig } from './workitems/config.js';
 import { createWorkitemsContainer, type WorkitemsContainer } from './workitems/container.js';
 import { createConsoleServer } from './console/server.js';
 import { buildRequirementBoard } from './worktypes/requirement/board.js';
@@ -59,8 +60,8 @@ import { isTerminalStatus } from './workitems/shared.js';
 import type { WorkItem, WorkItemEvent } from './workitems/types.js';
 import { createAgentRunHandler } from './worktypes/agent-run/run-handler.js';
 import { registerProbe } from './worktypes/probe/index.js';
-import { checkpointBoundaryOf } from './worktypes/requirement/checkpoint.js';
-import { registerRequirement } from './worktypes/requirement/index.js';
+import { checkpointBoundaryOf, checkpointReason } from './worktypes/requirement/checkpoint.js';
+import { DELEGABLE_WAIT_REASONS, registerRequirement } from './worktypes/requirement/index.js';
 import { INCIDENT_REASONS } from './worktypes/requirement/advisor.js';
 import { createIntegrationCheckHandler } from './worktypes/requirement/integration.js';
 import {
@@ -413,6 +414,174 @@ export function applyCheckpointOpinion(deps: {
     return true;
   }
   return false;
+}
+
+// ── DELEGATE 委托模式（睡前放权）────────────────────────────────────────────────────────────
+// 人预先拍板（/delegate Nh）→ 容器 watchdog 到点发中性 delegation_due → 本桥层做业务 guard 后走
+// resolveWait 唯一写口自动通过。委托只会「通过」、永不「打回」（D-1）；白名单只含推进型三灯（D-2，
+// 声明在 requirement 纯核心）；guard 只认机器信号不认 AI 报告（D-4）。
+
+function hhmm(ts: number): string {
+  const d = new Date(ts);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+// DELEGATE D2.2：/delegate 时长解析。Nh/Nm；上限 24h（过夜够用，防「永久放权」）→ 'over-cap'；
+// 坏格式/非正数 → undefined（调用方回用法提示）。纯函数。
+export function parseDelegationDuration(raw: string): number | 'over-cap' | undefined {
+  const m = /^(\d+)(h|m)$/i.exec(raw.trim());
+  if (!m) return undefined;
+  const n = Number(m[1]);
+  if (n <= 0) return undefined;
+  const ms = m[2]!.toLowerCase() === 'h' ? n * 3_600_000 : n * 60_000;
+  return ms > 24 * 3_600_000 ? 'over-cap' : ms;
+}
+
+// DELEGATE D2.2：/delegate 命令主体（依赖注入式导出，先例 applyCheckpointOpinion）。item 由调用方
+// resolveManagedItem 解出；找不到单/终态的文案复用 /cancel 的两条。写入即 upsert（每单一条生效，
+// 新授权覆盖旧的）；grantNote 存命令原文（留痕：事后可审计"这个灯凭什么批的"）。
+export async function runDelegateCommand(
+  deps: {
+    item: WorkItem | undefined;
+    store: {
+      upsertDelegation(
+        workitemId: string,
+        input: { reasons: string[]; grantNote: string; expiresAt: number; createdBy: string },
+      ): void;
+      revokeDelegation(workitemId: string): number;
+    };
+    reply: (text: string) => Promise<unknown>;
+    delegableReasons: readonly string[];
+    delaySec: number;
+    now?: () => number;
+  },
+  msg: { text: string; userId: string },
+  args: string[],
+): Promise<void> {
+  const { item } = deps;
+  if (!item) {
+    await deps.reply('本会话没有进行中的需求单。');
+    return;
+  }
+  if (isTerminalStatus(item.status)) {
+    await deps.reply('该单元已结束，回复 `/done` 关闭后可重新发起。');
+    return;
+  }
+  const arg = (args[0] ?? '').trim();
+  if (arg.toLowerCase() === 'off') {
+    const revoked = deps.store.revokeDelegation(item.id);
+    await deps.reply(revoked > 0 ? '已撤销本单委托，三灯恢复等你拍板。' : '本单没有生效中的委托。');
+    return;
+  }
+  const dur = parseDelegationDuration(arg);
+  if (dur === undefined) {
+    await deps.reply(
+      '用法：/delegate <时长>（Nh/Nm，如 8h、30m，上限 24h）开启本单委托；/delegate off 撤销。',
+    );
+    return;
+  }
+  if (dur === 'over-cap') {
+    await deps.reply(
+      '委托时长上限 24h（过夜够用，防「永久放权」）。请用不超过 24h 的时长，如 /delegate 8h。',
+    );
+    return;
+  }
+  const expiresAt = (deps.now?.() ?? Date.now()) + dur;
+  deps.store.upsertDelegation(item.id, {
+    reasons: [...deps.delegableReasons],
+    grantNote: msg.text.trim(),
+    expiresAt,
+    createdBy: msg.userId,
+  });
+  // 确认文案诚实交代边界（D2.2）：三灯范围 + 冷静期 + 灯③ 机器 guard + 判大/病历不受委托。
+  const mins = Math.round(deps.delaySec / 60);
+  await deps.reply(
+    `已开启委托至 ${hhmm(expiresAt)}——拆解/验收/关单三灯在无人处理 ${mins} 分钟后自动通过` +
+      '（验收灯需静态对账真通过才放行）；**监工判大与一切病历仍会等你**。随时 /delegate off 撤销。',
+  );
+}
+
+// DELEGATE D-4：委托 guard——**只认机器信号，不认 AI 报告**（AI 质检/参谋报告只进人眼，E5 D-1）。
+// 灯③ 自动通过的前提 = 最后一条 integration_check_passed 是真通过（payload 无 reason；no_contract /
+// no_claims = 静态对账未生效 → 不放行，等人。推论：lite 单仓的灯③ 永不自动过，设计上有意保守）。
+// 灯②/灯④ 无 guard（拆解结论有对账 effect 兜底、关单前灯③已人批或真通过）；非白名单恒 false（双保险，
+// 白名单本身已在命令入口约束）。扫描姿势同 deliverGateNote。纯函数。
+export function delegationGuardFor(reason: string, events: WorkItemEvent[]): boolean {
+  if (!DELEGABLE_WAIT_REASONS.includes(reason)) return false;
+  if (reason !== checkpointReason(PHASE.deliver)) return true;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const ev = events[i];
+    if (ev?.kind !== 'integration_check_passed') continue;
+    const p = ev.payload;
+    const r = typeof p === 'object' && p !== null ? (p as { reason?: unknown }).reason : undefined;
+    return r === undefined;
+  }
+  return false; // 从无 integration_check_passed → 不放行
+}
+
+// DELEGATE D2.3：delegation_due 的桥层执行器（依赖注入式导出，先例 backfillClaimedChats）。幂等：
+// wait 已 resolve（人抢先手动 / watchdog 节流重发竞态）→ return；授权已撤销/到期 → return；guard 不过
+// → 静默 return（催办照常，人醒来正常处理）。通过则走 resolveWait 唯一写口（operator=delegation 留痕）
+// 并群内通知；通知失败只 log——resolve 已生效，通知是尽力而为。
+export async function runDelegationDue(
+  deps: {
+    workitems: {
+      store: {
+        getWait(
+          id: string,
+        ): { workitemId: string; reason: string; resolvedAt: number | null } | undefined;
+        activeDelegation(
+          workitemId: string,
+          now: number,
+        ): { grantNote: string; expiresAt: number } | undefined;
+      };
+      api: {
+        listEvents(id: string): WorkItemEvent[];
+        resolveWait(
+          waitId: string,
+          input: { operator: string; reason: string; decision?: { approved: boolean } },
+        ): { resolved: boolean };
+      };
+    };
+    notify: (text: string) => Promise<unknown>;
+    logger: Pick<Logger, 'error' | 'info'>;
+    now?: () => number;
+  },
+  event: WorkItemEvent,
+): Promise<void> {
+  const payload = event.payload;
+  const waitId =
+    typeof payload === 'object' &&
+    payload !== null &&
+    typeof (payload as { waitId?: unknown }).waitId === 'string'
+      ? (payload as { waitId: string }).waitId
+      : undefined;
+  if (!waitId) return;
+  const wait = deps.workitems.store.getWait(waitId);
+  if (!wait || wait.resolvedAt !== null) return;
+  const grant = deps.workitems.store.activeDelegation(wait.workitemId, deps.now?.() ?? Date.now());
+  if (!grant) return;
+  if (!delegationGuardFor(wait.reason, deps.workitems.api.listEvents(wait.workitemId))) return;
+  const r = deps.workitems.api.resolveWait(waitId, {
+    operator: 'delegation',
+    reason: `【委托】${grant.grantNote}（至 ${hhmm(grant.expiresAt)}）`,
+    decision: { approved: true },
+  });
+  if (!r.resolved) return;
+  deps.logger.info({ waitId, reason: wait.reason }, 'delegation auto-approved wait');
+  const boundary = checkpointBoundaryOf(wait.reason);
+  const label = boundary
+    ? checkpointGateLabel(boundary)
+    : wait.reason === 'awaiting_close'
+      ? '交付待关单（灯④）'
+      : wait.reason;
+  try {
+    await deps.notify(
+      `⏱ 已按你的委托自动通过「${label}」（授权：${grant.grantNote}）。有异议可在群里直接说，包工头会处理。`,
+    );
+  } catch (err) {
+    deps.logger.error({ err, waitId }, 'delegation notify failed (resolve already committed)');
+  }
 }
 
 // WS-9：AUQ 表单答案组装（bridge task 与 workitem run 两条回灌路径共用，避免两份逻辑漂移）。每题 input
@@ -1456,6 +1625,9 @@ async function main() {
     (msg) => {
       void onCancelUnit(msg);
     },
+    (msg, args) => {
+      void onDelegate(msg, args);
+    },
   );
 
   // Card button callbacks (R06/D-12) all arrive through one onCardAction; route by value.kind.
@@ -1652,6 +1824,23 @@ async function main() {
       return;
     }
     workitems.api.injectHumanMessage(item.id, { text: '/cancel' });
+  }
+
+  // DELEGATE D2.2：/delegate 开启/撤销本单委托（写入与文案在 runDelegateCommand，依赖注入式导出可测）。
+  // 找单姿势与 /cancel 同源（resolveManagedItem）；delaySec 与容器 watchdog 读同一 env，确认文案里的
+  // 冷静期分钟数不会与实际行为漂移。
+  async function onDelegate(msg: IncomingMessage, args: string[]): Promise<void> {
+    await runDelegateCommand(
+      {
+        item: resolveManagedItem(msg),
+        store: workitems.store,
+        reply: (text) => sender.reply(msg.messageId, text),
+        delegableReasons: DELEGABLE_WAIT_REASONS,
+        delaySec: loadWorkitemsConfig().delegationDelaySec,
+      },
+      msg,
+      args,
+    );
   }
 
   // WS-4: 入站处理主体抽成具名闭包，让「ws 推送（经 ingestMessage 持久去重）」「启动补投」「断线补拉」
@@ -2087,6 +2276,22 @@ export function createWorkitemsRuntime(deps: {
               );
             }
           }
+        }
+        // DELEGATE D2.3：delegation_due 的桥层消费（与 wait_reminder 分支并排）——业务 guard（灯③需
+        // 静态对账真通过）+ resolveWait 唯一写口自动通过 + 群内通知。guard 不过/已 resolve/授权已撤 →
+        // 执行器内静默 return，催办照常。
+        if (event.kind === 'delegation_due') {
+          await runDelegationDue(
+            {
+              workitems,
+              notify: async (text) => {
+                if (anchorMsgId) await deps.sender.reply(anchorMsgId, text);
+                else deps.logger.warn({ workitemId }, 'delegation notify skipped: no anchor');
+              },
+              logger: deps.logger,
+            },
+            event,
+          );
         }
         // WS-7 交付清单：manifest_ready → 群内贴一张交付清单卡（每仓分支/diffstat/接手命令）。
         if (event.kind === 'manifest_ready' && anchorMsgId) {
