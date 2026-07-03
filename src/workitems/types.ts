@@ -63,6 +63,21 @@ export interface Wait {
   createdAt: number;
 }
 
+// DELEGATE D1: a standing pre-authorization row for one work item. The container never
+// interprets `reasons` — they are opaque strings matched byte-for-byte against open human
+// wait reasons (same neutrality as the openWaitReasons enrich). At most one active row per
+// item (upsert revokes the previous one); expiry/revocation are plain time/null comparisons.
+export interface Delegation {
+  id: number;
+  workitemId: string;
+  reasons: string[];
+  grantNote: string;
+  expiresAt: number;
+  createdBy: string;
+  createdAt: number;
+  revokedAt: number | null;
+}
+
 export interface Effect {
   id: number;
   workitemId: string;

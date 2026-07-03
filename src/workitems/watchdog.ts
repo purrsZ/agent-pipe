@@ -38,6 +38,10 @@ export class Watchdog {
   private interval: ReturnType<typeof setInterval> | undefined;
   // WS-1.2 防抖：workitemId → 首次观测到活性违反的时刻。恢复正常即删除；持续 ≥ grace 才报警。
   private readonly livenessViolations = new Map<string, number>();
+  // DELEGATE D1.3 节流：waitId → 上次 enqueue delegation_due 的时刻。消费方（桥层）resolve 失败/静默
+  // 跳过时每 delegationDelaySec 重发一次而非每 tick 重发（事件流不被灌爆）；重启丢失只是提早重发一次，
+  // 消费方幂等无害。wait 关闭后条目随 tick 清扫。
+  private readonly delegationNotified = new Map<string, number>();
 
   constructor(private readonly deps: WatchdogDeps) {}
 
@@ -57,12 +61,14 @@ export class Watchdog {
   private runTick(): void {
     const now = this.deps.clock.now();
     const stalled = new Map<string, StalledCandidate>();
+    const openHumanWaitIds = new Set<string>();
 
     for (const wait of this.deps.store.listOpenWaits()) {
       // WS-3: human wait 提醒不再看 deadline——系统在等人时必须会催。首催在 createdAt +
       // waitRemindAfterSec（默认 4h），之后每 waitRemindRepeatSec（默认 24h）复催。applyWaitReminder
       // 每次都刷新 remindedAt，故 due 随之滚动；deadline 过期自然被复催窗口覆盖（不再单独处理）。
       if (wait.kind === 'human') {
+        openHumanWaitIds.add(wait.id);
         const due =
           wait.remindedAt === null
             ? wait.createdAt + this.deps.cfg.waitRemindAfterSec * 1000
@@ -73,6 +79,10 @@ export class Watchdog {
             payload: { waitId: wait.id },
           });
         }
+        // DELEGATE D1.3：委托到点扫描（与催办同一循环，二者独立——催办照常）。纯机械判定：有生效授权行
+        // ∧ wait.reason ∈ 授权行的 reasons 字符串列表（opaque 逐字节匹配，零语义）∧ wait 年龄 ≥ 冷静期
+        // → enqueue 中性事件 delegation_due。业务判断（guard/白名单）全在桥层消费方。
+        this.scanDelegation(wait, now);
         continue;
       }
 
@@ -143,7 +153,27 @@ export class Watchdog {
       });
     }
 
+    // 已关闭/消失的 wait 的节流条目清扫（与 livenessViolations 的 O1 清扫同理，防慢性泄漏）。
+    for (const id of [...this.delegationNotified.keys()]) {
+      if (!openHumanWaitIds.has(id)) this.delegationNotified.delete(id);
+    }
+
     this.scanLiveness(now);
+  }
+
+  // DELEGATE D1.3：单条 human wait 的委托到点判定。首发 due = createdAt + delegationDelaySec（冷静期，
+  // D-3：灯卡先发、人在场可抢先手动）；发过后每 delegationDelaySec 重发一次（节流，消费失败自愈）。
+  private scanDelegation(
+    wait: { id: string; workitemId: string; reason: string; createdAt: number },
+    now: number,
+  ): void {
+    const grant = this.deps.store.activeDelegation(wait.workitemId, now);
+    if (!grant || !grant.reasons.includes(wait.reason)) return;
+    const last = this.delegationNotified.get(wait.id);
+    const due = (last ?? wait.createdAt) + this.deps.cfg.delegationDelaySec * 1000;
+    if (now < due) return;
+    this.delegationNotified.set(wait.id, now);
+    this.safeEnqueue(wait.workitemId, { kind: 'delegation_due', payload: { waitId: wait.id } });
   }
 
   // WS-1.2 活性不变式看门（D-D）：把「漏一个事件×相位分支 = 静默卡死」整类 bug 从真机暴露变成系统自曝。

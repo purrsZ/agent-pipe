@@ -368,6 +368,92 @@ describe('Watchdog.tick', () => {
     expect(logger.error).toHaveBeenCalled();
   });
 
+  // DELEGATE D1.3：委托到点扫描。全程 opaque reason（'r-a'），证明容器零语义——匹配是逐字节字符串比较。
+  describe('delegation_due (DELEGATE D1.3)', () => {
+    const DELAY_MS = 600 * 1000; // delegationDelaySec 默认 600s
+
+    function delegated(overrides: { reasons?: string[]; expiresAt?: number } = {}) {
+      const h = harness();
+      const item = createItem(h.api);
+      h.store.insertWait(
+        makeWait('wt-h', item.id, { kind: 'human', reason: 'r-a', createdAt: 1000 }),
+      );
+      h.store.upsertDelegation(item.id, {
+        reasons: overrides.reasons ?? ['r-a'],
+        grantNote: '/delegate 8h',
+        expiresAt: overrides.expiresAt ?? 1000 + 24 * 3_600 * 1000,
+        createdBy: 'u-1',
+      });
+      return { ...h, item };
+    }
+
+    const dueEvents = (store: WorkitemsStore, id: string) =>
+      store.listEvents(id).filter((e) => e.kind === 'delegation_due');
+
+    it('匹配授权 + 过冷静期 → 发 delegation_due（payload 带 waitId）；delay 内不发', () => {
+      const { store, watchdog, item } = delegated();
+
+      now = 1000 + DELAY_MS - 1; // 差 1ms 到冷静期
+      watchdog.tick();
+      expect(dueEvents(store, item.id)).toHaveLength(0);
+
+      now = 1000 + DELAY_MS;
+      watchdog.tick();
+      expect(dueEvents(store, item.id)).toHaveLength(1);
+      expect(dueEvents(store, item.id)[0]!.payload).toEqual({ waitId: 'wt-h' });
+      store.close();
+    });
+
+    it('未被消费时按 delay 间隔节流重发，而非每 tick 重发', () => {
+      const { store, watchdog, item } = delegated();
+      now = 1000 + DELAY_MS;
+      watchdog.tick();
+      watchdog.tick(); // 同一时刻再 tick 不重发
+      now += 1000;
+      watchdog.tick(); // 1s 后也不重发（节流窗口内）
+      expect(dueEvents(store, item.id)).toHaveLength(1);
+
+      now += DELAY_MS; // 过了一个节流窗口 → 重发（消费方 crash 自愈路径）
+      watchdog.tick();
+      expect(dueEvents(store, item.id)).toHaveLength(2);
+      store.close();
+    });
+
+    it('reason 不在授权列表 → 不发（opaque 逐字节匹配）', () => {
+      const { store, watchdog, item } = delegated({ reasons: ['r-other'] });
+      now = 1000 + DELAY_MS * 2;
+      watchdog.tick();
+      expect(dueEvents(store, item.id)).toHaveLength(0);
+      store.close();
+    });
+
+    it('授权已撤销 → 不发', () => {
+      const { store, watchdog, item } = delegated();
+      store.revokeDelegation(item.id);
+      now = 1000 + DELAY_MS * 2;
+      watchdog.tick();
+      expect(dueEvents(store, item.id)).toHaveLength(0);
+      store.close();
+    });
+
+    it('授权已到期 → 不发', () => {
+      const { store, watchdog, item } = delegated({ expiresAt: 1000 + DELAY_MS }); // 到期时刻 == 冷静期到点
+      now = 1000 + DELAY_MS * 2;
+      watchdog.tick();
+      expect(dueEvents(store, item.id)).toHaveLength(0);
+      store.close();
+    });
+
+    it('wait 已 resolve → 不发（催办同理），且节流条目被清扫', () => {
+      const { store, watchdog, item } = delegated();
+      store.updateWait('wt-h', { resolvedAt: 1500, resolvedBy: 'user', resolveReason: 'done' });
+      now = 1000 + DELAY_MS * 2;
+      watchdog.tick();
+      expect(dueEvents(store, item.id)).toHaveLength(0);
+      store.close();
+    });
+  });
+
   it('never drives a terminal workitem — no timer/agent/assignment spam (v4 #3)', () => {
     const { api, store, watchdog } = harness();
     const item = createItem(api);

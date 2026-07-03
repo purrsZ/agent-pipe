@@ -370,6 +370,8 @@ export class ReducerRuntime {
       this.deps.store.deleteParked(row.id);
       cleaned += 1;
     }
+    // DELEGATE D-5：单元终态顺带撤销委托授权（防僵尸行——终态单不该再有任何生效预授权）。
+    cleaned += this.deps.store.revokeDelegation(item.id);
     if (cleaned > 0) {
       this.appendAudit(item.id, 'terminal_cleanup', { resolved: cleaned });
     }

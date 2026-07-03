@@ -95,13 +95,13 @@ function tableNames(db: Database.Database): string[] {
 }
 
 describe('WorkitemsStore migration', () => {
-  it('creates an independent WAL sqlite database with the six workitem tables', () => {
+  it('creates an independent WAL sqlite database with the seven workitem tables', () => {
     const store = new WorkitemsStore(dbPath, clock);
     store.close();
 
     const db = new Database(dbPath);
     expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(
-      5,
+      6,
     );
     expect(
       db
@@ -130,6 +130,7 @@ describe('WorkitemsStore migration', () => {
     );
     expect(tableNames(db)).toEqual([
       'workitem_assignments',
+      'workitem_delegations',
       'workitem_effects',
       'workitem_events',
       'workitem_parked',
@@ -149,13 +150,85 @@ describe('WorkitemsStore migration', () => {
 
     const db = new Database(dbPath);
     expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(
-      5,
+      6,
     );
     const cols = (db.prepare('PRAGMA table_info(workitem_waits)').all() as { name: string }[]).map(
       (c) => c.name,
     );
     expect(cols).toContain('card_msg_id');
     db.close();
+  });
+
+  it('creates workitem_delegations (v6) and reopening an old库 twice is idempotent (DELEGATE D1)', () => {
+    // 老库（拿掉 delegations 表 + 回退版本号模拟 v5 库）重开两次——guarded 迁移幂等不炸。
+    new WorkitemsStore(dbPath, clock).close();
+    const old = new Database(dbPath);
+    old.exec('DROP TABLE workitem_delegations; PRAGMA user_version = 5;');
+    old.close();
+
+    new WorkitemsStore(dbPath, clock).close();
+    new WorkitemsStore(dbPath, clock).close();
+
+    const db = new Database(dbPath);
+    expect((db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(
+      6,
+    );
+    expect(
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type='table' AND name='workitem_delegations'",
+        )
+        .get(),
+    ).toMatchObject({ name: 'workitem_delegations' });
+    db.close();
+  });
+});
+
+describe('WorkitemsStore delegations (DELEGATE D1)', () => {
+  // 全程用 opaque reason 字符串（'r-a' 等），证明容器对内容零解释。
+  const grant = (over: Partial<Parameters<WorkitemsStore['upsertDelegation']>[1]> = {}) => ({
+    reasons: ['r-a', 'r-b'],
+    grantNote: '/delegate 8h',
+    expiresAt: 1000 + 8 * 3_600 * 1000,
+    createdBy: 'u-1',
+    ...over,
+  });
+
+  it('upsertDelegation 覆盖旧行：每单至多一条生效授权', () => {
+    const store = new WorkitemsStore(dbPath, clock);
+    store.insertWorkItem(item('wi-1'));
+    store.upsertDelegation('wi-1', grant());
+    store.upsertDelegation('wi-1', grant({ reasons: ['r-c'], grantNote: '/delegate 2h' }));
+
+    const active = store.activeDelegation('wi-1', 2000)!;
+    expect(active.reasons).toEqual(['r-c']);
+    expect(active.grantNote).toBe('/delegate 2h');
+    // 旧行被撤销而非删除（留痕可审计）：总行数 2，生效 1。
+    const db = new Database(dbPath);
+    const rows = db
+      .prepare('SELECT revoked_at FROM workitem_delegations WHERE workitem_id = ?')
+      .all('wi-1') as Array<{ revoked_at: number | null }>;
+    expect(rows).toHaveLength(2);
+    expect(rows.filter((r) => r.revoked_at === null)).toHaveLength(1);
+    db.close();
+    store.close();
+  });
+
+  it('activeDelegation 过滤：正常命中 / 已撤销不命中 / 已到期不命中 / 不串单', () => {
+    const store = new WorkitemsStore(dbPath, clock);
+    store.insertWorkItem(item('wi-1'));
+    store.insertWorkItem(item('wi-2'));
+    store.upsertDelegation('wi-1', grant({ expiresAt: 5000 }));
+
+    expect(store.activeDelegation('wi-1', 4999)?.createdBy).toBe('u-1');
+    expect(store.activeDelegation('wi-1', 5000)).toBeUndefined(); // 到期即失效（expires_at > now）
+    expect(store.activeDelegation('wi-2', 2000)).toBeUndefined(); // 不串单
+
+    store.upsertDelegation('wi-1', grant({ expiresAt: 9000 }));
+    expect(store.revokeDelegation('wi-1')).toBe(1);
+    expect(store.activeDelegation('wi-1', 2000)).toBeUndefined(); // 已撤销
+    expect(store.revokeDelegation('wi-1')).toBe(0); // 再撤无生效行
+    store.close();
   });
 });
 

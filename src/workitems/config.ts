@@ -17,6 +17,9 @@ export interface WorkitemsConfig {
   waitRemindAfterSec: number;
   // WS-3 提醒策略：human wait 复催间隔（秒，默认 24h）。
   waitRemindRepeatSec: number;
+  // DELEGATE D-3 冷静期：委托到点自动过不是秒过——wait open 后至少等这么久（秒，默认 10min）才触发
+  // delegation_due，灯卡照发、人在场可抢先手动处理。也作为触发未被消费时的重发间隔（节流）。
+  delegationDelaySec: number;
 }
 
 export type WorkitemsEnv = Partial<Record<string, string | undefined>>;
@@ -33,6 +36,7 @@ const DEFAULTS: WorkitemsConfig = {
   livenessGraceSec: 30,
   waitRemindAfterSec: 14_400,
   waitRemindRepeatSec: 86_400,
+  delegationDelaySec: 600,
 };
 
 function positiveInt(env: WorkitemsEnv, name: string, fallback: number): number {
@@ -86,6 +90,11 @@ export function loadWorkitemsConfig(env: WorkitemsEnv = process.env): WorkitemsC
       env,
       'WORKITEMS_WAIT_REMIND_REPEAT_SEC',
       DEFAULTS.waitRemindRepeatSec,
+    ),
+    delegationDelaySec: positiveInt(
+      env,
+      'WORKITEMS_DELEGATION_DELAY_SEC',
+      DEFAULTS.delegationDelaySec,
     ),
   };
 }

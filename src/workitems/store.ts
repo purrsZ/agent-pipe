@@ -5,6 +5,7 @@ import type {
   Assignment,
   AssignmentStatus,
   Clock,
+  Delegation,
   Effect,
   EffectStatus,
   Wait,
@@ -86,6 +87,17 @@ type DbEvent = {
   kind: string;
   payload_json: string | null;
   created_at: number;
+};
+
+type DbDelegation = {
+  id: number;
+  workitem_id: string;
+  reasons: string;
+  grant_note: string;
+  expires_at: number;
+  created_by: string;
+  created_at: number;
+  revoked_at: number | null;
 };
 
 type WaitPatch = Partial<
@@ -187,6 +199,21 @@ function toEvent(row: DbEvent): WorkItemEvent {
     kind: row.kind,
     payload: decodeJson(row.payload_json),
     createdAt: row.created_at,
+  };
+}
+
+function toDelegation(row: DbDelegation): Delegation {
+  const parsed = decodeJson(row.reasons);
+  return {
+    id: row.id,
+    workitemId: row.workitem_id,
+    // reasons 是 opaque JSON string[]（容器不解释内容）；坏行防御性回落空数组（匹配不到任何 wait，惰性无害）。
+    reasons: Array.isArray(parsed) ? parsed.filter((r): r is string => typeof r === 'string') : [],
+    grantNote: row.grant_note,
+    expiresAt: row.expires_at,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+    revokedAt: row.revoked_at,
   };
 }
 
@@ -383,6 +410,26 @@ export class WorkitemsStore {
       this.db.exec(`
         ALTER TABLE workitem_waits ADD COLUMN card_msg_id TEXT;
         PRAGMA user_version = 5;
+      `);
+    }
+    if (version < 6) {
+      // DELEGATE D1: 委托授权表——预授权必须持久化（重启存活），reasons 是容器不解释的 JSON string[]。
+      // 每单至多一条生效行（upsertDelegation 先 revoke 再 insert）；部分索引只覆盖未撤销行（watchdog 每
+      // tick 按 workitem_id 查生效授权）。CREATE ... IF NOT EXISTS 幂等。
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS workitem_delegations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          workitem_id TEXT NOT NULL,
+          reasons TEXT NOT NULL,
+          grant_note TEXT NOT NULL,
+          expires_at INTEGER NOT NULL,
+          created_by TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          revoked_at INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_delegations_active
+          ON workitem_delegations(workitem_id) WHERE revoked_at IS NULL;
+        PRAGMA user_version = 6;
       `);
     }
   }
@@ -727,6 +774,47 @@ export class WorkitemsStore {
 
   deleteParked(id: number): void {
     this.db.prepare('DELETE FROM workitem_parked WHERE id = ?').run(id);
+  }
+
+  // DELEGATE D1：写入一条委托授权。每单至多一条生效行——先 revoke 该单现存生效行再 insert（事务内），
+  // 新授权天然覆盖旧的。reasons 为 opaque string[]（容器不解释），JSON 序列化落库。
+  upsertDelegation(
+    workitemId: string,
+    input: { reasons: string[]; grantNote: string; expiresAt: number; createdBy: string },
+  ): void {
+    this.tx(() => {
+      this.revokeDelegation(workitemId);
+      this.stmt(
+        `INSERT INTO workitem_delegations (
+          workitem_id, reasons, grant_note, expires_at, created_by, created_at
+        ) VALUES (@workitemId, @reasons, @grantNote, @expiresAt, @createdBy, @createdAt)`,
+      ).run({
+        workitemId,
+        reasons: JSON.stringify(input.reasons),
+        grantNote: input.grantNote,
+        expiresAt: input.expiresAt,
+        createdBy: input.createdBy,
+        createdAt: this.clock.now(),
+      });
+    });
+  }
+
+  // 该单当前生效的授权：未撤销且未到期（到期即失效，无需显式清理）。
+  activeDelegation(workitemId: string, now: number): Delegation | undefined {
+    const row = this.stmt(
+      `SELECT * FROM workitem_delegations
+       WHERE workitem_id = ? AND revoked_at IS NULL AND expires_at > ?
+       ORDER BY id DESC LIMIT 1`,
+    ).get(workitemId, now) as DbDelegation | undefined;
+    return row ? toDelegation(row) : undefined;
+  }
+
+  // 撤销该单全部生效授权（/delegate off · upsert 覆盖 · 终态清理三处共用）。返回撤销行数。
+  revokeDelegation(workitemId: string): number {
+    const result = this.stmt(
+      'UPDATE workitem_delegations SET revoked_at = ? WHERE workitem_id = ? AND revoked_at IS NULL',
+    ).run(this.clock.now(), workitemId);
+    return result.changes;
   }
 
   appendEvent(workitemId: string, seq: number, kind: string, payload?: unknown): number {
