@@ -134,21 +134,26 @@ describe('Watchdog.tick', () => {
     store.close();
   });
 
-  it('ignores resolved waits when their deadline arrives later', () => {
+  it('resolved 的 wait 即使过了催办窗口也不催（WS-3 §3.4，审查修复 T5）', () => {
     const { api, store, watchdog } = harness();
     const item = createItem(api);
-    const wait = makeWait('wt-resolved', item.id, {
-      kind: 'human',
-      deadlineAt: 1000,
-      resolvedAt: 900,
-      resolvedBy: 'user',
-      resolveReason: 'done',
-    });
-    store.insertWait(wait);
+    // 一条已 resolved 的 human wait（createdAt=1000）。
+    store.insertWait(
+      makeWait('wt-resolved', item.id, {
+        kind: 'human',
+        createdAt: 1000,
+        deadlineAt: 1000,
+        resolvedAt: 1000,
+        resolvedBy: 'user',
+        resolveReason: 'done',
+      }),
+    );
 
+    // 推进到远超首催窗口（createdAt + 4h）——未 resolve 的 wait 此刻必被催，以此暴露 resolved 守卫是否真生效。
+    now = 1000 + 5 * 3_600 * 1000;
     watchdog.tick();
 
-    expect(store.listEvents(item.id).map((event) => event.kind)).toEqual(['workitem_created']);
+    expect(store.listEvents(item.id).filter((e) => e.kind === 'wait_reminder')).toHaveLength(0);
     store.close();
   });
 

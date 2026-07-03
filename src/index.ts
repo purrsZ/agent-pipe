@@ -367,6 +367,44 @@ export function deliverGateNote(events: WorkItemEvent[]): string | undefined {
     : '✅ 静态跨仓对账通过';
 }
 
+// WS-10.3（审查修复 T3）：把「open human wait 的 reason → 出哪张专属卡」的判定抽成纯函数——surfaceCheckpoints
+// 按它分发，case-file 全覆盖断言据此钉死「每个会 raise 的 human wait reason 都有卡」（新 reason 忘配卡 →
+// 返回 null → 测试红，无卡暗仓防线长牙）。gatekeeper_big 也有 caseFileLabel，故须在 case-file 之前判定。
+export function waitCardKindFor(
+  reason: string,
+): 'closure' | 'cancel-confirm' | 'checkpoint' | 'gatekeeper-big' | 'case-file' | null {
+  if (reason === 'awaiting_close') return 'closure';
+  if (reason === 'cancel_confirm') return 'cancel-confirm';
+  if (checkpointBoundaryOf(reason) !== undefined) return 'checkpoint';
+  if (reason === 'gatekeeper_big') return 'gatekeeper-big';
+  if (caseFileLabel(reason) !== undefined) return 'case-file';
+  return null;
+}
+
+// WS-5 意见回灌（审查修复 T1，抽出为可测）：拍板/打回时把操作员在卡片输入框写的意见作为一条 human_message
+// 注入，供下一轮 run（灯③ 打回派的 steer / rework worker）在 batch 窗口内消费。仅在 wait 仍 open 时注入——防
+// 卡片双击把同一意见注入两遍（第二击 wait 已 resolved）。调用方须在 resolveWait 之前调它（D-E 的 seq 保证：
+// 注入落在 resolve 引发的后续 dispatch effect 之前）。返回是否注入。
+export function applyCheckpointOpinion(deps: {
+  workitems: {
+    store: { getWait(id: string): { resolvedAt: number | null } | undefined };
+    api: { injectHumanMessage(itemId: string, msg: { text: string }): void };
+  };
+  itemId: string;
+  waitId: string;
+  approved: boolean;
+  opinion: string;
+}): boolean {
+  const { workitems, itemId, waitId, approved, opinion } = deps;
+  if (opinion && workitems.store.getWait(waitId)?.resolvedAt === null) {
+    workitems.api.injectHumanMessage(itemId, {
+      text: `【${approved ? '拍板意见' : '打回意见'}】${opinion}`,
+    });
+    return true;
+  }
+  return false;
+}
+
 // WS-9：AUQ 表单答案组装（bridge task 与 workitem run 两条回灌路径共用，避免两份逻辑漂移）。每题 input
 // 自定义优先、否则下拉 select、都空则占位；lines = 喂回 agent 的完整文本，brief = 卡片补丁的简报。纯函数。
 export function assembleAuqAnswers(
@@ -1538,13 +1576,9 @@ async function main() {
     const approved = value.approved === true;
     const rawOpinion = (action.formValue as { opinion?: unknown } | undefined)?.opinion;
     const opinion = typeof rawOpinion === 'string' ? rawOpinion.trim() : '';
-    // 仅在该 wait 仍 open 时注入——防卡片双击/重复点击把同一意见注入两遍（第二击时 wait 已 resolved，
-    // resolveWait 幂等返回未解析，但注入无幂等，故在此加门）。首击时 wait 未 resolve → 注入先于 resolve。
-    if (opinion && workitems.store.getWait(waitId)?.resolvedAt === null) {
-      workitems.api.injectHumanMessage(itemId, {
-        text: `【${approved ? '拍板意见' : '打回意见'}】${opinion}`,
-      });
-    }
+    // WS-5 意见回灌：抽出为可测的 applyCheckpointOpinion。注入须在下方 resolveWait 之前调用（D-E 的 seq
+    // 保证：注入落在 resolve 引发的后续 dispatch effect 之前），且它内部只在 wait 仍 open 时注入（防双击）。
+    applyCheckpointOpinion({ workitems, itemId, waitId, approved, opinion });
     const reason = opinion || (approved ? '飞书拍板：通过' : '飞书拍板：打回，请按反馈修改');
     // 监工判大三按钮把 value.action（rework/proceed）透传进 decision.payload，worktype 据此路由（走 resolveWait
     // 单写口，与 cancel 分支同源）；其余检查点走 workbenchAdapter（板与飞书共用同一口）。
@@ -1936,31 +1970,19 @@ export function createWorkitemsRuntime(deps: {
   ): Promise<void> => {
     for (const w of workitems.store.listOpenWaits(workitemId)) {
       if (w.kind !== 'human' || w.cardMsgId !== null) continue;
-      // WS-7.7 灯④：交付待关单卡（awaiting_close 非 checkpoint 非病历，需专属分支——之前「走别的路径」是空头）。
-      if (w.reason === 'awaiting_close') {
-        const closeCard = buildClosureCard({ title }, { itemId: workitemId, waitId: w.id });
-        const postedClose = await deps.sender.replyCard(anchorMsgId, closeCard);
-        if (postedClose) workitems.store.updateWait(w.id, { cardMsgId: postedClose });
-        continue;
-      }
-      // WS-10.9 取消确认卡（cancel_confirm 也非 checkpoint 非病历，之前「走别的路径」同样是空头）。
-      if (w.reason === 'cancel_confirm') {
-        const cancelCard = buildCancelConfirmCard(title, { itemId: workitemId, waitId: w.id });
-        const postedCancel = await deps.sender.replyCard(anchorMsgId, cancelCard);
-        if (postedCancel) workitems.store.updateWait(w.id, { cardMsgId: postedCancel });
-        continue;
-      }
-      const boundary = checkpointBoundaryOf(w.reason);
-      // 关卡灯(checkpoint:*) → 灯卡(通过/打回)；病历(对账冲突/监工判大/执行报错/集成未决) → 病历卡
-      // (已处理·继续/取消整单)。二者皆非 → 跳过。
-      const caseLabel = boundary ? undefined : caseFileLabel(w.reason);
-      if (!boundary && !caseLabel) continue;
-      const detail = boundary
-        ? undefined
-        : caseFileDetail(workitems.api.listEvents(workitemId), w.reason);
+      // WS-10.3：选卡判定收敛到 waitCardKindFor（纯函数，全覆盖断言据此钉死每个 reason 都有专属卡）。
+      const cardKind = waitCardKindFor(w.reason);
+      if (cardKind === null) continue; // 非关卡灯 / 非病历 / 无专属卡 → 跳过
       let card: object;
-      if (boundary) {
-        // WS-7.3 灯③ 厚化：交付 gate 卡带「静态对账是否生效」的证据 note，人拍板有据。
+      if (cardKind === 'closure') {
+        // WS-7.7 灯④：交付待关单卡。
+        card = buildClosureCard({ title }, { itemId: workitemId, waitId: w.id });
+      } else if (cardKind === 'cancel-confirm') {
+        // WS-10.9 取消确认卡。
+        card = buildCancelConfirmCard(title, { itemId: workitemId, waitId: w.id });
+      } else if (cardKind === 'checkpoint') {
+        // 关卡灯(checkpoint:*) → 灯卡(通过/打回)。WS-7.3 灯③ 厚化：交付 gate 卡带对账证据 note，人拍板有据。
+        const boundary = checkpointBoundaryOf(w.reason)!;
         const note =
           boundary === PHASE.deliver
             ? deliverGateNote(workitems.api.listEvents(workitemId))
@@ -1969,15 +1991,18 @@ export function createWorkitemsRuntime(deps: {
           { title, gateLabel: checkpointGateLabel(boundary), rail: checkpointRail(boundary), note },
           { itemId: workitemId, waitId: w.id, boundary },
         );
-      } else if (w.reason === 'gatekeeper_big') {
+      } else if (cardKind === 'gatekeeper-big') {
         // WS-5：监工判大用三按钮卡（已改图纸·重对账并返工 / 无需改·放行 / 取消整单），红线出口不再只有放行。
+        const detail = caseFileDetail(workitems.api.listEvents(workitemId), w.reason);
         card = buildGatekeeperBigCard(
-          { title, label: caseLabel!, detail },
+          { title, label: caseFileLabel(w.reason)!, detail },
           { itemId: workitemId, waitId: w.id },
         );
       } else {
+        // 病历(对账冲突/执行报错/集成未决/…) → 病历卡(已处理·继续/取消整单)。
+        const detail = caseFileDetail(workitems.api.listEvents(workitemId), w.reason);
         card = buildCaseFileCard(
-          { title, label: caseLabel!, detail },
+          { title, label: caseFileLabel(w.reason)!, detail },
           { itemId: workitemId, waitId: w.id },
         );
       }

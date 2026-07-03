@@ -10,8 +10,12 @@ import { ReducerRuntime } from '../../src/workitems/reducer.js';
 import { WorkTypeRegistry } from '../../src/workitems/registry.js';
 import { WorkitemsStore } from '../../src/workitems/store.js';
 import { registerRequirement } from '../../src/worktypes/requirement/index.js';
-import { createGatekeeperReviewHandler } from '../../src/worktypes/requirement/gatekeeper.js';
+import {
+  createGatekeeperReviewHandler,
+  createGatekeeperReworkHandler,
+} from '../../src/worktypes/requirement/gatekeeper.js';
 import { createIntakeFinalizeHandler } from '../../src/worktypes/requirement/intake-finalize.js';
+import { foldIntake, isGateReady } from '../../src/worktypes/requirement/intake.js';
 import { createIntegrationCheckHandler } from '../../src/worktypes/requirement/integration.js';
 import { PHASE } from '../../src/worktypes/requirement/phases.js';
 import { createReconcileCheckHandler } from '../../src/worktypes/requirement/reconcile.js';
@@ -101,8 +105,10 @@ function harness(
         ctx.writeArtifact('contract/reconcile.json', opts.reconcileJson, 'reconcile');
       }
       // 模拟工人「疑则上报」：指定仓的 worker 报告末尾带一个跨仓 ```gatekeeper 块（interfaceId 非空 → 判大）。
+      // rework 轮（人已改图纸后返工）的 repo worker 不再上报同一跨仓疑问 → 监工放行 → 链条得以收敛（T2）。
+      const raiseStage = (ctx.effect.payload as { stage?: string } | undefined)?.stage;
       const raise =
-        repo && opts.raiseRepo && repo === opts.raiseRepo
+        repo && opts.raiseRepo && repo === opts.raiseRepo && raiseStage !== 'rework'
           ? `\n\`\`\`gatekeeper\n${JSON.stringify({ raises: [{ interfaceId: 'createOrder', question: '要给 createOrder 加字段', repo }] })}\n\`\`\`\n`
           : '';
       // WS-2：owner steer run 产带 ```steer 块的报告（模拟包工头结构化指令）。
@@ -120,6 +126,8 @@ function harness(
   effects.registerHandler(createSteerApplyHandler());
   // 并行实现阶段监工科层判定 effect（扫工人上报；stub 工人无 ```gatekeeper 块 → 放行）。
   effects.registerHandler(createGatekeeperReviewHandler());
+  // WS-5：监工判大 + 人裁「返工」后的重对账通过 → gatekeeper_rework effect emit rework_requested（定向返工）。
+  effects.registerHandler(createGatekeeperReworkHandler());
   // 集成验证 effect: with no cross-repo contract in this skeleton run it emits passed (no_contract).
   effects.registerHandler(createIntegrationCheckHandler());
   // 立项收尾 effect: 立项 gate 通过 → 落立项书 + 提升 repos（emit repos_set）。
@@ -301,6 +309,52 @@ describe('requirement skeleton end-to-end', () => {
     expect(intakeGates()).toHaveLength(1);
   });
 
+  it('立项: gate open 后填第 2 仓使 ready 翻 false，补 prd/acceptance 复真，全程复用同一 open wait（spec 6.1，审查修复 T4）', async () => {
+    const { store, api } = harness();
+    const item = api.createWorkItem({
+      type: 'requirement',
+      title: 'gate-ready-flip',
+      source: {},
+      repos: [],
+    }).item;
+
+    // 单仓料齐（prd/acceptance 是 multi-conditional，单仓不必填）→ 立项 gate open。
+    const singleRepo = [
+      { key: 'name', value: 'n' },
+      { key: 'summary', value: 's' },
+      { key: 'repos', value: ['repo-a'] },
+    ];
+    for (const f of singleRepo) api.injectIntakeField(item.id, f);
+    const gates = () =>
+      store.listOpenWaits(item.id).filter((w) => w.reason === `checkpoint:${PHASE.split}`);
+    await waitFor(() => expect(gates()).toHaveLength(1));
+    const waitId = gates()[0]!.id;
+    expect(isGateReady(foldIntake(singleRepo))).toBe(true);
+
+    // 填第 2 仓 → prd/acceptance 变必填、未填 → ready 翻 false；gate wait 不撤回不重弹（仍同一 waitId）。
+    api.injectIntakeField(item.id, { key: 'repos', value: ['repo-a', 'repo-b'] });
+    const twoRepo = [
+      { key: 'name', value: 'n' },
+      { key: 'summary', value: 's' },
+      { key: 'repos', value: ['repo-a', 'repo-b'] },
+    ];
+    expect(isGateReady(foldIntake(twoRepo))).toBe(false);
+    expect(gates()).toHaveLength(1);
+    expect(gates()[0]!.id).toBe(waitId);
+
+    // 补 prd + acceptance → ready 复真，仍是同一 open wait（不重弹）。
+    api.injectIntakeField(item.id, { key: 'prd', value: 'p' });
+    api.injectIntakeField(item.id, { key: 'acceptance', value: 'a' });
+    const filled = [...twoRepo, { key: 'prd', value: 'p' }, { key: 'acceptance', value: 'a' }];
+    expect(isGateReady(foldIntake(filled))).toBe(true);
+    expect(gates()).toHaveLength(1);
+    expect(gates()[0]!.id).toBe(waitId);
+
+    // resolve → 进拆解（正常推进）。
+    api.resolveWait(waitId, { operator: 'lichao', reason: 'go', decision: { approved: true } });
+    await waitFor(() => expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.split));
+  });
+
   it('立项: repos 收齐后提升进 workitem.repos（/req 不带 --repo 的头号坑）', async () => {
     const { store, api } = harness();
     const item = api.createWorkItem({
@@ -474,6 +528,61 @@ describe('requirement skeleton end-to-end', () => {
     // 人裁决（已改图纸/返工）resolve 病历 → 继续 assess → 集成 → 灯③。
     const wait = store.listOpenWaits(item.id).find((w) => w.reason === 'gatekeeper_big')!;
     api.resolveWait(wait.id, { operator: 'lichao', reason: 'fixed', decision: { approved: true } });
+    await waitFor(() =>
+      expect(
+        store.listOpenWaits(item.id).some((w) => w.reason === `checkpoint:${PHASE.deliver}`),
+      ).toBe(true),
+    );
+  });
+
+  it('WS-5 监工判大 → 裁「返工」→ owner 重对账 → rework_requested → 定向 rework worker → 收敛灯③（审查修复 T2）', async () => {
+    const { store, api } = harness({ raiseRepo: 'repo-a' });
+    const item = api.createWorkItem({
+      type: 'requirement',
+      title: '监工返工链',
+      source: {},
+      repos: ['repo-a', 'repo-b'],
+    }).item;
+    await walkThroughIntake(store, api, item.id); // 双仓满配
+
+    // repo-a worker 上报跨仓（interfaceId 非空）→ gatekeeper_big wait open。
+    await waitFor(() =>
+      expect(store.listOpenWaits(item.id).some((w) => w.reason === 'gatekeeper_big')).toBe(true),
+    );
+    const wait = store.listOpenWaits(item.id).find((w) => w.reason === 'gatekeeper_big')!;
+
+    // 人裁「已改图纸·返工」→ decision.payload.action='rework' → 派 owner 重对账（reconcile_passed@implement）。
+    api.resolveWait(wait.id, {
+      operator: 'lichao',
+      reason: '已改图纸',
+      decision: { approved: true, payload: { reason: '已改图纸', action: 'rework' } },
+    });
+
+    // reconcile_passed@implement → gatekeeper_rework effect → rework_requested；repo-a 定向重派 worker(stage=rework)。
+    await waitFor(() =>
+      expect(api.listEvents(item.id).some((e) => e.kind === 'rework_requested')).toBe(true),
+    );
+    // Assignment 行不存 stage（那是 dispatch spec 字段）；定向返工体现为 repo-a 出现「第二个」worker
+    // assignment（初始轮已 done + 返工轮）。
+    await waitFor(() =>
+      expect(
+        store.listAssignments(item.id).filter((a) => a.role === 'worker' && a.repo === 'repo-a')
+          .length,
+      ).toBeGreaterThanOrEqual(2),
+    );
+
+    // stub 局限：gatekeeper_review 重扫全部历史 run report，初始轮 repo-a 的上报块仍在 → rework 完成后会
+    // 再判大一次（真实场景工人新 report 覆盖旧的、监工只看当轮）。第二次以「无需改·放行」收口，验证链条最终
+    // 收敛到灯③（本用例的重点是上面的 rework 链：owner 重对账 → rework_requested → 定向重派 worker）。
+    await waitFor(() =>
+      expect(store.listOpenWaits(item.id).some((w) => w.reason === 'gatekeeper_big')).toBe(true),
+    );
+    const wait2 = store.listOpenWaits(item.id).find((w) => w.reason === 'gatekeeper_big')!;
+    api.resolveWait(wait2.id, {
+      operator: 'lichao',
+      reason: '无需改',
+      decision: { approved: true },
+    });
     await waitFor(() =>
       expect(
         store.listOpenWaits(item.id).some((w) => w.reason === `checkpoint:${PHASE.deliver}`),

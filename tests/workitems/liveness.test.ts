@@ -168,6 +168,25 @@ describe('WS-1.2 watchdog 活性不变式扫描', () => {
     expect(stalledCount(store, item.id)).toBe(0);
   });
 
+  it('有 pending effect → 不报警（是活路，审查修复 T6：liveness 第三条 alive 分支）', () => {
+    const { api, store, watchdog } = harness();
+    const item = api.createWorkItem({ type: 'requirement', title: 't', source: {} }).item;
+    store.updateWorkItem(item.id, { phase: PHASE.implement, updatedAt: now });
+    // 无 assignment / 无 open wait，但有一条 pending effect（在途工作）→ listInflightEffects 非空。
+    store.insertEffect({
+      workitemId: item.id,
+      seq: 1,
+      kind: 'run',
+      payload: {},
+      status: 'pending',
+      createdAt: now,
+      updatedAt: now,
+    });
+    now += 61_000;
+    watchdog.tick();
+    expect(stalledCount(store, item.id)).toBe(0);
+  });
+
   it('终态单不报警（listNonTerminal 已排除）', () => {
     const { api, store, watchdog } = harness();
     const item = api.createWorkItem({ type: 'requirement', title: 't', source: {} }).item;

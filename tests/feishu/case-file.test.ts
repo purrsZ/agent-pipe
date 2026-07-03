@@ -6,6 +6,7 @@ import {
   caseFileLabel,
   deliverGateNote,
   humanizeMs,
+  waitCardKindFor,
 } from '../../src/index.js';
 
 // 病历(非 checkpoint 的 human wait)→ 飞书卡标签/详情的桥层纯核心（B：病历飞书出口）。
@@ -109,6 +110,25 @@ describe('caseFileDetail', () => {
     expect(caseFileDetail(events, 'steer_escalated')).toBe('用户要求超出范围，请裁决');
   });
 
+  // WS-10.2（审查修复 T9）：病历详情带上受影响仓。注意 caseFileDetail 仅在主详情（detail/question）
+  // 非空时才追加「（涉及：仓）」，故 payload 同时给主详情 + 仓。
+  it('reconcile_conflict 带仓 → detail 含「涉及：」与两仓名', () => {
+    const events = [
+      ev('reconcile_conflict', { unresolved: [{ detail: '契约漂移', repos: ['a', 'b'] }] }),
+    ];
+    const detail = caseFileDetail(events, 'reconcile_conflict');
+    expect(detail).toContain('涉及：');
+    expect(detail).toContain('a');
+    expect(detail).toContain('b');
+  });
+
+  it('gatekeeper_big 带仓 → detail 含仓名 x', () => {
+    const events = [
+      ev('gatekeeper_big', { raises: [{ question: '要改 createOrder 字段', repo: 'x' }] }),
+    ];
+    expect(caseFileDetail(events, 'gatekeeper_big')).toContain('x');
+  });
+
   it('抽不到 → undefined（永不抛）', () => {
     expect(caseFileDetail([], 'reconcile_conflict')).toBeUndefined();
     expect(caseFileDetail([ev('run_failed', {})], 'run_failed')).toBeUndefined();
@@ -130,5 +150,30 @@ describe('deliverGateNote (WS-7.3 灯③ 证据 note，审查修复 F3)', () => 
     expect(deliverGateNote([ev('integration_check_passed', { reason: 'no_contract' })])).toContain(
       '静态跨仓对账未生效',
     );
+  });
+});
+
+describe('waitCardKindFor 全覆盖（审查修复 T3：每个会 raise 的 human wait reason 都有专属卡）', () => {
+  it('枚举所有会 raise 的 reason → 返回精确 cardKind（新 reason 忘配卡即返回 null → 测试红）', () => {
+    const cases: Array<[string, ReturnType<typeof waitCardKindFor>]> = [
+      ['checkpoint:requirement:交付', 'checkpoint'],
+      ['reconcile_conflict', 'case-file'],
+      ['gatekeeper_big', 'gatekeeper-big'], // 也有 caseFileLabel，须在 case-file 之前判定
+      ['run_failed', 'case-file'],
+      ['integration_unresolved', 'case-file'],
+      ['retry_exhausted', 'case-file'],
+      ['thrash', 'case-file'],
+      ['stalled_no_path', 'case-file'],
+      ['steer_escalated', 'case-file'],
+      ['cancel_confirm', 'cancel-confirm'],
+      ['awaiting_close', 'closure'],
+    ];
+    for (const [reason, expected] of cases) {
+      expect(waitCardKindFor(reason), reason).toBe(expected);
+    }
+  });
+
+  it('未知 reason → null（surfaceCheckpoints 跳过发卡）', () => {
+    expect(waitCardKindFor('some_unknown_reason')).toBeNull();
   });
 });

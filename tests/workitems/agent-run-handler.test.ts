@@ -386,4 +386,37 @@ describe('agent-run handler (WI-2)', () => {
     await handler.run(rec.ctx);
     expect(ends).toEqual([{ outcome: 'aborted', report: undefined }]);
   });
+
+  it('forwards onAskUser to the progress sink with assignmentId/workitemId/title/questions (WS-9, 审查修复 T8)', async () => {
+    const asks: Array<{
+      assignmentId: string;
+      workitemId: string;
+      title: string;
+      questions: unknown;
+    }> = [];
+    const questions = [{ question: '选配色', options: [{ label: 'A' }, { label: 'B' }] }];
+    const { pool } = fakePool((_t, _text, callbacks) => {
+      // agent 中途 AskUserQuestion → runner 触发 onAskUser（run 照常收尾）。
+      callbacks?.onAskUser?.('tid', { toolUseId: 'tu-1', questions });
+      return { fullText: 'r', sessionId: 's' } as TurnResult;
+    });
+    const { store } = fakeStore();
+    const rec = makeCtx({});
+    const handler = createAgentRunHandler({
+      pool,
+      kernelStore: store,
+      defaultCwd: tmpDir,
+      progress: {
+        onRunStart: () => {},
+        onText: () => {},
+        onToolUse: () => {},
+        onRunEnd: () => {},
+        onAskUser: (i) => asks.push(i),
+      },
+    });
+    await handler.run(rec.ctx);
+    expect(asks).toEqual([
+      { assignmentId: 'as-1', workitemId: 'wi-1', title: '看看 src 里有几个 runner', questions },
+    ]);
+  });
 });
