@@ -217,7 +217,7 @@ describe('buildCheckpointCard (T3 灯卡)', () => {
 describe('buildCaseFileCard (病历卡)', () => {
   const routing = { itemId: 'wi-1', waitId: 'wt-9' };
 
-  it('red header, label+detail, WS-5 form+opinion + 已处理·继续 / 取消整单 两 submit 按钮(取消带 cancel:true)', () => {
+  it('red header, label+detail, WS-5 form+opinion + 已处理·继续 / 终止需求 两 submit 按钮(取消带 cancel:true)', () => {
     const card = buildCaseFileCard(
       { title: '自定义菜品备注', label: '跨仓对账 · 冲突/悬空', detail: '后端仓未列入' },
       routing,
@@ -227,7 +227,7 @@ describe('buildCaseFileCard (病历卡)', () => {
     expect(json).toContain('跨仓对账 · 冲突/悬空');
     expect(json).toContain('后端仓未列入');
     expect(json).toContain('已处理');
-    expect(json).toContain('取消整单');
+    expect(json).toContain('终止需求');
 
     expect(formInputNames(card)).toContain('opinion');
     const buttons = formButtons(card);
@@ -251,7 +251,7 @@ describe('buildCaseFileCard (病历卡)', () => {
     });
   });
 
-  it('parseCardAction round-trips the 取消整单 button (handler reads cancel:true back)', () => {
+  it('parseCardAction round-trips the 终止需求 button (handler reads cancel:true back)', () => {
     const card = buildCaseFileCard({ title: 't', label: '监工 · 跨仓外溢' }, routing) as {
       body: { elements: Array<Record<string, unknown>> };
     };
@@ -272,13 +272,13 @@ describe('buildCaseFileCard (病历卡)', () => {
 });
 
 describe('buildCancelConfirmCard (WS-10.9 取消确认卡)', () => {
-  it('red，确认取消/继续推进 两 callback 按钮', () => {
+  it('red，确认终止/继续推进 两 callback 按钮', () => {
     const card = buildCancelConfirmCard('订单导出', { itemId: 'wi-1', waitId: 'wt-9' }) as {
       header: { template: string };
       body: { elements: Array<Record<string, unknown>> };
     };
     expect(card.header.template).toBe('red');
-    expect(JSON.stringify(card)).toContain('确认取消整单');
+    expect(JSON.stringify(card)).toContain('确认终止需求');
     const buttons = card.body.elements.filter((e) => e.tag === 'button');
     expect(buttons).toHaveLength(2);
     const values = buttons.map(
@@ -322,7 +322,7 @@ describe('buildClosureCard (WS-7 灯④ 关单卡)', () => {
 describe('buildGatekeeperBigCard (WS-5 监工判大三按钮)', () => {
   const routing = { itemId: 'wi-1', waitId: 'wt-9' };
 
-  it('三 submit 按钮(重对账并返工 action=rework / 放行 proceed / 取消整单) + opinion 输入框', () => {
+  it('三 submit 按钮(重对账并返工 action=rework / 放行 proceed / 终止需求) + opinion 输入框', () => {
     const card = buildGatekeeperBigCard(
       { title: '订单导出', label: '监工 · 跨仓外溢', detail: '要给 createOrder 加字段' },
       routing,
@@ -349,12 +349,12 @@ describe('buildGatekeeperBigCard (WS-5 监工判大三按钮)', () => {
 });
 
 describe('buildCaseFileAnsweredCard (病历卡终态)', () => {
-  it('grey 已取消整单 when cancelled', () => {
+  it('grey 已终止需求 when cancelled', () => {
     const card = buildCaseFileAnsweredCard('t', '跨仓对账', true) as {
       header: { template: string };
     };
     expect(card.header.template).toBe('grey');
-    expect(JSON.stringify(card)).toContain('已取消整单');
+    expect(JSON.stringify(card)).toContain('已终止需求');
   });
   it('green 已处理·继续 when not cancelled', () => {
     const card = buildCaseFileAnsweredCard('t', '监工', false) as { header: { template: string } };

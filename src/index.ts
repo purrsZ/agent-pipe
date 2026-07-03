@@ -1559,11 +1559,11 @@ async function main() {
       }
     };
 
-    // 病历「取消整单」：resolve wait 带 cancel 决策 → onWaitResolved 认出 isCancelDecision → terminal cancelled。
+    // 病历「终止需求」：resolve wait 带 cancel 决策 → onWaitResolved 认出 isCancelDecision → terminal cancelled。
     if (value.cancel === true) {
       const r = workitems.api.resolveWait(waitId, {
         operator: action.operatorId,
-        reason: '飞书：取消整单',
+        reason: '飞书：终止需求',
         decision: { approved: true, payload: { action: 'cancel' } },
       });
       await patch(buildCaseFileAnsweredCard(title, caseLabel || '病历', r.resolved));
@@ -1628,7 +1628,7 @@ async function main() {
     return undefined;
   };
 
-  // WS-10.8：群里发 /cancel 发起取消整单（修死代码——以 / 开头的消息先进 commands.dispatch，早于 managed 路由，
+  // WS-10.8：群里发 /cancel 发起终止需求（修死代码——以 / 开头的消息先进 commands.dispatch，早于 managed 路由，
   // 故 worktype 的 /cancel 分支从飞书路径本是死代码）。找不到 managed 单 → 提示；终态 → 复用「已结束」文案；
   // 否则 injectHumanMessage('/cancel') → worktype raise cancel_confirm → surfaceCheckpoints 出确认卡。
   async function onCancelUnit(msg: IncomingMessage): Promise<void> {
@@ -1992,14 +1992,14 @@ export function createWorkitemsRuntime(deps: {
           { itemId: workitemId, waitId: w.id, boundary },
         );
       } else if (cardKind === 'gatekeeper-big') {
-        // WS-5：监工判大用三按钮卡（已改图纸·重对账并返工 / 无需改·放行 / 取消整单），红线出口不再只有放行。
+        // WS-5：监工判大用三按钮卡（已改图纸·重对账并返工 / 无需改·放行 / 终止需求），红线出口不再只有放行。
         const detail = caseFileDetail(workitems.api.listEvents(workitemId), w.reason);
         card = buildGatekeeperBigCard(
           { title, label: caseFileLabel(w.reason)!, detail },
           { itemId: workitemId, waitId: w.id },
         );
       } else {
-        // 病历(对账冲突/执行报错/集成未决/…) → 病历卡(已处理·继续/取消整单)。
+        // 病历(对账冲突/执行报错/集成未决/…) → 病历卡(已处理·继续/终止需求)。
         const detail = caseFileDetail(workitems.api.listEvents(workitemId), w.reason);
         card = buildCaseFileCard(
           { title, label: caseFileLabel(w.reason)!, detail },

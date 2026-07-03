@@ -692,7 +692,7 @@ export function buildCancelConfirmCard(title: string, routing: CaseFileCardRouti
     schema: '2.0',
     header: {
       template: 'red',
-      title: { tag: 'plain_text', content: `确认取消整单 · ${head}` },
+      title: { tag: 'plain_text', content: `确认终止需求 · ${head}` },
     },
     body: {
       direction: 'vertical',
@@ -700,9 +700,9 @@ export function buildCancelConfirmCard(title: string, routing: CaseFileCardRouti
       elements: [
         {
           tag: 'markdown',
-          content: '确认取消整单？各仓在途工作将被中止，已产出的 worktree 分支保留。',
+          content: '确认终止需求？各仓在途工作将被中止，已产出的 worktree 分支保留。',
         },
-        button('⚠️ 确认取消', 'danger', true),
+        button('⚠️ 确认终止', 'danger', true),
         button('继续推进', 'default', false),
       ],
     },
@@ -762,7 +762,7 @@ export function buildClosureCard(
 /**
  * Interactive 病历卡 (case file) — for a raised human wait that is NOT a routine 关卡 checkpoint
  * (对账冲突 / 监工判大 / 执行报错 / 集成未决). Unlike a 灯卡's 通过/打回, a 病历 offers【已处理·继续】
- * (the human fixed / accepted it → the caller's forward action) and【取消整单】(abandon the whole
+ * (the human fixed / accepted it → the caller's forward action) and【终止需求】(abandon the whole
  * unit — the only clean exit for a 病历 that keeps re-raising, e.g. an un-resolvable对账). Both
  * funnel through the same card-action handler; the cancel button carries `cancel:true` so the
  * handler resolves the wait with a cancel decision (→ terminal cancelled). Kept kernel-neutral
@@ -779,7 +779,7 @@ export function buildCaseFileCard(
       ? ['', `<font color="grey">${data.detail.trim()}</font>`]
       : []),
     '',
-    '处理好后点【已处理·继续】我接着往下推；这条推不动就点【取消整单】放弃。',
+    '处理好后点【已处理·继续】我接着往下推；这条推不动就点【终止需求】放弃。',
   ].join('\n');
   const button = (
     text: string,
@@ -823,7 +823,7 @@ export function buildCaseFileCard(
           elements: [
             opinionInput('我改了什么 / 为什么这么处理'),
             button('已处理·继续', 'primary', 'case_proceed', { approved: true }),
-            button('取消整单', 'danger', 'case_cancel', { cancel: true }),
+            button('终止需求', 'danger', 'case_cancel', { cancel: true }),
           ],
         },
       ],
@@ -834,7 +834,7 @@ export function buildCaseFileCard(
 /**
  * WS-5 监工判大专属卡：跨仓外溢/疑则上报后，红线出口不再只有「放行」——给三条前进方向：
  * ①【已改图纸·重对账并返工】(approved,action:'rework') → 派 owner 重对账人改过的图纸 → 定向返工受影响仓；
- * ②【无需改·放行】(approved,action:'proceed') → 继续评估（现状）；③【取消整单】(cancel)。设计仍只有人能改
+ * ②【无需改·放行】(approved,action:'proceed') → 继续评估（现状）；③【终止需求】(cancel)。设计仍只有人能改
  * （agent 只重对账），红线不放松。opinion 输入框随 form 回传，handleCheckpointAction 注入下一轮 run。
  */
 export function buildGatekeeperBigCard(
@@ -850,7 +850,7 @@ export function buildGatekeeperBigCard(
     '',
     '· 要改跨仓图纸：你改好设计后点【已改图纸·重对账并返工】，我重对账并定向返工受影响的仓。',
     '· 无需改：点【无需改·放行】继续评估。',
-    '· 彻底放弃：点【取消整单】。',
+    '· 彻底放弃：点【终止需求】。',
   ].join('\n');
   const button = (
     text: string,
@@ -898,7 +898,7 @@ export function buildGatekeeperBigCard(
               action: 'rework',
             }),
             button('无需改·放行', 'default', 'gk_proceed', { approved: true, action: 'proceed' }),
-            button('取消整单', 'danger', 'gk_cancel', { cancel: true }),
+            button('终止需求', 'danger', 'gk_cancel', { cancel: true }),
           ],
         },
       ],
@@ -906,14 +906,14 @@ export function buildGatekeeperBigCard(
   };
 }
 
-/** Terminal patch for a 病历卡 after a button click (已处理继续 / 已取消整单). */
+/** Terminal patch for a 病历卡 after a button click (已处理继续 / 已终止需求). */
 export function buildCaseFileAnsweredCard(
   title: string,
   label: string,
   cancelled: boolean,
 ): object {
   const head = title.length > 40 ? `${title.slice(0, 40)}…` : title;
-  const verb = cancelled ? '已取消整单' : '已处理·继续';
+  const verb = cancelled ? '已终止需求' : '已处理·继续';
   return {
     schema: '2.0',
     header: {

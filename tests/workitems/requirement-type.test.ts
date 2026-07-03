@@ -211,7 +211,7 @@ describe('requirement lifecycle transitions', () => {
     expect(out.dispatch?.[0]).toMatchObject({ role: 'worker' });
   });
 
-  it('cancel_confirm 病历 resolve（approved，生产决策不带 action）→ 按 wait reason 路由到取消整单', () => {
+  it('cancel_confirm 病历 resolve（approved，生产决策不带 action）→ 按 wait reason 路由到终止需求', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.implement });
     const out = t.onEvent(
       item,

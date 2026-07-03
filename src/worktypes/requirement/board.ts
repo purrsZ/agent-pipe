@@ -327,7 +327,7 @@ function friendlyReason(reason: string): string {
   if (reason === 'gatekeeper_big') return '监工发现跨仓外溢 — 等你裁决后改图纸/返工';
   if (reason === 'integration_unresolved') return '集成验证未通过 — 等你裁决';
   if (reason === 'run_failed') return '一次执行报错 — 等你裁决（处理后可重试）';
-  if (reason === 'cancel_confirm') return '确认取消该需求？';
+  if (reason === 'cancel_confirm') return '确认终止该需求？';
   return reason;
 }
 
