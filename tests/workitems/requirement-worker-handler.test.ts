@@ -384,6 +384,23 @@ describe('requirement 跨仓对账 run (拆解 phase owner)', () => {
     expect(JSON.parse(byPath.get('contract/reconcile.json') ?? '{}').interfaces).toEqual([]);
     expect(JSON.parse(byPath.get('contract/contract.json') ?? '{}').interfaces).toEqual([]);
   });
+
+  // 复核 R1：phase 回落仅限 stage 缺失——split 相位收尾的 steer/advise/inspect（答话/建议/取证报告）
+  // 绝不能被当成对账结果解析去覆盖写契约产物（D-1 零行动权）。
+  it('复核 R1：split 相位的 steer/advise/inspect 收尾不写任何契约产物', () => {
+    const s = createRequirementRunStrategy({ worktreesDir: worktreesDir() });
+    for (const stage of ['steer', 'advise', 'inspect']) {
+      const writes: string[] = [];
+      s.afterRun?.({
+        report: '包工头答话 / 参谋建议 / 质检取证——不是对账结果，甚至可能带 ```json 块',
+        workitem: splitItem(),
+        assignment: owner(),
+        effectPayload: { stage },
+        writeArtifact: (relPath) => writes.push(relPath),
+      });
+      expect(writes, `stage=${stage} 不应有任何 artifact 写入`).toEqual([]);
+    }
+  });
 });
 
 // PIVOT 灯③ 实现侧：owner assess（并行实现 phase）登记实际实现的接口 → contract/impl-claims.json。

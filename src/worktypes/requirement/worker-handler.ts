@@ -205,7 +205,9 @@ export function createRequirementRunStrategy(opts: {
       const stage = stageFromPayload(effectPayload);
       // 跨仓对账（拆解，或 WS-5 implement 相位内重对账 stage=reconcile）→ 落两份：reconcile.json（完整对账
       // 结果，reconcile_check 据它判定）+ contract.json（升格的跨仓契约快照，灯③ 对账基准 + worker 切片）。
-      if (stage === 'reconcile' || workitem.phase === PHASE.split) {
+      // 复核 R1：phase 回落必须限定 stage 缺失（对齐下方 assess 分支的守卫）——否则 split 相位收尾的
+      // steer/advise（答话/建议报告）会被 parseReconcileResult 解析成 EMPTY 覆盖写契约产物（零行动权泄漏）。
+      if (stage === 'reconcile' || (stage === undefined && workitem.phase === PHASE.split)) {
         const result = parseReconcileResult(report);
         writeArtifact(
           'contract/reconcile.json',
