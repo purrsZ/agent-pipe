@@ -728,6 +728,11 @@ dddd98f 起做 **WS-3~WS-10**，各 WS 一次独立提交、每次提交前 `npm
    record→handle→mark，handle 抛错则不 mark → 只靠**重启时的 replayInbox** 重试（非进程内周期重试）；崩溃窗口（handle 已写
    DB 副作用、mark 前被硬杀）重放非幂等 → managed 追问可能双注入、bridge 任务可能双派发。**为「必达」选 at-least-once 而非
    at-most-once（丢消息）**，是刻意取舍，未加死信队列/幂等去重（见 live 半）。
+7. **WS-3 §3.2 可选项未做**：「管控台 resolve 后把旧卡 patch 成『已处理』」跳过——方案标为可选（成本低就做、
+   写不进就跳过并注明），此前落地记要漏记，现补记为跳过（审查修复 D2）。
+8. **WS-1 §1.4 超限日志降级 warn→info**：方案写「保留 warn」，实现改为 `logger.info` 并换了文案——补派逻辑
+   成熟后，「超 worker 并发上限」从缺口告警变成正常补派流程的一部分（parked 行由后续补派吸收），降级为 info
+   是有意为之（审查修复 D2）。
 
 ### 留下的 live 半（诚实标注，未美化）
 
@@ -739,7 +744,7 @@ dddd98f 起做 **WS-3~WS-10**，各 WS 一次独立提交、每次提交前 `npm
   方案 §5.1 回落（通过=form 外 callback、打回=form 内唯一 submit）。
 - **im.message.list 字段形状真机未验**（WS-4）：`adaptListMessageToEventData` 按「list item 用 msg_type/body.content/sender.id/
   mention.id（字符串）」拍成推送形状，是按 SDK 类型 + `getMessage` 既有解析推的，**真机需验**（尤其 create_time 单位 ms/s、
-  p2p 会话 chat_type）。500 条/单次翻页上限已加告警（不静默截断）。
+  p2p 会话 chat_type）。2000 条（40 页×50）/单次翻页上限已加告警（不静默截断）。
 - **交付 diffstat 依赖 worktree 存活**：GC 删了 worktree 后 `deliver_manifest` 只能给占位串；清单在灯③ 前生成、GC 在终态 7 天后，
   时序上不冲突，但重跑（recovery:'rerun'）时若 worktree 已被并发清理会降级——可接受。
 
