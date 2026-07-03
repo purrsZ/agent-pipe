@@ -60,12 +60,15 @@ export function worktreeIsDirty(worktreePath: string): boolean {
 }
 
 /**
- * WS-7 交付清单：worktree 相对 base 的改动概览（`git diff --stat <base>...HEAD`）。worktree 已清理 /
- * 命令失败 → 返回占位串，不抛（交付清单是尽力而为，不该因一个仓读不到而崩掉整份清单）。
+ * WS-7 交付清单：worktree 相对 base 的改动概览（`git diff --stat <base>...HEAD`，三点自动取 merge-base）。
+ * base 缺省时以主仓当前 HEAD 为基线——worktree 分支从主仓 HEAD fork，其自身 HEAD 即工作分支本身，
+ * `HEAD...HEAD` 恒空；取主仓 HEAD 才拿得到真实改动，且主仓 fork 后又前进也不影响（三点取共同祖先）。
+ * worktree 已清理 / 命令失败 → 返回占位串，不抛（交付清单尽力而为，不该因一个仓读不到而崩掉整份清单）。
  */
-export function worktreeDiffStat(worktreePath: string, base: string): string {
+export function worktreeDiffStat(worktreePath: string, base?: string): string {
   try {
-    const out = git(worktreePath, ['diff', '--stat', `${base}...HEAD`]).trim();
+    const resolved = base ?? git(mainRepoOf(worktreePath), ['rev-parse', 'HEAD']).trim();
+    const out = git(worktreePath, ['diff', '--stat', `${resolved}...HEAD`]).trim();
     return out || '(无改动)';
   } catch {
     return '(worktree 已清理或不可读)';

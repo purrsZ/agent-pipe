@@ -97,4 +97,32 @@ describe('deliver_manifest effect (WS-7)', () => {
     expect(emitted[0]!.kind).toBe('manifest_ready');
     expect((emitted[0]!.payload as { repos: unknown[] }).repos).toEqual([]);
   });
+
+  // WS-7.6（T7）+ O2 边界：manifest 全文超上限 → summaryText 截断带提示、总长 ≤ 3000、repos 数组不截断，
+  // artifact 存全文。造多仓 + 长路径把全文顶过 3000 字。
+  it('manifest 全文超上限 → summaryText 截断（≤3000）、repos 完整、artifact 存全文', async () => {
+    const repos: string[] = [];
+    const events: WorkItemEvent[] = [];
+    for (let i = 0; i < 20; i++) {
+      const nn = String(i).padStart(2, '0');
+      const repo = `/very/long/organization/monorepo/services/backend/module-${nn}`;
+      repos.push(repo);
+      events.push(
+        workerDone(repo, `as-repo${nn}xxxx`, `assignments/as-repo${nn}/report.md`, i + 1),
+      );
+    }
+    const { ctx, emitted, written } = fakeCtx(events, repos);
+    await handler.run(ctx);
+
+    const payload = emitted[0]!.payload as {
+      repos: Array<{ repo: string; branch: string }>;
+      summaryText: string;
+    };
+    const full = written['delivery/manifest.md']!;
+    expect(full.length).toBeGreaterThan(3000); // 前提：确实超上限
+    expect(payload.summaryText).toContain('（已截断，全文见 delivery/manifest.md）');
+    expect(payload.summaryText.length).toBeLessThanOrEqual(3000); // O2：截断后总长不越界
+    expect(payload.repos).toHaveLength(20); // repos 数组完整不截断
+    expect(full.length).toBeGreaterThan(payload.summaryText.length); // artifact 为全文
+  });
 });
