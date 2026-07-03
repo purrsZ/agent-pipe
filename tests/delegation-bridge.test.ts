@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  delegationCardHint,
   delegationGuardFor,
   parseDelegationDuration,
   runDelegateCommand,
@@ -270,5 +271,43 @@ describe('runDelegateCommand (DELEGATE D2.2)', () => {
     await runDelegateCommand(done.deps, msg, ['8h']);
     expect(done.replies[0]).toContain('该单元已结束');
     expect(done.upserts).toHaveLength(0);
+  });
+});
+
+// ── delegationCardHint 卡片提示（D3）─────────────────────────────────────────────────────
+
+describe('delegationCardHint (DELEGATE D3)', () => {
+  const wait = { reason: 'awaiting_close', createdAt: 1000 };
+  const grant = { reasons: ['awaiting_close', LIGHT3], expiresAt: 1000 + 8 * 3_600_000 };
+
+  it('生效授权 + reason 命中 + guard 放行 → 灰字提示（带 /delegate off）', () => {
+    const hint = delegationCardHint(wait, grant, [], 600);
+    expect(hint).toContain('委托生效中');
+    expect(hint).toContain('/delegate off');
+    expect(hint).toMatch(/将于 \d{2}:\d{2} 后自动通过/);
+  });
+
+  it('无授权 / reason 不在授权列表 → 不提示', () => {
+    expect(delegationCardHint(wait, undefined, [], 600)).toBeUndefined();
+    expect(
+      delegationCardHint({ reason: 'gatekeeper_big', createdAt: 1000 }, grant, [], 600),
+    ).toBeUndefined();
+  });
+
+  it('灯③ guard 拦住（no_contract）→ 不提示——卡上不承诺不会发生的自动通过', () => {
+    const events = [ev('integration_check_passed', { reason: 'no_contract' }, 1)];
+    expect(
+      delegationCardHint({ reason: LIGHT3, createdAt: 1000 }, grant, events, 600),
+    ).toBeUndefined();
+    // 真通过则提示照出。
+    const passed = [ev('integration_check_passed', { interfaceCount: 2 }, 1)];
+    expect(delegationCardHint({ reason: LIGHT3, createdAt: 1000 }, grant, passed, 600)).toContain(
+      '委托生效中',
+    );
+  });
+
+  it('到点前授权已过期 → 不提示（不会自动过）', () => {
+    const expiring = { reasons: ['awaiting_close'], expiresAt: 1000 + 60_000 }; // 1min 后过期 < 10min 冷静期
+    expect(delegationCardHint(wait, expiring, [], 600)).toBeUndefined();
   });
 });

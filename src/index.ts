@@ -584,6 +584,22 @@ export async function runDelegationDue(
   }
 }
 
+// DELEGATE D3（可选项，已做）：灯卡/关单卡尾部的「委托生效中」灰字提示。只在真会自动过时才提示——
+// 有生效授权 ∧ reason 命中 ∧ guard 放行（灯③ no_contract/no_claims 不提示，否则卡上承诺自动通过而
+// 实际 guard 拦住，不诚实）∧ 到点时授权还活着。纯函数。
+export function delegationCardHint(
+  wait: { reason: string; createdAt: number },
+  grant: { reasons: string[]; expiresAt: number } | undefined,
+  events: WorkItemEvent[],
+  delaySec: number,
+): string | undefined {
+  if (!grant || !grant.reasons.includes(wait.reason)) return undefined;
+  if (!delegationGuardFor(wait.reason, events)) return undefined;
+  const autoAt = wait.createdAt + delaySec * 1000;
+  if (autoAt >= grant.expiresAt) return undefined; // 到点前授权已过期 → 不会自动过
+  return `⏱ 委托生效中：无人处理将于 ${hhmm(autoAt)} 后自动通过（/delegate off 可撤销）`;
+}
+
 // WS-9：AUQ 表单答案组装（bridge task 与 workitem run 两条回灌路径共用，避免两份逻辑漂移）。每题 input
 // 自定义优先、否则下拉 select、都空则占位；lines = 喂回 agent 的完整文本，brief = 卡片补丁的简报。纯函数。
 export function assembleAuqAnswers(
@@ -2167,6 +2183,10 @@ export function createWorkitemsRuntime(deps: {
     title: string,
     anchorMsgId: string,
   ): Promise<void> => {
+    // DELEGATE D3：灯卡/关单卡出卡时若该单有生效授权且该灯真会自动过，尾部注灰字提示（delaySec 与
+    // 容器 watchdog 读同一 env，卡上时刻不与实际行为漂移）。
+    const grant = workitems.store.activeDelegation(workitemId, Date.now());
+    const delegationDelaySec = loadWorkitemsConfig().delegationDelaySec;
     for (const w of workitems.store.listOpenWaits(workitemId)) {
       if (w.kind !== 'human' || w.cardMsgId !== null) continue;
       // WS-10.3：选卡判定收敛到 waitCardKindFor（纯函数，全覆盖断言据此钉死每个 reason 都有专属卡）。
@@ -2174,18 +2194,29 @@ export function createWorkitemsRuntime(deps: {
       if (cardKind === null) continue; // 非关卡灯 / 非病历 / 无专属卡 → 跳过
       let card: object;
       if (cardKind === 'closure') {
-        // WS-7.7 灯④：交付待关单卡。
-        card = buildClosureCard({ title }, { itemId: workitemId, waitId: w.id });
+        // WS-7.7 灯④：交付待关单卡。D3：可自动关单时带委托提示。
+        const note = delegationCardHint(
+          w,
+          grant,
+          workitems.api.listEvents(workitemId),
+          delegationDelaySec,
+        );
+        card = buildClosureCard({ title, note }, { itemId: workitemId, waitId: w.id });
       } else if (cardKind === 'cancel-confirm') {
         // WS-10.9 取消确认卡。
         card = buildCancelConfirmCard(title, { itemId: workitemId, waitId: w.id });
       } else if (cardKind === 'checkpoint') {
         // 关卡灯(checkpoint:*) → 灯卡(通过/打回)。WS-7.3 灯③ 厚化：交付 gate 卡带对账证据 note，人拍板有据。
+        // D3：委托生效且 guard 会放行时追加提示行（lite/no_contract 的灯③ 不提示——guard 拦住不会自动过）。
         const boundary = checkpointBoundaryOf(w.reason)!;
+        const events = workitems.api.listEvents(workitemId);
         const note =
-          boundary === PHASE.deliver
-            ? deliverGateNote(workitems.api.listEvents(workitemId))
-            : undefined;
+          [
+            boundary === PHASE.deliver ? deliverGateNote(events) : undefined,
+            delegationCardHint(w, grant, events, delegationDelaySec),
+          ]
+            .filter((s): s is string => !!s)
+            .join('\n') || undefined;
         card = buildCheckpointCard(
           { title, gateLabel: checkpointGateLabel(boundary), rail: checkpointRail(boundary), note },
           { itemId: workitemId, waitId: w.id, boundary },

@@ -667,6 +667,7 @@ if (retries === 0) return retryFailedRun(item, ev);               // 首败自�
 8. **失败自愈**：临时把 claude binPath 指向不存在路径跑一轮 → 首败自动重试（日志可见 retries=1）→ 再败弹病历；恢复 binPath 后点「已处理·继续」恢复。
 9. **AskUser**：给 worker 的 PRD 里埋「实现前先问用户 A 还是 B」→ 群里出现问题表单卡 → 提交答案 → 下一轮（steer/rework）prompt 引用答案。
 10. **取消流**：任一推进中的单，群里发 `/cancel` → 出确认卡（不再是「未知命令」）→ 点「继续推进」→ 流程不受影响、原有卡/等待原封不动；再发 `/cancel` → 点「确认终止」→ 单终态 cancelled、锚点卡刷新、在途 run 被中止。
+11. **委托模式（DELEGATE，睡前放权）**：`WORKITEMS_DELEGATION_DELAY_SEC=60` 起服务 → 推进中的需求群里发 `/delegate 5m` → 收到确认（含到期时刻 + 「监工判大与一切病历仍会等你」）→ 走到灯④关单卡（或双仓真对账通过的灯③）挂着不点 → 卡上带「⏱ 委托生效中」灰字 → 1 分钟后自动通过 + 群内「⏱ 已按你的委托自动通过」通知 + 事件流该 wait `resolved_by=delegation`、resolve_reason 带【委托】原文留痕 → **lite 单的灯③ 验证不自动过**（no_contract 被 guard 拦住，卡上也不出委托灰字，催办照常）→ `/delegate off` 后灯不再自动过（回「已撤销本单委托」）→ 超时长 `/delegate 48h` 被拒（上限 24h）。真机验证点：飞书通知回贴在锚点话题下、`/delegate` 在已认领需求群外回「本会话没有进行中的需求单」。
 
 每项通过与否记录在本文档落地记要中，未通过项按「真机暴露」惯例开修。
 
