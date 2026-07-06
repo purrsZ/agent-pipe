@@ -518,6 +518,27 @@ export class WorkitemsStore {
     });
   }
 
+  // INTAKE L0.2：全部单元 repos 的去重展开（启动回填登记表用）。repos_json 是 JSON 数组列，逐行 parse
+  // 展开去重（与 toWorkItem 的 decode 风格一致，不引 json_each）。坏值/空值跳过，永不抛。
+  listAllRepos(): string[] {
+    const rows = this.db
+      .prepare('SELECT repos_json FROM workitems WHERE repos_json IS NOT NULL')
+      .all() as Array<{ repos_json: string | null }>;
+    const seen = new Set<string>();
+    for (const row of rows) {
+      if (!row.repos_json) continue;
+      try {
+        const arr = JSON.parse(row.repos_json);
+        if (Array.isArray(arr)) {
+          for (const r of arr) if (typeof r === 'string' && r.trim().length > 0) seen.add(r);
+        }
+      } catch {
+        // 坏 JSON 行跳过
+      }
+    }
+    return [...seen];
+  }
+
   insertAssignment(row: Assignment): void {
     this.db
       .prepare(

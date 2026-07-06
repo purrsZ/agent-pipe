@@ -275,23 +275,37 @@ function sortByChecklist(fields: IntakeField[]): IntakeField[] {
 export interface IntakeExtraction {
   fields: Array<{ key: IntakeFieldKey; value: string | string[] }>;
   uiRequired?: boolean;
+  // INTAKE L0.3：用户提到但未命中登记表、且不是绝对路径的仓名/项目名（原词照录，不猜路径）。桥层据它
+  // 触发勘探 run（L1）。命中登记表的仓名 AI 直接输出到 fields.repos（绝对路径），不进 repoHints。
+  repoHints?: string[];
 }
 
 // 组装抽取 prompt：给 AI 字段菜单 + 当前已填/还缺，约束「只抽明确表达的、repos 只放绝对路径、只输出 JSON」。
+// registry = 已知仓库登记表快照（名字 → 绝对路径，按最近使用排序，最多 20 条），命中则秒解析绝对路径。
 export function composeIntakeExtractPrompt(
   userText: string,
   filledLabels: string[],
   missingRequiredLabels: string[],
+  registry: Array<{ name: string; path: string }> = [],
 ): string {
   const menu = INTAKE_CHECKLIST.map(
     (d) => `- ${d.key}：${d.label}${d.hint ? `（${d.hint}）` : ''}`,
   );
+  const registryLines =
+    registry.length > 0
+      ? [
+          '',
+          '已知仓库登记（仓名 → 绝对路径，按最近使用排序）：',
+          ...registry.map((r) => `- ${r.name} → ${r.path}`),
+        ]
+      : [];
   return [
     '你是「立项收料」助手。用户在需求立项群里发来一段话，请只做**信息抽取**：从这段话里识别能确定的',
     '立项字段值，输出 JSON。不要执行任何任务、不要读写文件、不要追问、不要解释。',
     '',
     '可填字段（key：含义）：',
     ...menu,
+    ...registryLines,
     '',
     `当前已填：${filledLabels.length ? filledLabels.join('、') : '（无）'}`,
     `还缺必填：${missingRequiredLabels.length ? missingRequiredLabels.join('、') : '（无）'}`,
@@ -299,10 +313,13 @@ export function composeIntakeExtractPrompt(
     '规则：',
     '- 只抽用户**明确表达**了的字段；没提到的别编、别输出该 key。',
     '- repos 只放**绝对路径**（以 / 开头）进字符串数组；别把说明文字/编号/“仓库:”当路径。',
+    '- 用户提到的仓名/项目名**命中上面的已知仓库登记** → 直接把对应绝对路径放进 repos。',
+    '- 用户提到的仓名/项目名**未命中登记、也不是绝对路径**（如“就在 alaeatposapp 里”）→ 放进 repoHints',
+    '  字符串数组（**原词照录，不要猜路径**），别放进 repos。',
     '- 文档链接（PRD/UI 设计稿）按原样作为对应字段的值。',
     '- 用户表达“涉及 UI 改动/要做 UI”时置 uiRequired=true。',
     '- 只输出一个 JSON，无任何额外文字：',
-    '  {"fields":[{"key":"summary","value":"…"},{"key":"repos","value":["/abs/a","/abs/b"]}],"uiRequired":false}',
+    '  {"fields":[{"key":"summary","value":"…"},{"key":"repos","value":["/abs/a"]}],"repoHints":["alaeatposapp"],"uiRequired":false}',
     '',
     '用户这段话：',
     '"""',
@@ -360,8 +377,18 @@ function coerceExtraction(obj: unknown): IntakeExtraction | null {
       fields.push({ key, value });
   }
   const uiRequired = typeof o.uiRequired === 'boolean' ? o.uiRequired : undefined;
-  if (fields.length === 0 && uiRequired === undefined) return null;
-  return uiRequired === undefined ? { fields } : { fields, uiRequired };
+  // INTAKE L0.3：repoHints——未命中登记表的仓名原词（去空白 + 非空）。坏类型/非数组一律成空。
+  const repoHints = Array.isArray(o.repoHints)
+    ? o.repoHints
+        .filter((h): h is string => typeof h === 'string')
+        .map((h) => h.trim())
+        .filter((h) => h.length > 0)
+    : [];
+  if (fields.length === 0 && uiRequired === undefined && repoHints.length === 0) return null;
+  const result: IntakeExtraction = { fields };
+  if (uiRequired !== undefined) result.uiRequired = uiRequired;
+  if (repoHints.length > 0) result.repoHints = repoHints;
+  return result;
 }
 
 function coerceInput(raw: unknown): IntakeFieldInput | undefined {

@@ -205,6 +205,20 @@ export async function ingestMessage(
   }
 }
 
+// INTAKE L0.2：启动一次性回填仓库登记表——遍历全部单元已收齐的 repos，逐仓 upsert（source='backfill'）。
+// 登记来源本身已是校验过的事实（立项 gate 通过才提升进 workitem.repos），写前不再校验。幂等：重复启动
+// 重 upsert 同值。返回回填条数（供日志）。
+export function backfillRepoRegistry(deps: {
+  listAllRepos: () => string[];
+  upsertRepoRegistry: (repoPath: string, name: string, now: number, source: string) => void;
+  now: () => number;
+}): number {
+  const repos = deps.listAllRepos();
+  const ts = deps.now();
+  for (const p of repos) deps.upsertRepoRegistry(p, path.basename(p), ts, 'backfill');
+  return repos.length;
+}
+
 // WS-4 断线补拉（对抗「飞书 WS 不重放离线事件」）：对 managed 认领过的每个 chat 主动拉 im.message.list，
 // 跳过 bot 自己的、经 recordInbox 去重后只投未见过的。since 水位 = max(该 chat inbox 最新 create_time,
 // now-lookback)，回看窗口防首启动全量灌；再减 60s 重叠靠 inbox 去重兜。整段永不抛：单 chat 失败只 log 跳过。
@@ -759,6 +773,17 @@ async function main() {
     defaultCwd: config.allowedCwdPrefixes[0] ?? process.cwd(),
   });
   const runningTasks = new Set<string>();
+  // INTAKE L0.2：启动一次性回填仓库登记表（用历史单元收齐的仓做立项抽取快路径 + 勘探搜索起点）。
+  try {
+    const n = backfillRepoRegistry({
+      listAllRepos: () => workitems.store.listAllRepos(),
+      upsertRepoRegistry: (p, name, now, source) => store.upsertRepoRegistry(p, name, now, source),
+      now: () => Date.now(),
+    });
+    logger.info({ count: n }, 'repo registry backfilled from workitems');
+  } catch (err) {
+    logger.warn({ err }, 'repo registry backfill failed');
+  }
   // /req 后「等群名」的临时待答态（M-I2，keyed by 用户+会话，带 TTL，纯内存）。
   const pendingIntake = new PendingIntakeStore();
   const botStartTime = Date.now();
@@ -1448,7 +1473,9 @@ async function main() {
       (f) => INTAKE_CHECKLIST.find((d) => d.key === f.key)?.label ?? f.key,
     );
     const missing = requiredMissing(state).map((d) => d.label);
-    const prompt = composeIntakeExtractPrompt(text, filled, missing);
+    // INTAKE L0.3：织入已知仓库登记表快照（最近使用前 20）——命中仓名 AI 直接输出绝对路径（免勘探快路径）。
+    const registry = store.listRepoRegistry(20).map((r) => ({ name: r.name, path: r.path }));
+    const prompt = composeIntakeExtractPrompt(text, filled, missing, registry);
     const taskId = `managed:intake-extract:${itemId}`;
     const task = store.upsertTask({
       id: taskId,
@@ -2323,6 +2350,20 @@ export function createWorkitemsRuntime(deps: {
             },
             event,
           );
+        }
+        // INTAKE L0.2：repos_set（立项收尾把收齐的仓提升进 workitem.repos）→ 逐仓 upsert 登记表
+        // （source='unit'，刷 last_used_at）。此时已过立项相位（split），未被上面的 intake 早退短路。
+        if (event.kind === 'repos_set') {
+          const p = event.payload;
+          const repos =
+            typeof p === 'object' && p !== null && Array.isArray((p as { repos?: unknown }).repos)
+              ? (p as { repos: unknown[] }).repos.filter(
+                  (r): r is string => typeof r === 'string' && r.trim().length > 0,
+                )
+              : [];
+          const now = Date.now();
+          for (const repo of repos)
+            deps.kernelStore.upsertRepoRegistry(repo, path.basename(repo), now, 'unit');
         }
         // WS-7 交付清单：manifest_ready → 群内贴一张交付清单卡（每仓分支/diffstat/接手命令）。
         if (event.kind === 'manifest_ready' && anchorMsgId) {

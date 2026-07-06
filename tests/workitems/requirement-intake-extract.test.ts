@@ -15,6 +15,23 @@ describe('composeIntakeExtractPrompt', () => {
     expect(p).toContain('只输出一个 JSON');
     expect(p).toContain('给订单页加导出');
   });
+
+  it('INTAKE L0.3：有登记表则织入「已知仓库登记」小节（仓名 → 绝对路径）+ repoHints 指令', () => {
+    const p = composeIntakeExtractPrompt(
+      '就在 alaeatposapp 里',
+      [],
+      ['涉及代码仓库'],
+      [{ name: 'alaeatposapp', path: '/Users/zwh/alaeatposapp' }],
+    );
+    expect(p).toContain('已知仓库登记（仓名 → 绝对路径');
+    expect(p).toContain('- alaeatposapp → /Users/zwh/alaeatposapp');
+    expect(p).toContain('repoHints');
+  });
+
+  it('INTAKE L0.3：无登记表时不织入登记小节（缺省参数）', () => {
+    const p = composeIntakeExtractPrompt('给订单页加导出', [], []);
+    expect(p).not.toContain('已知仓库登记（仓名 → 绝对路径');
+  });
 });
 
 describe('parseIntakeExtraction', () => {
@@ -57,5 +74,22 @@ describe('parseIntakeExtraction', () => {
   it('只有 uiRequired 也算有效结果', () => {
     const ex = parseIntakeExtraction('{"fields":[],"uiRequired":true}');
     expect(ex).toEqual({ fields: [], uiRequired: true });
+  });
+
+  it('INTAKE L0.3：解析 repoHints（去空白/非字符串剔除），只有 repoHints 也算有效', () => {
+    const ex = parseIntakeExtraction('{"fields":[],"repoHints":["  alaeatposapp  ","",123]}');
+    expect(ex).toEqual({ fields: [], repoHints: ['alaeatposapp'] });
+  });
+
+  it('INTAKE L0.3：repoHints 与 fields 并存', () => {
+    const ex = parseIntakeExtraction(
+      '{"fields":[{"key":"summary","value":"加导出"}],"repoHints":["posapp"]}',
+    );
+    expect(ex).toEqual({ fields: [{ key: 'summary', value: '加导出' }], repoHints: ['posapp'] });
+  });
+
+  it('INTAKE L0.3：空 repoHints 不进结果', () => {
+    const ex = parseIntakeExtraction('{"fields":[{"key":"summary","value":"x"}],"repoHints":[]}');
+    expect(ex).toEqual({ fields: [{ key: 'summary', value: 'x' }] });
   });
 });

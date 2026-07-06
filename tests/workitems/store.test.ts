@@ -322,3 +322,21 @@ describe('WorkitemsStore events', () => {
     raw.close();
   });
 });
+
+describe('WorkitemsStore.listAllRepos (INTAKE L0.2)', () => {
+  it('去重展开全部单元 repos，跳过空/坏值', () => {
+    const store = new WorkitemsStore(dbPath, clock);
+    store.insertWorkItem(item('wi-1', { repos: ['/a', '/b'] }));
+    store.insertWorkItem(item('wi-2', { repos: ['/b', '/c'] })); // /b 重复
+    store.insertWorkItem(item('wi-3', { repos: [] })); // 空
+    const all = store.listAllRepos().sort();
+    expect(all).toEqual(['/a', '/b', '/c']);
+    store.close();
+  });
+
+  it('无单元 → 空数组', () => {
+    const store = new WorkitemsStore(dbPath, clock);
+    expect(store.listAllRepos()).toEqual([]);
+    store.close();
+  });
+});

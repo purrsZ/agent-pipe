@@ -65,6 +65,15 @@ export interface EventRow {
   created_at: number;
 }
 
+// INTAKE L0：代码项目登记表（跨单知识，与 inbox_messages 同级放 kernel store，命名中性）。立项抽取先查表
+// 秒解析仓名→绝对路径（免 AI 快路径）；勘探（L1）拿它当搜索起点。name = basename 小写化，供包含匹配。
+export interface RepoRegistryRow {
+  path: string;
+  name: string;
+  last_used_at: number;
+  source: string; // 'unit' | 'scout' | 'backfill'
+}
+
 export class Store {
   private db: Database.Database;
 
@@ -140,6 +149,13 @@ export class Store {
       CREATE INDEX IF NOT EXISTS idx_inbox_unprocessed
         ON inbox_messages(id) WHERE processed_at IS NULL;
       CREATE INDEX IF NOT EXISTS idx_inbox_chat ON inbox_messages(chat_id, create_time);
+      CREATE TABLE IF NOT EXISTS repo_registry (
+        path         TEXT PRIMARY KEY,
+        name         TEXT NOT NULL,
+        last_used_at INTEGER NOT NULL,
+        source       TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_repo_registry_name ON repo_registry(name);
     `);
     this.migrateTasksLegacy();
     this.migrateThreadClaimsLegacy();
@@ -342,6 +358,39 @@ export class Store {
       .run(cutoffMs);
   }
 
+  // INTAKE L0：登记一个已知代码仓（幂等 upsert，path 为主键）。name 一律小写化落库（供包含匹配）；
+  // 重复登记同 path 刷新 name/last_used_at/source（最后一次写为准，与 recordInbox 的去重语义并列）。
+  upsertRepoRegistry(repoPath: string, name: string, now: number, source: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO repo_registry (path, name, last_used_at, source)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(path) DO UPDATE SET
+           name = excluded.name,
+           last_used_at = excluded.last_used_at,
+           source = excluded.source`,
+      )
+      .run(repoPath, name.toLowerCase(), now, source);
+  }
+
+  // INTAKE L0：最近使用的登记仓（last_used_at 降序，供抽取 prompt 织入「已知仓库登记表」小节）。
+  listRepoRegistry(limit: number): RepoRegistryRow[] {
+    return this.db
+      .prepare('SELECT * FROM repo_registry ORDER BY last_used_at DESC LIMIT ?')
+      .all(limit) as RepoRegistryRow[];
+  }
+
+  // INTAKE L0：按仓名线索小写包含匹配（返回全部命中——歧义交上层裁量/问人）。空线索 → 空数组。
+  matchRepoRegistry(hint: string): RepoRegistryRow[] {
+    const needle = hint.trim().toLowerCase();
+    if (needle.length === 0) return [];
+    return this.db
+      .prepare(
+        "SELECT * FROM repo_registry WHERE name LIKE '%' || ? || '%' ESCAPE '\\' ORDER BY last_used_at DESC",
+      )
+      .all(escapeLike(needle)) as RepoRegistryRow[];
+  }
+
   releaseThreadClaim(rootId: string): void {
     this.db.prepare('DELETE FROM thread_claims WHERE thread_root_id = ?').run(rootId);
   }
@@ -530,4 +579,9 @@ export class Store {
   close() {
     this.db.close();
   }
+}
+
+// INTAKE L0：转义 SQL LIKE 的通配符（% _ \），防仓名里的下划线/百分号被当通配（配合 ESCAPE '\'）。
+function escapeLike(s: string): string {
+  return s.replace(/[\\%_]/g, (c) => `\\${c}`);
 }
