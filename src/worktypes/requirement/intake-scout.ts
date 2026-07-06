@@ -15,10 +15,23 @@ export interface ScoutAmbiguity {
   options: string[]; // 带证据的候选（「/a/alaeatposapp（3 天前有提交）」…）
 }
 
+// INTAKE L2：确定仓后顺路进仓找到的立项材料候选（path 为仓内相对路径，summary ≤200 字）。桥层对**空字段**
+// 才注入，值带来源标记，人可覆盖。诚实边界：只把「料在哪」递到人眼前，gate 必填语义不变。
+export interface ScoutMaterialItem {
+  path: string;
+  summary: string;
+}
+export interface ScoutMaterials {
+  prd?: ScoutMaterialItem;
+  acceptance?: ScoutMaterialItem;
+  background?: { summary: string }; // 背景无固定文件，只给摘要
+}
+
 export interface ScoutResult {
   repos: string[]; // 确定无歧义的仓绝对路径（唯一命中 / 证据压倒性）
   ambiguities: ScoutAmbiguity[]; // 拿不准 → 问人（疑则问，与监工同姿态）
   notFound: string[]; // 实在找不到的线索原词
+  materials?: ScoutMaterials; // INTAKE L2 仓内收料（可选）
 }
 
 const EMPTY_RESULT: ScoutResult = { repos: [], ambiguities: [], notFound: [] };
@@ -58,6 +71,8 @@ export function composeScoutPrompt(input: {
     '- 先用 `ls` 在搜索根内找同名/近名目录；对每个候选用 `git -C <路径> rev-parse --show-toplevel` 确认是 git 仓。',
     '- 用 `git -C <路径> log -1 --format=%ci` 看最近提交时间判断活跃度；同名多候选时比较最近提交、远端、',
     '  README 与本需求的相关性，帮用户区分。',
+    '- 确定仓后（repos 唯一），可**顺路进仓找立项材料**：设计文档 / PRD / README 里的验收标准与范围/背景',
+    '  描述，把「料在哪 + 一句话摘要」递到用户眼前（仅候选，人在立项卡上确认；找不到就不填）。',
     '',
     '# 产出要求（务必遵守）',
     '1. 报告主体 = 面向用户的中文说明：你找到了什么、凭什么判断（会以卡片贴回群，直接跟用户说话）。',
@@ -66,10 +81,14 @@ export function composeScoutPrompt(input: {
     '{ "repos": ["确定无歧义的仓绝对路径"],',
     '  "ambiguities": [{ "question": "找到两个 alaeatposapp，用哪个？",',
     '                    "options": ["/a/alaeatposapp（3 天前有提交）", "/b/alaeatposapp（半年未动）"] }],',
-    '  "notFound": ["实在找不到的线索原词"] }',
+    '  "notFound": ["实在找不到的线索原词"],',
+    '  "materials": { "prd": {"path": "仓内相对路径", "summary": "≤200字摘要"},',
+    '                 "acceptance": {"path": "仓内相对路径", "summary": "≤200字摘要"},',
+    '                 "background": {"summary": "≤200字背景摘要"} } }',
     '```',
     '规则：确定 = 唯一命中或证据压倒性 → 放 repos；拿不准一律进 ambiguities 问人（疑则问）；实在找不到的',
-    '进 notFound。**绝不编造路径**——没在磁盘上验证过是 git 仓的路径，绝不放进 repos。',
+    '进 notFound。materials 全部可选，只填真在仓里找到的（没找到就省略该键，别编）。**绝不编造路径**——',
+    '没在磁盘上验证过是 git 仓的路径，绝不放进 repos。',
   );
   return lines.join('\n');
 }
@@ -107,6 +126,8 @@ async function scoutApply(ctx: EffectContext): Promise<void> {
     repos: r.repos,
     ambiguities: r.ambiguities,
     notFound: r.notFound,
+    // INTAKE L2：materials 一并透传（可选）；无则省略，桥层消费缺省是 no-op。
+    ...(r.materials ? { materials: r.materials } : {}),
   });
 }
 
@@ -130,9 +151,33 @@ function coerceResult(value: unknown): ScoutResult | undefined {
   const ambiguities = Array.isArray(value.ambiguities)
     ? value.ambiguities.map(coerceAmbiguity).filter((a): a is ScoutAmbiguity => a !== undefined)
     : [];
-  // 三者全空的块视为无效（防把只含空数组的坏块当有效结果覆盖）——但下游允许全空 emit（scoutApply 兜底）。
-  if (repos.length === 0 && ambiguities.length === 0 && notFound.length === 0) return undefined;
-  return { repos, ambiguities, notFound };
+  const materials = coerceMaterials(value.materials);
+  // 四者全空的块视为无效（防把只含空数组的坏块当有效结果覆盖）——但下游允许全空 emit（scoutApply 兜底）。
+  if (repos.length === 0 && ambiguities.length === 0 && notFound.length === 0 && !materials) {
+    return undefined;
+  }
+  return materials ? { repos, ambiguities, notFound, materials } : { repos, ambiguities, notFound };
+}
+
+// INTAKE L2：解析 materials（全部可选；path/summary 非字符串或空则丢该键；无有效键 → undefined）。
+function coerceMaterials(value: unknown): ScoutMaterials | undefined {
+  if (!isObject(value)) return undefined;
+  const out: ScoutMaterials = {};
+  const prd = coerceMaterialItem(value.prd);
+  if (prd) out.prd = prd;
+  const acceptance = coerceMaterialItem(value.acceptance);
+  if (acceptance) out.acceptance = acceptance;
+  const bg = isObject(value.background) ? value.background.summary : undefined;
+  if (typeof bg === 'string' && bg.trim().length > 0) out.background = { summary: bg.trim() };
+  return out.prd || out.acceptance || out.background ? out : undefined;
+}
+
+function coerceMaterialItem(value: unknown): ScoutMaterialItem | undefined {
+  if (!isObject(value)) return undefined;
+  const path = typeof value.path === 'string' ? value.path.trim() : '';
+  const summary = typeof value.summary === 'string' ? value.summary.trim() : '';
+  if (path.length === 0 || summary.length === 0) return undefined;
+  return { path, summary };
 }
 
 function coerceAmbiguity(value: unknown): ScoutAmbiguity | undefined {

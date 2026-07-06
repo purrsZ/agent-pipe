@@ -91,6 +91,28 @@ describe('parseScoutResult', () => {
     const r = parseScoutResult(`\`\`\`json\n${JSON.stringify({ repos: ['/j'] })}\n\`\`\``);
     expect(r.repos).toEqual(['/j']);
   });
+
+  it('INTAKE L2：解析 materials（prd/acceptance/background）；缺 path/summary 的项丢弃', () => {
+    const r = parseScoutResult(
+      scoutBlock({
+        repos: ['/a'],
+        materials: {
+          prd: { path: 'docs/prd.md', summary: '导出订单' },
+          acceptance: { path: '', summary: '缺 path 丢弃' },
+          background: { summary: '老板要报表' },
+        },
+      }),
+    );
+    expect(r.materials).toEqual({
+      prd: { path: 'docs/prd.md', summary: '导出订单' },
+      background: { summary: '老板要报表' },
+    });
+  });
+
+  it('INTAKE L2：只有 materials（无 repos/歧义/notFound）也算有效块', () => {
+    const r = parseScoutResult(scoutBlock({ materials: { prd: { path: 'p.md', summary: 's' } } }));
+    expect(r.materials?.prd).toEqual({ path: 'p.md', summary: 's' });
+  });
 });
 
 function fakeCtx(
@@ -118,11 +140,12 @@ function fakeCtx(
 describe('scout_apply effect handler', () => {
   const handler = createScoutApplyHandler();
 
-  it('读报告 → emit scout_result（repos/ambiguities/notFound）', async () => {
+  it('读报告 → emit scout_result（repos/ambiguities/notFound/materials）', async () => {
     const report = scoutBlock({
       repos: ['/a/x'],
       ambiguities: [{ question: '用哪个？', options: ['/b/y', '/c/y'] }],
       notFound: ['zzz'],
+      materials: { prd: { path: 'p.md', summary: 's' } },
     });
     const { ctx, emitted } = fakeCtx(
       { 'assignments/s/report.md': report },
@@ -135,6 +158,7 @@ describe('scout_apply effect handler', () => {
         repos: ['/a/x'],
         ambiguities: [{ question: '用哪个？', options: ['/b/y', '/c/y'] }],
         notFound: ['zzz'],
+        materials: { prd: { path: 'p.md', summary: 's' } },
       },
     });
   });

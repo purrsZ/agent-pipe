@@ -651,6 +651,9 @@ export async function runScoutResult(
     buildQuestionCard: (question: string, options: string[]) => object;
     postCard: (card: object) => Promise<unknown>;
     notify: (text: string) => Promise<unknown>;
+    // INTAKE L2：仓内收料——对应 intake 字段**为空时**才注入候选（带来源标记，人可覆盖）；已有值绝不覆盖。
+    isFieldEmpty?: (key: 'prd' | 'acceptance' | 'summary') => boolean;
+    injectField?: (key: 'prd' | 'acceptance' | 'summary', value: string) => void;
     logger: Pick<Logger, 'error' | 'info'>;
   },
   event: WorkItemEvent,
@@ -702,6 +705,47 @@ export async function runScoutResult(
     lines.push(
       `🔍 没找到这些线索对应的仓：${notFound.join('、')}。请直接发绝对路径，或补充线索后发 \`/scout <线索>\` 重试。`,
     );
+  }
+
+  // 4) INTAKE L2 仓内收料：materials 候选**只在对应字段为空时**注入（带来源标记，人可覆盖）；已有值不动。
+  const materials =
+    typeof obj.materials === 'object' && obj.materials !== null
+      ? (obj.materials as Record<string, unknown>)
+      : undefined;
+  if (materials && deps.isFieldEmpty && deps.injectField) {
+    const applied: string[] = [];
+    const itemOf = (v: unknown): { path: string; summary: string } | undefined =>
+      typeof v === 'object' &&
+      v !== null &&
+      typeof (v as { path?: unknown }).path === 'string' &&
+      typeof (v as { summary?: unknown }).summary === 'string'
+        ? { path: (v as { path: string }).path, summary: (v as { summary: string }).summary }
+        : undefined;
+    const tryInject = (
+      key: 'prd' | 'acceptance' | 'summary',
+      label: string,
+      path: string | undefined,
+      summary: string,
+    ): void => {
+      if (!deps.isFieldEmpty!(key)) return; // 已有值绝不覆盖
+      const tag = path ? `【AI 从 ${path} 提取，立项卡上请确认】` : '【AI 提取，立项卡上请确认】';
+      deps.injectField!(key, `${tag}${summary}`);
+      applied.push(label);
+    };
+    const prd = itemOf(materials.prd);
+    if (prd) tryInject('prd', 'PRD', prd.path, prd.summary);
+    const acceptance = itemOf(materials.acceptance);
+    if (acceptance) tryInject('acceptance', '验收标准', acceptance.path, acceptance.summary);
+    const bg =
+      typeof materials.background === 'object' && materials.background !== null
+        ? (materials.background as { summary?: unknown }).summary
+        : undefined;
+    if (typeof bg === 'string' && bg.trim().length > 0) {
+      tryInject('summary', '一句话需求 + 背景', undefined, bg.trim());
+    }
+    if (applied.length > 0) {
+      lines.push(`📎 顺路从仓里找到候选材料（已作为待确认草稿填入）：${applied.join('、')}`);
+    }
   }
 
   if (lines.length > 0) {
@@ -2503,6 +2547,20 @@ export function createWorkitemsRuntime(deps: {
                   Date.now(),
                   'scout',
                 ),
+              // INTAKE L2：仓内收料——「空字段才注入」判定 + 注入（ai-extracted 草稿，立项完成 gate 兜底确认）。
+              isFieldEmpty: (key) => {
+                const st = foldIntakeState(workitems.api.listEvents(workitemId));
+                const f = st.fields.find((x) => x.key === key);
+                if (!f) return true;
+                return Array.isArray(f.value) ? f.value.length === 0 : f.value.trim().length === 0;
+              },
+              injectField: (key, value) =>
+                workitems.api.injectIntakeField(workitemId, {
+                  key,
+                  value,
+                  filledBy: 'ai-extracted',
+                  confirmed: true,
+                }),
               buildQuestionCard: (question, options) =>
                 buildWorkitemQuestionCard(
                   item.title,

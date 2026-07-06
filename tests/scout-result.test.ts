@@ -19,6 +19,8 @@ function harness(over: Partial<Parameters<typeof runScoutResult>[0]> = {}) {
   const cards: Array<{ question: string; options: string[] }> = [];
   const posted: object[] = [];
   const notes: string[] = [];
+  const fieldInjects: Array<{ key: string; value: string }> = [];
+  const emptyKeys = new Set(['prd', 'acceptance', 'summary']); // 默认全空
   const deps = {
     currentRepos: [] as string[],
     isGitRepo: (p: string) => p.startsWith('/good'),
@@ -34,10 +36,13 @@ function harness(over: Partial<Parameters<typeof runScoutResult>[0]> = {}) {
     notify: async (text: string) => {
       notes.push(text);
     },
+    isFieldEmpty: (key: 'prd' | 'acceptance' | 'summary') => emptyKeys.has(key),
+    injectField: (key: 'prd' | 'acceptance' | 'summary', value: string) =>
+      fieldInjects.push({ key, value }),
     logger: { error: () => {}, info: () => {} },
     ...over,
   };
-  return { deps, injected, upserted, cards, posted, notes };
+  return { deps, injected, upserted, cards, posted, notes, fieldInjects, emptyKeys };
 }
 
 describe('runScoutResult (INTAKE L1 桥层 DI)', () => {
@@ -89,6 +94,35 @@ describe('runScoutResult (INTAKE L1 桥层 DI)', () => {
     expect(h.injected).toEqual([]);
     expect(h.posted).toEqual([]);
     expect(h.notes).toEqual([]);
+  });
+
+  it('INTAKE L2：materials 空字段才注入（带来源标记）；已有值绝不覆盖', async () => {
+    const h = harness();
+    h.emptyKeys.delete('prd'); // prd 已有值 → 不覆盖
+    await runScoutResult(
+      h.deps,
+      ev({
+        repos: [],
+        ambiguities: [],
+        notFound: [],
+        materials: {
+          prd: { path: 'docs/prd.md', summary: '导出订单' }, // 已有 → 跳过
+          acceptance: { path: 'docs/ac.md', summary: '能导出 csv' }, // 空 → 注入
+          background: { summary: '老板要报表' }, // 空 → 注入
+        },
+      }),
+    );
+    // prd 未注入（已有值）
+    expect(h.fieldInjects.find((f) => f.key === 'prd')).toBeUndefined();
+    // acceptance 注入，带「AI 从 <path> 提取」标记
+    const ac = h.fieldInjects.find((f) => f.key === 'acceptance')!;
+    expect(ac.value).toContain('【AI 从 docs/ac.md 提取，立项卡上请确认】');
+    expect(ac.value).toContain('能导出 csv');
+    // background → summary 字段，无 path 的标记
+    const bg = h.fieldInjects.find((f) => f.key === 'summary')!;
+    expect(bg.value).toContain('【AI 提取，立项卡上请确认】');
+    expect(bg.value).toContain('老板要报表');
+    expect(h.notes.join('\n')).toContain('候选材料');
   });
 });
 
