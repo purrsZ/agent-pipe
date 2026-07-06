@@ -1,6 +1,6 @@
 # INTAKE 方案：立项智能收料——仓库登记表 + 勘探 run + 仓内收料
 
-> 日期：2026-07-03 ｜ 状态：**待实施** ｜ 读者：**执行本方案的 AI**
+> 日期：2026-07-03 ｜ 状态：**已实施**（2026-07-06，L0+L1+L2 全落地，878 测试绿）｜ 读者：**执行本方案的 AI**
 > 来源：真机截图暴露的能力墙——用户说「就在 alaeatposapp 项目里，本地有俩项目，你找一下确定一下」，
 > 而现有立项 AI 只是**无工具的文本抽取器**（`aiExtractIntake`，pool.send 一次性抽取），读得懂仓名但
 > 解析不了路径、分辨不了歧义、进不了仓。用户方向拍板：**过程中多让 AI 介入**。参考 ai-sentinel 的
@@ -219,3 +219,66 @@ scout_apply effect → scout_result 事件(登记 kinds)
    ▼
 清单卡打勾 → 人点「立项完成」(gate 与硬校验一寸不动)
 ```
+
+---
+
+## ✅ 落地记要（2026-07-06，L0+L1+L2 全落地）
+
+执行者：claude-opus-4-8[1m]。基线 833 测试 → **878 测试绿 / 104 文件**（typecheck + biome + vitest 全过）。
+四刀提交，每刀 `npm run check` 全绿：
+
+| 刀 | commit | 内容 |
+|---|---|---|
+| L0 | `8af3f29` | 仓库登记表（kernel store 新表 + 回填 + 抽取快路径） |
+| L1 | `283a8c9` | 勘探 run（STAGE.scout / scoutSpec / scout_apply effect / scout_result / 桥层消费 + AUQ 歧义卡 + /scout 命令 + 自动防抖） |
+| L2 | `5325e51` | 仓内收料（materials 解析 + 空字段带标记注入） |
+| 收尾 | 本次 | 文档状态 + OVERHAUL 附录 B 手验项 12~16 |
+
+### 逐项落地（对齐决策台账）
+
+- **D-1（AI 找料·人验料）不破**：勘探只读只产候选；`runScoutResult` 里一切 `repos[]` 候选逐条过既有
+  `isGitRepo`（绝对路径 + 是 git 仓 + 有 HEAD）才 `injectIntakeField`，与人工输入同一写口。gate（人点
+  「立项完成」）与必填清单一寸未动。
+- **D-3（勘探=workitem run）**：stage=`scout`，owner 槽、readonly、`readableDirs=scoutRoots()`、走 effect
+  流事件流留痕；不走 pool.send 旁路。
+- **D-4（搜索根自举）**：`scoutRootsFrom(登记父目录, env INTAKE_SCOUT_ROOTS)`，冒号分隔，去重；两者皆空 →
+  `[]`（自动触发跳过、手动 /scout 回「勘探不可用」）。
+- **D-5（歧义走 AUQ）**：`buildWorkitemQuestionCard`（routing 带 workitemId，header『仓库选择』，选项=带证据
+  的候选路径）。
+- **D-6（scout_result 桥层消费）**：`scout_apply` effect emit → `postStatus` 的 `scout_result` 分支
+  （`runScoutResult` DI）。
+- **D-7（防抖）**：`scoutConclusionCount(events) < 2` 才自动派；实测阈值 = **每单自动派勘探 ≤ 2 次**；手动
+  `/scout` 不受限。
+- **新事件 kind**：仅 `scout_result`（`REQUIREMENT_EVENT_KINDS` 13→14），anchor-drift 断言同步 14；board
+  投影补 icon/label。
+
+### 与方案的出入（按意图适配，记要如下）
+
+1. **postStatus 早退顺序**：方案说桥层消费 scout_result，但 `postStatus` 开头对立项相位早退
+   （`if (isIntakePhase) return`），而 scout_result 正是在**立项相位** emit。适配：把 scout_result 分支放在
+   该早退**之前**，消费完 `return`，不走下方锚点刷新（立项清单卡由 bridge 收料路径维护）。
+2. **歧义回灌落点**：方案说「答案走既有 auq-wi 回灌 → 下一轮抽取」。但既有 auq-wi 回调走
+   `injectHumanMessage`（→ worktype human_message），而立项相位 `onHumanMessage` 对普通消息返回 `{}` 会把
+   答案吞掉。适配：auq-wi 回调**按相位分流**——立项相位改走 `handleIntakeMessage`（合成一条群消息喂抽取路径，
+   thread_root=群 chatId），非立项相位维持原 injectHumanMessage。
+3. **repos_set 登记（L0.2 item 2）**：作为 `postStatus` 的一个 3 行内联分支（在 intake 早退之后，此时 phase
+   已是 split），未像 `runDelegationDue` 那样抽 DI 函数——因逻辑极简（读 payload.repos 逐仓 upsert），store 层
+   upsert 已有单测覆盖。
+4. **hints 类型**：`scoutSpec(item, hints: string)`，payload 带字符串 hints（自动触发 `hints.join(' ')`、手动
+   `/scout` 去前缀原文）；`composeScoutPrompt` 收 string。
+5. **抽取 prompt 快路径**：`composeIntakeExtractPrompt` 加第 4 参 `registry`（`{name,path}[]`，缺省 `[]`），
+   命中登记 → AI 直接输出绝对路径进 repos；未命中 → 进新增可选输出 `repoHints`（原词照录）。
+
+### 留下的 live 半（真机验证点，见 OVERHAUL 附录 B 手验 12~16）
+
+- 勘探 run 是真 AI 活：磁盘找仓 / 判活跃度 / 出证据 / 写 ```scout 块——沙箱用 stub run + 合成报告覆盖，真机
+  需确认 AI 确实只读、只在搜索根内活动、产出块格式合规。
+- L0 抽取快路径命中登记表、L1 歧义 AUQ 回灌进下一轮抽取、L2 仓内材料草稿——桥层动作在 DI 单测覆盖，真机验
+  端到端。
+
+### 非显然结论（memory 交接）
+
+- **postStatus 立项早退是 scout_result 的坑**：任何在立项相位 emit 的新事件若要桥层消费，必须放在
+  `isIntakePhase` 早退之前。
+- **立项相位的两条消息路径**：飞书群文本 → `handleIntakeMessage`（抽取）；`injectHumanMessage` → worktype
+  `onHumanMessage`（立项相位对非 `/scout` 普通消息返回 `{}`）。二者不通——auq-wi 回灌要进抽取必须显式走前者。
