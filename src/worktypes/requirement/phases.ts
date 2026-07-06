@@ -71,6 +71,7 @@ export const REQUIREMENT_EVENT_KINDS = [
   'steer_directive', // WS-2 消息必达：steer_apply 解析包工头报告后 emit 的结构化指令（redo_reconcile/rework/raise_human/none）
   'rework_requested', // WS-5 监工判大返工：gatekeeper_rework 提取受影响仓后 emit → 定向重派 worker
   'manifest_ready', // WS-7 交付清单：deliver_manifest effect 生成每仓分支/diffstat/接手命令后 emit → postStatus 贴卡
+  'scout_result', // INTAKE L1 立项勘探：scout_apply effect 解析勘探报告后 emit（repos/ambiguities/notFound）→ 桥层当场校验入表 / 出歧义卡
 ] as const;
 
 export type RequirementEventKind = (typeof REQUIREMENT_EVENT_KINDS)[number];

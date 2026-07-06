@@ -250,6 +250,54 @@ describe('requirement lifecycle transitions', () => {
     }
   });
 
+  it('INTAKE L1 /scout：立项相位 owner 空闲 → 派勘探 run（hints 去前缀）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.intake });
+    const out = t.onEvent(
+      item,
+      ev('human_message', { text: '/scout alaeatposapp posapp', runningOwners: 0 }),
+    );
+    expect(out.dispatch?.[0]).toMatchObject({
+      role: 'owner',
+      payload: { stage: 'scout', hints: 'alaeatposapp posapp' },
+    });
+  });
+
+  it('INTAKE L1 /scout：owner 忙 → {}（不排队，桥层回执已发用户可重发）；非立项相位 → {}', () => {
+    const busy = makeWorkItem('wi-1', { phase: PHASE.intake });
+    expect(t.onEvent(busy, ev('human_message', { text: '/scout x', runningOwners: 1 }))).toEqual(
+      {},
+    );
+    const nonIntake = makeWorkItem('wi-1', { phase: PHASE.implement });
+    expect(
+      t.onEvent(nonIntake, ev('human_message', { text: '/scout x', runningOwners: 0 })),
+    ).toEqual({});
+  });
+
+  it('INTAKE L1 勘探收尾 → scout_apply effect（带 reportPath）；未消费消息补派 steer', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.intake });
+    const out = t.onEvent(
+      item,
+      ev('run_completed', {
+        role: 'owner',
+        stage: 'scout',
+        reportPath: 'assignments/s/report.md',
+        unconsumedHumanMessages: 1,
+      }),
+    );
+    expect(out.effects?.[0]).toMatchObject({
+      kind: 'scout_apply',
+      payload: { reportPath: 'assignments/s/report.md' },
+    });
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'steer' } });
+  });
+
+  it('INTAKE L1 勘探失败 → {}（不弹病历、不自动重试，收料继续走人工）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.intake });
+    expect(
+      t.onEvent(item, ev('run_failed', { role: 'owner', stage: 'scout', assignmentRetries: 0 })),
+    ).toEqual({});
+  });
+
   it('last worker (runningWorkers===0) → 监工 gate（gatekeeper_review）；放行后 owner assess，owner done→集成验证', () => {
     // 多仓（满配）路径：单仓 lite 走另一条（gatekeeper_passed 直接进集成，见 WS-6 describe）。
     const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a', 'repo-b'] });

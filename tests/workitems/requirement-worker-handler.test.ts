@@ -771,3 +771,49 @@ describe('requirement 集成实证质检 (stage=inspect)', () => {
     expect(prompt).not.toContain('```steer');
   });
 });
+
+// INTAKE L1：立项勘探 run（stage=scout，立项相位 owner）——readonly + readableDirs=搜索根；prompt 织入
+// 线索 + 搜索根 + 登记快照。
+describe('requirement 立项勘探 run (stage=scout)', () => {
+  const worktreesDir = () => path.join(tmpDir, 'worktrees');
+  const intakeItem = () =>
+    makeWorkItem('wi-1', { type: 'requirement', phase: PHASE.intake, repos: [] });
+  const owner = () => makeAssignment('as-o1', 'wi-1', { role: 'owner' });
+
+  it('runOptions：readonly + readableDirs = scoutRoots()（立项相位 repos 为空，全仓可读无意义）', () => {
+    const s = createRequirementRunStrategy({
+      worktreesDir: worktreesDir(),
+      scoutRoots: () => ['/Users/zwh', '/work'],
+    });
+    const opts = s.runOptions({
+      workitem: intakeItem(),
+      assignment: owner(),
+      cwd: '/x',
+      effectPayload: { stage: 'scout' },
+    });
+    expect(opts.permission).toEqual({ mode: 'readonly' });
+    expect(opts.readableDirs).toEqual(['/Users/zwh', '/work']);
+  });
+
+  it('composePrompt：织入线索 + 搜索根 + 登记快照，走 composeScoutPrompt', () => {
+    const s = createRequirementRunStrategy({
+      worktreesDir: worktreesDir(),
+      scoutRoots: () => ['/Users/zwh'],
+      scoutRegistrySnapshot: () => '- posapp → /Users/zwh/posapp',
+    });
+    const prompt = s.composePrompt({
+      title: '找仓',
+      followups: [],
+      workitem: intakeItem(),
+      assignment: owner(),
+      batch: [],
+      readArtifact: () => undefined,
+      effectPayload: { stage: 'scout', hints: 'alaeatposapp' },
+    });
+    expect(prompt).toContain('勘探员');
+    expect(prompt).toContain('alaeatposapp');
+    expect(prompt).toContain('- /Users/zwh');
+    expect(prompt).toContain('posapp → /Users/zwh/posapp');
+    expect(prompt).toContain('绝不编造路径');
+  });
+});

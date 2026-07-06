@@ -25,6 +25,7 @@ import {
   buildQuestionAnsweredCard,
   buildQuestionFormCard,
   buildReportCard,
+  buildWorkitemQuestionCard,
   buildResultCard,
   buildStatusCard,
   CHECKPOINT_ACTION_KIND,
@@ -81,6 +82,7 @@ import {
   foldIntake,
   INTAKE_CHECKLIST,
   isDefRequired,
+  intakeReposOf,
   isFieldSatisfied,
   isGateReady,
   nextRequiredToFill,
@@ -89,6 +91,10 @@ import {
   requiredProgress,
 } from './worktypes/requirement/intake.js';
 import { createIntakeFinalizeHandler } from './worktypes/requirement/intake-finalize.js';
+import {
+  createScoutApplyHandler,
+  type ScoutAmbiguity,
+} from './worktypes/requirement/intake-scout.js';
 import { isIntakePhase, PHASE } from './worktypes/requirement/phases.js';
 
 const COMPACT_PROMPT = [
@@ -217,6 +223,35 @@ export function backfillRepoRegistry(deps: {
   const ts = deps.now();
   for (const p of repos) deps.upsertRepoRegistry(p, path.basename(p), ts, 'backfill');
   return repos.length;
+}
+
+// INTAKE L1：勘探搜索根自举——登记表仓的**父目录**去重 ∪ env INTAKE_SCOUT_ROOTS（冒号分隔）。两者皆空 →
+// []（勘探不可用：自动触发跳过、手动 /scout 报告会说找不到）。不全盘扫（D-4），只在这些根内浏览。
+export function scoutRootsFrom(registryPaths: string[], envValue: string | undefined): string[] {
+  const parents = registryPaths.map((p) => path.dirname(p));
+  const fromEnv = (envValue ?? '')
+    .split(':')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  return [...new Set([...parents, ...fromEnv])];
+}
+
+// INTAKE L1：登记表快照渲染（仓名 → 绝对路径，逐行），织入勘探 prompt 让它先查表再搜盘。空 → 空串。
+export function renderRegistrySnapshot(rows: Array<{ name: string; path: string }>): string {
+  if (rows.length === 0) return '';
+  return rows.map((r) => `- ${r.name} → ${r.path}`).join('\n');
+}
+
+// INTAKE L1 防抖（D-7）：数事件流里 stage=scout 的 run 结论数（run_completed/run_failed 平铺 stage）。桥层
+// 自动触发前查它，每单自动派勘探 ≤ 2 次（防循环烧 token）；手动 /scout 不受此限。纯函数。
+export function scoutConclusionCount(events: WorkItemEvent[]): number {
+  let n = 0;
+  for (const ev of events) {
+    if (ev.kind !== 'run_completed' && ev.kind !== 'run_failed') continue;
+    const p = ev.payload;
+    if (typeof p === 'object' && p !== null && (p as { stage?: unknown }).stage === 'scout') n++;
+  }
+  return n;
 }
 
 // WS-4 断线补拉（对抗「飞书 WS 不重放离线事件」）：对 managed 认领过的每个 chat 主动拉 im.message.list，
@@ -595,6 +630,86 @@ export async function runDelegationDue(
     );
   } catch (err) {
     deps.logger.error({ err, waitId }, 'delegation notify failed (resolve already committed)');
+  }
+}
+
+// INTAKE L1（D-6）：scout_result 的桥层执行器（依赖注入式导出，先例 runDelegationDue）。勘探产出经此消费：
+//   repos[]      → 逐条跑**桥层既有当场校验**（isGitRepo，D-1 红线：候选入表必须过校验）→ 通过的与现有
+//                  repos 合并去重后 injectIntakeField（与人工输入同一写口同一校验）+ upsert 登记表（source
+//                  ='scout'）；校验失败的降级为群内说明，绝不入表。
+//   ambiguities[]→ 每条出一张 AUQ 表单卡（buildQuestionCard，routing 带 workitemId）——人点选后走既有 auq-wi
+//                  回灌 → 下一轮抽取命中登记表/原路径。防重贴成本高，接受 rerun 极端场景重贴（recovery 重跑
+//                  仅崩溃后发生）。
+//   notFound[]   → 群内如实说没找到，请给绝对路径或补线索后 /scout 重试。
+// 幂等：injectIntakeField 重复注入同值由 fold 语义天然吸收；upsert 幂等；notify 失败只 log（不影响入表）。
+export async function runScoutResult(
+  deps: {
+    currentRepos: string[];
+    isGitRepo: (repoPath: string) => boolean;
+    injectRepos: (repos: string[]) => void;
+    upsertRepo: (repoPath: string) => void;
+    buildQuestionCard: (question: string, options: string[]) => object;
+    postCard: (card: object) => Promise<unknown>;
+    notify: (text: string) => Promise<unknown>;
+    logger: Pick<Logger, 'error' | 'info'>;
+  },
+  event: WorkItemEvent,
+): Promise<void> {
+  const p = event.payload;
+  const obj = typeof p === 'object' && p !== null ? (p as Record<string, unknown>) : {};
+  const repos = Array.isArray(obj.repos)
+    ? obj.repos.filter((r): r is string => typeof r === 'string')
+    : [];
+  const notFound = Array.isArray(obj.notFound)
+    ? obj.notFound.filter((r): r is string => typeof r === 'string')
+    : [];
+  const ambiguities = Array.isArray(obj.ambiguities)
+    ? (obj.ambiguities as ScoutAmbiguity[]).filter(
+        (a) => a && typeof a.question === 'string' && Array.isArray(a.options),
+      )
+    : [];
+
+  const lines: string[] = [];
+
+  // 1) 确定仓：当场校验（D-1）→ 通过的与现有 repos 合并去重后入表 + 登记。失败的降级为说明，不入表。
+  const valid = repos.filter((r) => deps.isGitRepo(r));
+  const invalid = repos.filter((r) => !deps.isGitRepo(r));
+  if (valid.length > 0) {
+    const merged = [...new Set([...deps.currentRepos, ...valid])];
+    deps.injectRepos(merged);
+    for (const r of valid) deps.upsertRepo(r);
+    lines.push(`✅ 勘探已确认并填入仓库：\n${valid.map((r) => `- ${r}`).join('\n')}`);
+  }
+  if (invalid.length > 0) {
+    lines.push(
+      `⚠️ 勘探给出的这些路径未通过校验（需绝对路径 + 是 git 仓），已跳过：\n${invalid
+        .map((r) => `- ${r}`)
+        .join('\n')}`,
+    );
+  }
+
+  // 2) 歧义：每条一张 AUQ 选择卡（人点选 → auq-wi 回灌 → 下轮抽取命中）。
+  for (const a of ambiguities) {
+    try {
+      await deps.postCard(deps.buildQuestionCard(a.question, a.options));
+    } catch (err) {
+      deps.logger.error({ err }, 'scout ambiguity card post failed');
+    }
+  }
+
+  // 3) notFound：如实说，请给绝对路径或补线索后 /scout 重试。
+  if (notFound.length > 0) {
+    lines.push(
+      `🔍 没找到这些线索对应的仓：${notFound.join('、')}。请直接发绝对路径，或补充线索后发 \`/scout <线索>\` 重试。`,
+    );
+  }
+
+  if (lines.length > 0) {
+    try {
+      await deps.notify(lines.join('\n'));
+    } catch (err) {
+      deps.logger.error({ err }, 'scout notify failed');
+    }
   }
 }
 
@@ -1413,6 +1528,12 @@ async function main() {
       if (ex?.uiRequired !== undefined) {
         workitems.api.injectIntakeField(item.id, { uiRequired: ex.uiRequired });
       }
+      // INTAKE L1：只给了仓名线索（无其它字段，主场景「就在 alaeatposapp 里」）→ 自动派勘探找仓，
+      // 不再逐项 nag（勘探回来经 scout_result 入表 / 出歧义卡）。
+      if (ex && injectAutoScoutIfNeeded(item, ex.repoHints ?? [])) {
+        await sender.sendText(msg.chatId, '🔍 没认出这个仓，我去本地找找，稍等…');
+        return;
+      }
       await fillIntakeDeterministic(item, msg, text);
       return;
     }
@@ -1451,6 +1572,10 @@ async function main() {
         `⚠️ 这些仓库路径无效（需绝对路径 + 是 git 仓）：\n${badRepos.map((p) => `- ${p}`).join('\n')}`,
       );
     }
+    // INTAKE L1：填完字段后 repos 仍缺且带未识别线索 → 自动派勘探找仓（与逐项提示并存）。
+    if (injectAutoScoutIfNeeded(item, ex.repoHints ?? [])) {
+      lines.push('🔍 没认出这个仓，我去本地找找，稍等…');
+    }
     const after = foldIntakeState(workitems.api.listEvents(item.id));
     const miss = requiredMissing(after).map((d) => d.label);
     lines.push(
@@ -1459,6 +1584,25 @@ async function main() {
         : '必填已齐 ✅ 核对清单卡无误后点「立项完成 · 开始开发」开跑。',
     );
     await sender.sendText(msg.chatId, lines.join('\n'));
+  }
+
+  // INTAKE L1 自动触发（D-7 防抖）：repos 仍缺 ∧ 有未识别仓名线索(repoHints) ∧ 每个线索登记表都未命中或
+  // 多命中（单命中说明抽取本应已解析，交回抽取而非勘探）∧ 本单已派勘探 run 结论 < 2 次 ∧ 搜索根非空 →
+  // injectHumanMessage('/scout <线索>')（worktype 立项相位 onHumanMessage 派勘探 run）。返回是否已触发。
+  // 手动 /scout 不走此路（不受防抖限）。
+  function injectAutoScoutIfNeeded(item: WorkItem, repoHints: string[]): boolean {
+    if (repoHints.length === 0) return false;
+    const events = workitems.api.listEvents(item.id);
+    if (intakeReposOf(foldIntakeState(events)).length > 0) return false; // repos 已有 → 不勘探
+    if (!repoHints.every((h) => store.matchRepoRegistry(h).length !== 1)) return false; // 有单命中 → 交回抽取
+    if (scoutConclusionCount(events) >= 2) return false; // 防抖：每单自动派 ≤ 2 次
+    const roots = scoutRootsFrom(
+      store.listRepoRegistry(200).map((r) => r.path),
+      process.env.INTAKE_SCOUT_ROOTS,
+    );
+    if (roots.length === 0) return false; // 无搜索根 → 勘探不可用
+    workitems.api.injectHumanMessage(item.id, { text: `/scout ${repoHints.join(' ')}` });
+    return true;
   }
 
   // 起一次性 readonly AI run 把自由描述抽成立项字段（managed 影子 task，每次清会话保持独立）。失败返 null。
@@ -1668,6 +1812,9 @@ async function main() {
     (msg) => {
       void onCancelUnit(msg);
     },
+    (msg, hints) => {
+      void onScout(msg, hints);
+    },
     (msg, args) => {
       void onDelegate(msg, args);
     },
@@ -1706,6 +1853,26 @@ async function main() {
           action.messageId,
           buildQuestionAnsweredCard(item?.title ?? workitemId, brief.join('；')),
         );
+      }
+      // INTAKE L1（D-5）：立项相位的 auq-wi 回灌 = 勘探歧义卡的人选答案，要进**下一轮抽取**（走
+      // handleIntakeMessage，命中登记表/原路径），而非 worktype human_message（立项相位 onHumanMessage 对
+      // 普通消息返回 {} 会把答案吞掉）。合成一条群消息喂抽取路径。thread_root=群 chatId（立项 claimKey）。
+      if (item && isIntakePhase(item.phase)) {
+        const chatId = store.getThreadRootByOwner(workitemId);
+        if (chatId) {
+          await handleIntakeMessage(item, {
+            messageId: action.messageId ?? '',
+            chatId,
+            chatType: 'group',
+            userId: action.operatorId,
+            text: lines.join('\n'),
+            isMentioned: false,
+            mentions: [],
+            attachments: [],
+            createTime: Date.now(),
+          });
+          return;
+        }
       }
       workitems.api.injectHumanMessage(workitemId, {
         text: `这是对你上一轮提问的回答：\n${lines.join('\n')}`,
@@ -1867,6 +2034,38 @@ async function main() {
       return;
     }
     workitems.api.injectHumanMessage(item.id, { text: '/cancel' });
+  }
+
+  // INTAKE L1：/scout <线索> —— 立项群里让 AI 找仓（手动触发，不受自动防抖限）。找单姿势与 /cancel 同源
+  // （resolveManagedItem）；只在立项相位有意义（worktype onHumanMessage 对非立项相位的 /scout 返回 {}）。
+  // 透传 '/scout <线索>' 给 worktype，owner 空闲则派勘探 run；忙则回执提示重发。
+  async function onScout(msg: IncomingMessage, hints: string): Promise<void> {
+    const item = resolveManagedItem(msg);
+    if (!item) {
+      await sender.reply(msg.messageId, '本会话没有进行中的需求单。');
+      return;
+    }
+    if (isTerminalStatus(item.status)) {
+      await sender.reply(msg.messageId, '该单元已结束，无法勘探。');
+      return;
+    }
+    if (!isIntakePhase(item.phase)) {
+      await sender.reply(msg.messageId, '勘探只在立项收料阶段可用（此单已过立项）。');
+      return;
+    }
+    const roots = scoutRootsFrom(
+      store.listRepoRegistry(200).map((r) => r.path),
+      process.env.INTAKE_SCOUT_ROOTS,
+    );
+    if (roots.length === 0) {
+      await sender.reply(
+        msg.messageId,
+        '勘探不可用：没有可搜索的根目录。请配置环境变量 INTAKE_SCOUT_ROOTS（冒号分隔的目录），或直接发仓库绝对路径。',
+      );
+      return;
+    }
+    workitems.api.injectHumanMessage(item.id, { text: `/scout ${hints}` });
+    await sender.reply(msg.messageId, '🔍 收到，我去本地找找这个仓，稍等…');
   }
 
   // DELEGATE D2.2：/delegate 开启/撤销本单委托（写入与文案在 runDelegateCommand，依赖注入式导出可测）。
@@ -2286,6 +2485,53 @@ export function createWorkitemsRuntime(deps: {
       try {
         const item = workitems.api.getWorkItem(workitemId);
         if (!item) return;
+        // INTAKE L1（D-6）：scout_result 在**立项相位** emit，必须放在下面 intake 早退之前消费（否则被短路）。
+        // 桥层据它当场校验入表 / 出歧义 AUQ 卡 / notFound 文案（runScoutResult）。消费完 return，不走下方锚点
+        // 刷新（立项清单卡由 bridge 收料路径维护，不该被观察者覆盖）。
+        if (event.kind === 'scout_result') {
+          const scoutAnchor = deps.kernelStore.getThreadAnchorByOwner(workitemId);
+          await runScoutResult(
+            {
+              currentRepos: item.repos,
+              isGitRepo,
+              injectRepos: (repos) =>
+                workitems.api.injectIntakeField(workitemId, { key: 'repos', value: repos }),
+              upsertRepo: (repoPath) =>
+                deps.kernelStore.upsertRepoRegistry(
+                  repoPath,
+                  path.basename(repoPath),
+                  Date.now(),
+                  'scout',
+                ),
+              buildQuestionCard: (question, options) =>
+                buildWorkitemQuestionCard(
+                  item.title,
+                  {
+                    toolUseId: '',
+                    questions: [
+                      {
+                        question,
+                        header: '仓库选择',
+                        options: options.map((label) => ({ label })),
+                      },
+                    ],
+                  },
+                  { workitemId },
+                ),
+              postCard: async (card) => {
+                if (scoutAnchor) await deps.sender.replyCard(scoutAnchor, card);
+                else deps.logger.warn({ workitemId }, 'scout ambiguity card skipped: no anchor');
+              },
+              notify: async (text) => {
+                if (scoutAnchor) await deps.sender.reply(scoutAnchor, text);
+                else deps.logger.warn({ workitemId }, 'scout notify skipped: no anchor');
+              },
+              logger: deps.logger,
+            },
+            event,
+          );
+          return;
+        }
         // 立项阶段：清单卡由 bridge 收料路径就地刷新（含立项 gate 按钮），观察者不插手，否则会用锚点卡
         // 覆盖清单卡。立项 gate 通过 → 进理解（非立项）→ 下面常规锚点刷新接管（卡 morph 成锚点卡）。
         if (isIntakePhase(item.phase)) return;
@@ -2414,6 +2660,16 @@ export function createWorkitemsRuntime(deps: {
         repo,
         repo,
       ),
+    // INTAKE L1：勘探搜索根 + 登记快照现算注入（反映最新登记表）。搜索根 = 登记父目录 ∪ INTAKE_SCOUT_ROOTS。
+    scoutRoots: () =>
+      scoutRootsFrom(
+        deps.kernelStore.listRepoRegistry(200).map((r) => r.path),
+        process.env.INTAKE_SCOUT_ROOTS,
+      ),
+    scoutRegistrySnapshot: () =>
+      renderRegistrySnapshot(
+        deps.kernelStore.listRepoRegistry(20).map((r) => ({ name: r.name, path: r.path })),
+      ),
   });
   workitems.effects.registerHandler(
     createAgentRunHandler({
@@ -2443,6 +2699,9 @@ export function createWorkitemsRuntime(deps: {
   // 立项收尾 effect: 立项 gate 通过 → fold 立项填项历史 → 落立项书 intake/intake.md + 提升 repos
   // (emit repos_set)。注册在这里，与 agent-run / integration_check 同批，进理解时由 worktype 发起。
   workitems.effects.registerHandler(createIntakeFinalizeHandler());
+  // INTAKE L1 勘探收尾 effect：读勘探 run 报告 → 解析 ```scout 块 → emit scout_result（桥层 runScoutResult
+  // 消费：当场校验入表 / 出歧义 AUQ 卡 / notFound 文案）。
+  workitems.effects.registerHandler(createScoutApplyHandler());
   workitems.start();
   return workitems;
 }

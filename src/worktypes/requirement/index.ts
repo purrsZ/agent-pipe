@@ -49,6 +49,9 @@ const STAGE = {
   advise: 'advise',
   // ENHANCE E5：集成实证质检员 = 只读 owner run，进各仓 worktree 读真实改动、对照契约取证（收尾无流转）。
   inspect: 'inspect',
+  // INTAKE L1：立项勘探员 = 只读 owner run（立项相位），在搜索根内找候选仓、验 git、拿证据（收料辅助，
+  // 收尾走 scout_apply effect emit scout_result，桥层消费；run 本身零状态机流转）。
+  scout: 'scout',
   implement: 'implement',
   fix: 'fix',
   rework: 'rework',
@@ -165,6 +168,14 @@ function onRunCompleted(item: WorkItem, ev: WorkItemEvent): Transition {
     // 不进状态机）。仍包 withPendingSteer：质检跑动期间攒下的未消费群消息由补派 steer 消费（消息必达）。
     if (stage === STAGE.inspect) {
       return withPendingSteer(item, ev, {});
+    }
+    // INTAKE L1：立项勘探（scout）收尾——读报告 → scout_apply effect emit scout_result（桥层消费入表 / 出
+    // 歧义卡）。仍包 withPendingSteer：勘探跑动期间攒下的未消费群消息由补派 steer 消费（消息必达）。注意
+    // 立项相位 onHumanMessage 对普通消息返回 {}，故 pending steer 在立项相位一般为 0；包一层无害且前向一致。
+    if (stage === STAGE.scout) {
+      return withPendingSteer(item, ev, {
+        effects: [{ kind: 'scout_apply', payload: { reportPath: reportPathOf(ev.payload) } }],
+      });
     }
     // 其余 owner run（reconcile / assess / stage 缺失回落）：算出 base 后包 withPendingSteer——若期间来了
     // 未被消费的群消息，收尾时追加一个 steer run 去消费（消息必达，WS-2.2b）。
@@ -387,7 +398,10 @@ function onRunFailed(item: WorkItem, ev: WorkItemEvent): Transition {
   if (
     failedStage === STAGE.steer ||
     failedStage === STAGE.advise ||
-    failedStage === STAGE.inspect
+    failedStage === STAGE.inspect ||
+    // INTAKE L1：勘探（scout）失败同理——收料继续走人工（用户可给绝对路径或 /scout 重试），不弹病历、
+    // 不自动重试（retryFailedRun 的 owner 回落会把 scout 错派成 assess，故必须在此拦下返回 {}）。
+    failedStage === STAGE.scout
   ) {
     return {};
   }
@@ -579,6 +593,15 @@ function onHumanMessage(item: WorkItem, ev: WorkItemEvent): Transition {
       waits: [{ kind: 'human', reason: 'cancel_confirm', deadlineTtlSec: CHECKPOINT_WAIT_TTL_SEC }],
     };
   }
+  // INTAKE L1：/scout <线索> ——只在立项相位消费（勘探找仓，收料辅助）。放在下方 intake 早返回之前才能覆盖
+  // 立项相位。owner 空闲立刻派勘探 run 消费；owner 忙 → {}（桥层回执已发，用户重发即可，不做队列）。非立项
+  // 相位收到 /scout → {}（此时仓已定，勘探无对象）。自动触发（桥层防抖后 injectHumanMessage）与手动 /scout
+  // 走同一条消费路径。
+  if (text.startsWith('/scout')) {
+    if (item.phase !== PHASE.intake) return {};
+    if (runningOwnersOf(ev.payload) > 0) return {};
+    return { dispatch: [scoutSpec(item, text.slice('/scout'.length).trim())] };
+  }
   // WS-2 消息必达：立项相位走 bridge 收料（不经此）。其余相位（拆解/实现/集成/交付）——owner 空闲立刻派
   // steer run 消费这条消息；owner 忙则等它收尾补派（withPendingSteer）。owner 槽独立于 worker（reducer
   // owner single-flight 只看 owner），故 worker 忙不忙无关。deliver 相位也适用（交付后问「分支在哪」有人答）。
@@ -608,6 +631,13 @@ function ownerSpec(item: WorkItem, stage: string): AssignmentSpec {
 // 供 composeAdvisePrompt 织入。收尾无任何流转（onRunCompleted 的 advise 分支）；即便报告出现 ```steer 也无消费方。
 function adviseSpec(item: WorkItem, incident: string): AssignmentSpec {
   return { ...ownerSpec(item, STAGE.advise), payload: { stage: STAGE.advise, incident } };
+}
+
+// INTAKE L1：立项勘探 spec——仿 adviseSpec（只读 owner 全套基建），payload 额外带线索 hints（用户 /scout
+// 后的原文 / 抽取的 repoHints），供 composeScoutPrompt 织入。收尾走 scout_apply effect（onRunCompleted 的
+// scout 分支）；失败零流转（onRunFailed 特判）。
+function scoutSpec(item: WorkItem, hints: string): AssignmentSpec {
+  return { ...ownerSpec(item, STAGE.scout), payload: { stage: STAGE.scout, hints } };
 }
 
 function workerDispatches(

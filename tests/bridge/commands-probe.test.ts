@@ -41,6 +41,7 @@ function makeHandler() {
     (_msg, threadRoot) => dones.push(threadRoot), // onDone
     () => {}, // onRequirement (covered in commands-req.test.ts)
     () => {}, // onCancelUnit
+    () => {}, // onScout
     () => {}, // onDelegate
   );
   return { handler, replies, probes, dones };

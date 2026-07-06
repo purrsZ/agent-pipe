@@ -18,6 +18,7 @@ import { createIntakeFinalizeHandler } from '../../src/worktypes/requirement/int
 import { foldIntake, isGateReady } from '../../src/worktypes/requirement/intake.js';
 import { createIntegrationCheckHandler } from '../../src/worktypes/requirement/integration.js';
 import { PHASE } from '../../src/worktypes/requirement/phases.js';
+import { createScoutApplyHandler } from '../../src/worktypes/requirement/intake-scout.js';
 import { createReconcileCheckHandler } from '../../src/worktypes/requirement/reconcile.js';
 import { createSteerApplyHandler } from '../../src/worktypes/requirement/steering.js';
 
@@ -56,6 +57,7 @@ function harness(
     failRepo?: string;
     raiseRepo?: string; // 该仓 worker 在报告里输出一个跨仓 ```gatekeeper 上报（→ 监工判大）
     steerJson?: string; // owner steer run 报告末尾输出的 ```steer 结构化指令（WS-2）
+    scoutJson?: string; // owner scout run 报告末尾输出的 ```scout 结构化结果（INTAKE L1）
   } = {},
 ) {
   seq += 1;
@@ -117,7 +119,16 @@ function harness(
         ctx.assignment?.role === 'owner' && stage === 'steer' && opts.steerJson
           ? `\n\`\`\`steer\n${opts.steerJson}\n\`\`\`\n`
           : '';
-      ctx.writeArtifact(`assignments/${aid}/report.md`, `ok ${aid}${raise}${steer}`, 'report');
+      // INTAKE L1：owner scout run 产带 ```scout 块的报告（模拟勘探员结构化结果）。
+      const scout =
+        ctx.assignment?.role === 'owner' && stage === 'scout' && opts.scoutJson
+          ? `\n\`\`\`scout\n${opts.scoutJson}\n\`\`\`\n`
+          : '';
+      ctx.writeArtifact(
+        `assignments/${aid}/report.md`,
+        `ok ${aid}${raise}${steer}${scout}`,
+        'report',
+      );
     },
   });
   // 拆解阶段 owner 跨仓对账判定 effect。
@@ -132,6 +143,8 @@ function harness(
   effects.registerHandler(createIntegrationCheckHandler());
   // 立项收尾 effect: 立项 gate 通过 → 落立项书 + 提升 repos（emit repos_set）。
   effects.registerHandler(createIntakeFinalizeHandler());
+  // INTAKE L1 勘探收尾 effect: 读勘探报告 → 解析 ```scout → emit scout_result。
+  effects.registerHandler(createScoutApplyHandler());
   const api = new WorkitemsApi({
     store,
     registry,
@@ -543,6 +556,35 @@ describe('requirement skeleton end-to-end', () => {
         store.listAssignments(item.id).filter((a) => a.role === 'owner').length,
       ).toBeGreaterThan(ownersBefore),
     );
+  });
+
+  it('INTAKE L1 勘探：立项相位 /scout → 勘探 run 出现 → 报告收尾 → scout_result 事件出现', async () => {
+    const scoutJson = JSON.stringify({
+      repos: ['/found/alaeatposapp'],
+      ambiguities: [],
+      notFound: [],
+    });
+    const { store, api } = harness({ scoutJson });
+    const item = api.createWorkItem({
+      type: 'requirement',
+      title: '找仓',
+      source: {},
+      repos: [],
+    }).item;
+    // 立项相位（未过 gate）注入 /scout → worktype 派勘探 owner run。
+    await waitFor(() => expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.intake));
+    api.injectHumanMessage(item.id, { text: '/scout alaeatposapp' });
+
+    // 勘探 owner run 出现（stage=scout）。
+    await waitFor(() =>
+      expect(store.listAssignments(item.id).some((a) => a.role === 'owner')).toBe(true),
+    );
+    // 勘探报告收尾 → scout_apply effect → emit scout_result 事件。
+    await waitFor(() =>
+      expect(store.listEvents(item.id).some((e) => e.kind === 'scout_result')).toBe(true),
+    );
+    // 仍停在立项相位（勘探是收料辅助，零状态机流转）。
+    expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.intake);
   });
 
   it('监工科层：worker 上报跨仓外溢 → gatekeeper_big 病历，停在实现；resolve → 继续进集成', async () => {

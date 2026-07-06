@@ -22,6 +22,7 @@ function makeHandler() {
   const reqs: Array<{ description: string }> = [];
   const cancels: IncomingMessage[] = [];
   const delegates: Array<{ msg: IncomingMessage; args: string[] }> = [];
+  const scouts: Array<{ msg: IncomingMessage; hints: string }> = [];
   const sender = {
     reply: async (_id: string, text: string) => {
       replies.push(text);
@@ -42,9 +43,10 @@ function makeHandler() {
     () => {}, // onDone
     (_msg, opts) => reqs.push(opts), // onRequirement
     (msg) => cancels.push(msg), // onCancelUnit
+    (msg, hints) => scouts.push({ msg, hints }), // onScout
     (msg, args) => delegates.push({ msg, args }), // onDelegate
   );
-  return { handler, replies, reqs, cancels, delegates };
+  return { handler, replies, reqs, cancels, delegates, scouts };
 }
 
 describe('/req dispatch (requirement 立项重塑, M-I2)', () => {

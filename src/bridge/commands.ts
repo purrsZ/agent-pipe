@@ -36,6 +36,7 @@ const HELP_TEXT = [
   '  /done                                     关闭当前调查（在其话题里回复）',
   '  /req [需求一句话]                          发起需求：建专属群，群内引导式收齐前置料(仓库/PRD/UI/验收)再开干',
   '  /cancel                                   在需求群里发起终止需求（需确认）',
+  '  /scout <线索>                             立项群里让 AI 去本地找仓（给仓名/项目名，找到自动填入）',
   '  /delegate 8h                              开启本单委托（三灯到点自动通过）；/delegate off 撤销',
   '  /help                                     本帮助',
   '',
@@ -61,6 +62,8 @@ export class CommandHandler {
     private onRequirement: (msg: IncomingMessage, opts: { description: string }) => void,
     // WS-10.8：/cancel 在需求群里发起终止需求（kernel 中性，与 onRequirement/onProbe 同型）。
     private onCancelUnit: (msg: IncomingMessage) => void,
+    // INTAKE L1：/scout <线索> 在立项群里让 AI 找仓（kernel 中性，线索原文透传，业务处理在 index 侧）。
+    private onScout: (msg: IncomingMessage, hints: string) => void,
     // DELEGATE D2.2：/delegate 在需求群里开启/撤销本单委托。参数原样透传（时长解析在 index 侧，
     // 本文件 kernel 中性、不掺业务语义）。
     private onDelegate: (msg: IncomingMessage, args: string[]) => void,
@@ -142,6 +145,10 @@ export class CommandHandler {
         case '/cancel':
           // WS-10.8：需求群里终止需求（需二次确认）。需求侧收到 /cancel 留言后升起取消确认。
           this.onCancelUnit(msg);
+          return;
+        case '/scout':
+          // INTAKE L1：立项群里让 AI 找仓（线索 = /scout 之后的原文，透传给 index 侧解析）。
+          await this.handleScout(msg, rest);
           return;
         case '/delegate':
           // DELEGATE D2.2：需求群里开启/撤销本单委托（睡前放权）。
@@ -339,6 +346,19 @@ export class CommandHandler {
       return;
     }
     this.onProbe(msg, { repo: flags.repo, description });
+  }
+
+  // INTAKE L1：/scout <线索> —— 立项群里让 AI 找仓。线索 = /scout 之后的原文（透传给 index 侧 onScout）。
+  private async handleScout(msg: IncomingMessage, rest: string[]): Promise<void> {
+    const hints = rest.join(' ').trim();
+    if (!hints) {
+      await this.sender.reply(
+        msg.messageId,
+        '用法: /scout <仓名或项目名线索>（在立项群里让我去本地找仓）',
+      );
+      return;
+    }
+    this.onScout(msg, hints);
   }
 
   // M1b WI-4: close the investigation owning the current thread. The thread root resolves

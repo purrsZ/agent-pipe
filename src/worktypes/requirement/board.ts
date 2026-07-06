@@ -383,6 +383,8 @@ const EVENT_CAT: Record<string, EventKind> = {
   rework_requested: 'agent',
   manifest_ready: 'ok',
   liveness_stalled: 'error',
+  // INTAKE L1 立项勘探结果（找仓）。
+  scout_result: 'system',
 };
 
 const EVENT_TEXT: Record<string, string> = {
@@ -404,6 +406,7 @@ const EVENT_TEXT: Record<string, string> = {
   rework_requested: '监工判大后定向返工',
   manifest_ready: '交付清单已生成',
   liveness_stalled: '流程卡死（系统自检出）',
+  scout_result: '立项勘探找仓结果',
 };
 
 function foldEvents(events: WorkItemEvent[], now: number): ReqEvent[] {

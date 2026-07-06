@@ -6,6 +6,7 @@ import { composeAdvisePrompt, composeInspectPrompt, renderEventDigest } from './
 import { branchFor } from './branch.js';
 import { type ContractSnapshot, EMPTY_SNAPSHOT } from './contract.js';
 import { parseInternalApis, promoteToContract } from './design.js';
+import { composeScoutPrompt } from './intake-scout.js';
 import { PHASE } from './phases.js';
 import { composeReconcilePrompt, parseReconcileResult, reconcileToContract } from './reconcile.js';
 import { composeSteerPrompt, renderContractSummary, steeringNotePath } from './steering.js';
@@ -30,6 +31,13 @@ export function createRequirementRunStrategy(opts: {
   // worker's repo. Injected as a function so this worktypes-layer file never imports the
   // knowledge layer — index.ts wires the real KnowledgeStore-backed reader (composeRepoKnowledge).
   knowledgeFor?: (repoKey: string) => string | undefined;
+  // INTAKE L1 勘探（scout）搜索根：登记表父目录去重 ∪ env INTAKE_SCOUT_ROOTS。注入为函数（每次派 run 现算，
+  // 反映最新登记表）。stage=scout 的 run readonly + readableDirs=scoutRoots()（立项相位 repos 为空，全仓可读
+  // 无意义）。空 → 勘探不可用（index.ts 桥层自动触发跳过；手动 /scout 也读不到盘，报告会说找不到）。
+  scoutRoots?: () => string[];
+  // INTAKE L1 勘探登记表快照：渲染好的「仓名 → 绝对路径」文本（listRepoRegistry 前 20），织入勘探 prompt
+  // 让它先查表再搜盘。注入为函数（现算最新）。缺省 → 空串（prompt 显示「登记表为空」）。
+  scoutRegistrySnapshot?: () => string;
 }): RunStrategy {
   const base = opts.baseRef ?? 'HEAD';
 
@@ -122,6 +130,18 @@ export function createRequirementRunStrategy(opts: {
           followups,
         });
       }
+      // INTAKE L1：立项勘探（stage=scout）——组勘探员 prompt（线索 + 登记快照 + 搜索根 + 方法提示 + 产出
+      // 格式）。roots/registrySnapshot 由 index.ts 从登记表现算注入（opts）；hints 从 dispatch payload 读；
+      // summary 取立项书（立项相位一般还没落 intake.md → undefined，勘探据标题 + 线索推断）。
+      if (stage === 'scout') {
+        return composeScoutPrompt({
+          title,
+          hints: hintsFromPayload(effectPayload),
+          roots: opts.scoutRoots?.() ?? [],
+          registrySnapshot: opts.scoutRegistrySnapshot?.() ?? '',
+          summary: readArtifact('intake/intake.md'),
+        });
+      }
       if (stage === 'reconcile' || workitem.phase === PHASE.split) {
         return composeReconcilePrompt({
           title,
@@ -154,6 +174,11 @@ export function createRequirementRunStrategy(opts: {
       // but with EVERY involved repo as a readable dir (--add-dir) so a cross-repo 包工头 can read
       // all repos, not just cwd=repos[0]（真机暴露：理解 run 只看了第一个仓）。
       if (assignment.role === 'worker') return mapWritePermission(cwd);
+      // INTAKE L1：立项勘探（stage=scout）readonly + readableDirs=搜索根（登记父目录 ∪ SCOUT_ROOTS）。立项
+      // 相位 repos 为空，reposReadable 给不出可读目录 → 必须显式给搜索根，否则勘探员进不了任何目录。
+      if (stageFromPayload(effectPayload) === 'scout') {
+        return { permission: { mode: 'readonly' }, readableDirs: opts.scoutRoots?.() ?? [] };
+      }
       // ENHANCE E5：集成实证质检员（stage=inspect）readonly 不变，但 readableDirs 除全仓外再加各仓最后一轮
       // worker 的 worktree——质检员由此成为全流程第一个「既见图纸又见实物」的角色。worktree 已被 GC / 不存在
       // 的路径照传（agent 读不到会自己降级，与 diffstat 占位串同理）。
@@ -260,6 +285,14 @@ function noteFromPayload(payload: unknown): string | undefined {
 function incidentFromPayload(payload: unknown): string {
   if (typeof payload !== 'object' || payload === null) return '';
   const v = (payload as Record<string, unknown>).incident;
+  return typeof v === 'string' ? v : '';
+}
+
+// INTAKE L1：dispatch payload 的 hints（scoutSpec 带的用户仓库线索原文）。空/缺失 → ''（composeScoutPrompt
+// 内部回落「未给具体线索」）。仿 incidentFromPayload 防御式。
+function hintsFromPayload(payload: unknown): string {
+  if (typeof payload !== 'object' || payload === null) return '';
+  const v = (payload as Record<string, unknown>).hints;
   return typeof v === 'string' ? v : '';
 }
 
