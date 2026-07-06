@@ -273,7 +273,7 @@ describe('requirement lifecycle transitions', () => {
     ).toEqual({});
   });
 
-  it('INTAKE L1 勘探收尾 → scout_apply effect（带 reportPath）；未消费消息补派 steer', () => {
+  it('INTAKE L1 勘探收尾 → scout_apply effect（带 reportPath）；不补派 steer（立项相位无 steer 消费方）', () => {
     const item = makeWorkItem('wi-1', { phase: PHASE.intake });
     const out = t.onEvent(
       item,
@@ -281,6 +281,7 @@ describe('requirement lifecycle transitions', () => {
         role: 'owner',
         stage: 'scout',
         reportPath: 'assignments/s/report.md',
+        // 即便勘探跑动期间攒了未消费消息，也不补派 steer——立项相位无契约/无 repos，steer 会空转。
         unconsumedHumanMessages: 1,
       }),
     );
@@ -288,7 +289,7 @@ describe('requirement lifecycle transitions', () => {
       kind: 'scout_apply',
       payload: { reportPath: 'assignments/s/report.md' },
     });
-    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'steer' } });
+    expect(out.dispatch ?? []).toHaveLength(0);
   });
 
   it('INTAKE L1 勘探失败 → {}（不弹病历、不自动重试，收料继续走人工）', () => {

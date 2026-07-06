@@ -170,12 +170,14 @@ function onRunCompleted(item: WorkItem, ev: WorkItemEvent): Transition {
       return withPendingSteer(item, ev, {});
     }
     // INTAKE L1：立项勘探（scout）收尾——读报告 → scout_apply effect emit scout_result（桥层消费入表 / 出
-    // 歧义卡）。仍包 withPendingSteer：勘探跑动期间攒下的未消费群消息由补派 steer 消费（消息必达）。注意
-    // 立项相位 onHumanMessage 对普通消息返回 {}，故 pending steer 在立项相位一般为 0；包一层无害且前向一致。
+    // 歧义卡）。**不**包 withPendingSteer：勘探是立项相位专属，而立项相位没有 steer 消费方（steer 靠契约/
+    // 各仓上下文，立项期都不存在）；勘探跑动期间若来了未消费 human_message（如再发一次 /scout、/cancel），
+    // 补派 steer 会在无 repos/无契约的立项相位跑一个空转 owner run（真实缺陷，审查暴露）。这些消息各有其
+    // 归宿：/scout 由用户重发触发新勘探、/cancel 已 raise cancel_confirm、普通收料走 bridge，不需 steer 兜。
     if (stage === STAGE.scout) {
-      return withPendingSteer(item, ev, {
+      return {
         effects: [{ kind: 'scout_apply', payload: { reportPath: reportPathOf(ev.payload) } }],
-      });
+      };
     }
     // 其余 owner run（reconcile / assess / stage 缺失回落）：算出 base 后包 withPendingSteer——若期间来了
     // 未被消费的群消息，收尾时追加一个 steer run 去消费（消息必达，WS-2.2b）。

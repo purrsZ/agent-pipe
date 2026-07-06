@@ -1638,7 +1638,15 @@ async function main() {
     if (repoHints.length === 0) return false;
     const events = workitems.api.listEvents(item.id);
     if (intakeReposOf(foldIntakeState(events)).length > 0) return false; // repos 已有 → 不勘探
-    if (!repoHints.every((h) => store.matchRepoRegistry(h).length !== 1)) return false; // 有单命中 → 交回抽取
+    // 「单命中登记表 → 交回抽取（AI 本应已解析）」的判据必须对齐 AI 实际看到的**同一窗口**（抽取 prompt 只
+    // 织入 listRepoRegistry(20)）——否则命中行落在前 20 之外时，AI 没见到会塞进 repoHints，而全表 matchRepo
+    // 又算它单命中 → 既不勘探也没人填，repos 静默卡缺失（审查暴露）。故这里用同一 20 窗口做包含匹配。
+    const snapshot = store.listRepoRegistry(20);
+    const snapshotMatchCount = (hint: string): number => {
+      const needle = hint.trim().toLowerCase();
+      return needle.length === 0 ? 0 : snapshot.filter((r) => r.name.includes(needle)).length;
+    };
+    if (!repoHints.every((h) => snapshotMatchCount(h) !== 1)) return false; // 快照内单命中 → 交回抽取
     if (scoutConclusionCount(events) >= 2) return false; // 防抖：每单自动派 ≤ 2 次
     const roots = scoutRootsFrom(
       store.listRepoRegistry(200).map((r) => r.path),
@@ -2536,7 +2544,9 @@ export function createWorkitemsRuntime(deps: {
           const scoutAnchor = deps.kernelStore.getThreadAnchorByOwner(workitemId);
           await runScoutResult(
             {
-              currentRepos: item.repos,
+              // 立项相位仓库存在 **intake 字段**里（item.repos 要到 finalize 才提升，此时恒为 []）——合并基必须
+              // 取 intake 字段现值，否则手动 /scout 追加新仓时会用 [] 覆盖已收的仓（丢仓）。
+              currentRepos: intakeReposOf(foldIntakeState(workitems.api.listEvents(workitemId))),
               isGitRepo,
               injectRepos: (repos) =>
                 workitems.api.injectIntakeField(workitemId, { key: 'repos', value: repos }),

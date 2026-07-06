@@ -276,6 +276,21 @@ scout_apply effect → scout_result 事件(登记 kinds)
 - L0 抽取快路径命中登记表、L1 歧义 AUQ 回灌进下一轮抽取、L2 仓内材料草稿——桥层动作在 DI 单测覆盖，真机验
   端到端。
 
+### 对抗式代码审查修复（提交后复核，3 处真实缺陷）
+
+1. **丢仓（严重）**：`runScoutResult` 的合并基原取 `item.repos`——但立项相位仓库存在 **intake 字段**里，
+   `item.repos` 恒为 `[]`（要到 finalize 才提升）。手动 `/scout` 在已收一个仓后再找到新仓 → 合并用 `[]`
+   覆盖 intake repos 字段 → 丢已收仓。修：合并基改用 `intakeReposOf(foldIntakeState(listEvents))`。
+2. **空转 steer（中）**：scout 收尾原包 `withPendingSteer`——勘探跑动期间若来未消费 human_message（再发
+   `/scout`、`/cancel`）会在无 repos/无契约的立项相位补派一个空转 steer owner run。修：scout 分支不再包
+   `withPendingSteer`（立项相位无 steer 消费方）。
+3. **窗口不一致（中，条件触发）**：自动触发的「单命中登记表 → 交回抽取」判据原用**全表** `matchRepoRegistry`，
+   而抽取 prompt 只织入 `listRepoRegistry(20)`；登记 >20 条且命中行在前 20 之外时 AI 塞 repoHints、判据却
+   算单命中 → 既不勘探也没人填，repos 静默卡缺失。修：判据对齐同一 20 窗口做包含匹配。
+
+（审查另指出「歧义卡选项带证据后缀需 AI 二次剥离路径」为可回避脆弱，非硬缺陷——符合 D-1「AI 找料人验料」，
+候选仍过 `isGitRepo` 校验，保留。）
+
 ### 非显然结论（memory 交接）
 
 - **postStatus 立项早退是 scout_result 的坑**：任何在立项相位 emit 的新事件若要桥层消费，必须放在
