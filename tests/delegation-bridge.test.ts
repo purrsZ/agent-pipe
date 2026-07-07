@@ -68,6 +68,15 @@ describe('delegationGuardFor (DELEGATE D-4：只认机器信号)', () => {
     expect(delegationGuardFor('awaiting_close', [])).toBe(true);
   });
 
+  it('灯③：异形 payload（null/字符串/坏行）→ false——无法解读走保守面，不当真通过（审查修复）', () => {
+    expect(delegationGuardFor(LIGHT3, [ev('integration_check_passed', null, 1)])).toBe(false);
+    expect(delegationGuardFor(LIGHT3, [ev('integration_check_passed', 'ok', 1)])).toBe(false);
+    // reason 为 null（非 undefined）同样不算真通过——与 deliverGateNote 共用同一份解读，不再分叉。
+    expect(delegationGuardFor(LIGHT3, [ev('integration_check_passed', { reason: null }, 1)])).toBe(
+      false,
+    );
+  });
+
   it('非白名单恒 false（双保险）：判大/病历/取消/立项 gate 即便被误发 delegation_due 也过不了', () => {
     for (const reason of [
       'gatekeeper_big',
@@ -86,23 +95,45 @@ describe('delegationGuardFor (DELEGATE D-4：只认机器信号)', () => {
 function executorDeps(
   over: {
     wait?: { workitemId: string; reason: string; resolvedAt: number | null } | undefined;
-    grant?: { grantNote: string; expiresAt: number } | undefined;
+    grant?:
+      | { reasons?: string[]; grantNote: string; expiresAt: number; createdAt?: number }
+      | undefined;
     events?: WorkItemEvent[];
+    // 同单其它 open waits（默认只有目标 wait 自己）；打回优先测试用 extraWaits 挂历史 wait 供 getWait 反查。
+    openWaits?: Array<{ id: string; kind: string; reason: string }>;
+    extraWaits?: Record<string, { workitemId: string; reason: string; resolvedAt: number | null }>;
     notifyError?: boolean;
   } = {},
 ) {
   const resolves: Array<{ waitId: string; input: unknown }> = [];
   const notices: string[] = [];
   const logger = { error: vi.fn(), info: vi.fn() };
+  const targetWait =
+    'wait' in over ? over.wait : { workitemId: 'wi-1', reason: 'awaiting_close', resolvedAt: null };
   const deps = {
     workitems: {
       store: {
-        getWait: () =>
-          'wait' in over
-            ? over.wait
-            : { workitemId: 'wi-1', reason: 'awaiting_close', resolvedAt: null },
+        getWait: (id: string) => (id === 'wt-1' ? targetWait : over.extraWaits?.[id]),
         activeDelegation: () =>
-          'grant' in over ? over.grant : { grantNote: '/delegate 8h', expiresAt: 4_000_000 },
+          'grant' in over
+            ? over.grant === undefined
+              ? undefined
+              : {
+                  reasons: over.grant.reasons ?? [...DELEGABLE_WAIT_REASONS],
+                  createdAt: over.grant.createdAt ?? 0,
+                  grantNote: over.grant.grantNote,
+                  expiresAt: over.grant.expiresAt,
+                }
+            : {
+                reasons: [...DELEGABLE_WAIT_REASONS],
+                grantNote: '/delegate 8h',
+                expiresAt: 4_000_000,
+                createdAt: 0,
+              },
+        listOpenWaits: () =>
+          over.openWaits ?? [
+            { id: 'wt-1', kind: 'human', reason: targetWait?.reason ?? 'awaiting_close' },
+          ],
       },
       api: {
         listEvents: () => over.events ?? [],
@@ -181,6 +212,62 @@ describe('runDelegationDue (DELEGATE D2.3)', () => {
     expect(resolves).toHaveLength(1);
     expect(logger.error).toHaveBeenCalled();
   });
+
+  it('同单还有授权未覆盖的 open human wait（如 cancel_confirm）→ 不自动过（审查修复：自动关单不埋人未决事项）', async () => {
+    const { deps, resolves } = executorDeps({
+      openWaits: [
+        { id: 'wt-1', kind: 'human', reason: 'awaiting_close' },
+        { id: 'wt-c', kind: 'human', reason: 'cancel_confirm' },
+      ],
+    });
+    await runDelegationDue(deps, dueEvent);
+    expect(resolves).toHaveLength(0);
+  });
+
+  it('同单其它 open wait 若也在授权列表内（或非 human）→ 不拦', async () => {
+    const { deps, resolves } = executorDeps({
+      openWaits: [
+        { id: 'wt-1', kind: 'human', reason: 'awaiting_close' },
+        { id: 'wt-3', kind: 'human', reason: LIGHT3 }, // 授权覆盖的灯不算未决事项
+        { id: 'wt-t', kind: 'timer', reason: 'anything' }, // 非 human 不算
+      ],
+    });
+    await runDelegationDue(deps, dueEvent);
+    expect(resolves).toHaveLength(1);
+  });
+
+  it('授权之后人显式打回过同名 wait → 不自动过（人的更晚决定优先，审查修复）', async () => {
+    const { deps, resolves } = executorDeps({
+      grant: { grantNote: '/delegate 8h', expiresAt: 4_000_000, createdAt: 1000 },
+      extraWaits: { 'wt-old': { workitemId: 'wi-1', reason: 'awaiting_close', resolvedAt: 1500 } },
+      events: [
+        ev(
+          'wait_resolved',
+          { waitId: 'wt-old', operator: 'lichao', reason: '暂不', decision: { approved: false } },
+          1,
+        ),
+      ],
+    });
+    await runDelegationDue(deps, dueEvent);
+    expect(resolves).toHaveLength(0);
+  });
+
+  it('打回发生在授权之前 → 不影响（重新 /delegate 即重置打回记忆）', async () => {
+    const { deps, resolves } = executorDeps({
+      grant: { grantNote: '/delegate 8h', expiresAt: 4_000_000, createdAt: 1500 },
+      extraWaits: { 'wt-old': { workitemId: 'wi-1', reason: 'awaiting_close', resolvedAt: 900 } },
+      // 事件 createdAt=1000 < grant.createdAt=1500 → humanDeclinedSince 扫不到（授权前的历史不算）。
+      events: [
+        ev(
+          'wait_resolved',
+          { waitId: 'wt-old', operator: 'lichao', reason: '暂不', decision: { approved: false } },
+          1,
+        ),
+      ],
+    });
+    await runDelegationDue(deps, dueEvent);
+    expect(resolves).toHaveLength(1);
+  });
 });
 
 // ── runDelegateCommand 命令主体 ─────────────────────────────────────────────────────────
@@ -230,6 +317,7 @@ describe('runDelegateCommand (DELEGATE D2.2)', () => {
     expect(replies).toHaveLength(1);
     expect(replies[0]).toMatch(/已开启委托至 \d{2}:\d{2}/); // HH:mm 按本地时区渲染，不锚具体值
     expect(replies[0]).toContain('监工判大与一切病历仍会等你');
+    expect(replies[0]).toContain('打回过的灯本次委托不再自动过'); // 打回优先（审查修复）如实交代
     expect(replies[0]).toContain('10 分钟'); // delaySec=600 如实渲染冷静期
     expect(replies[0]).toContain('/delegate off');
   });
@@ -278,36 +366,56 @@ describe('runDelegateCommand (DELEGATE D2.2)', () => {
 
 describe('delegationCardHint (DELEGATE D3)', () => {
   const wait = { reason: 'awaiting_close', createdAt: 1000 };
-  const grant = { reasons: ['awaiting_close', LIGHT3], expiresAt: 1000 + 8 * 3_600_000 };
+  const grant = {
+    reasons: ['awaiting_close', LIGHT3],
+    expiresAt: 1000 + 8 * 3_600_000,
+    createdAt: 1000,
+  };
+  const NOW = 2000; // 出卡时刻（冷静期内）
 
-  it('生效授权 + reason 命中 + guard 放行 → 灰字提示（带 /delegate off）', () => {
-    const hint = delegationCardHint(wait, grant, [], 600);
+  it('生效授权 + reason 命中 + guard 放行 → 灰字提示（带 /delegate off，「HH:mm 前」对齐设计文档）', () => {
+    const hint = delegationCardHint(wait, grant, [], 600, NOW);
     expect(hint).toContain('委托生效中');
     expect(hint).toContain('/delegate off');
-    expect(hint).toMatch(/将于 \d{2}:\d{2} 后自动通过/);
+    expect(hint).toMatch(/将于 \d{2}:\d{2} 前自动通过/);
   });
 
   it('无授权 / reason 不在授权列表 → 不提示', () => {
-    expect(delegationCardHint(wait, undefined, [], 600)).toBeUndefined();
+    expect(delegationCardHint(wait, undefined, [], 600, NOW)).toBeUndefined();
     expect(
-      delegationCardHint({ reason: 'gatekeeper_big', createdAt: 1000 }, grant, [], 600),
+      delegationCardHint({ reason: 'gatekeeper_big', createdAt: 1000 }, grant, [], 600, NOW),
     ).toBeUndefined();
   });
 
   it('灯③ guard 拦住（no_contract）→ 不提示——卡上不承诺不会发生的自动通过', () => {
     const events = [ev('integration_check_passed', { reason: 'no_contract' }, 1)];
     expect(
-      delegationCardHint({ reason: LIGHT3, createdAt: 1000 }, grant, events, 600),
+      delegationCardHint({ reason: LIGHT3, createdAt: 1000 }, grant, events, 600, NOW),
     ).toBeUndefined();
     // 真通过则提示照出。
     const passed = [ev('integration_check_passed', { interfaceCount: 2 }, 1)];
-    expect(delegationCardHint({ reason: LIGHT3, createdAt: 1000 }, grant, passed, 600)).toContain(
-      '委托生效中',
-    );
+    expect(
+      delegationCardHint({ reason: LIGHT3, createdAt: 1000 }, grant, passed, 600, NOW),
+    ).toContain('委托生效中');
   });
 
   it('到点前授权已过期 → 不提示（不会自动过）', () => {
-    const expiring = { reasons: ['awaiting_close'], expiresAt: 1000 + 60_000 }; // 1min 后过期 < 10min 冷静期
-    expect(delegationCardHint(wait, expiring, [], 600)).toBeUndefined();
+    const expiring = { reasons: ['awaiting_close'], expiresAt: 1000 + 60_000, createdAt: 1000 }; // 1min 后过期 < 10min 冷静期
+    expect(delegationCardHint(wait, expiring, [], 600, NOW)).toBeUndefined();
+  });
+
+  it('灯先亮、人后放权 → 时刻锚 grant.createdAt（与 watchdog 同式，卡上时刻不与实际行为漂移）', () => {
+    const lateGrant = { ...grant, createdAt: 1000 + 3_600_000 }; // 灯挂 1h 后才 /delegate
+    const hint = delegationCardHint(wait, lateGrant, [], 600, lateGrant.createdAt + 1)!;
+    // autoAt = grant.createdAt + 600s；若仍锚 wait.createdAt 早已过期会渲染成「即将」。
+    const d = new Date(lateGrant.createdAt + 600_000);
+    const expected = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+    expect(hint).toContain(`将于 ${expected} 前自动通过`);
+  });
+
+  it('补发卡时 autoAt 已成过去 → 改说「即将自动通过」，不渲染过去时刻（审查修复）', () => {
+    const hint = delegationCardHint(wait, grant, [], 600, 1000 + 4 * 3_600_000); // 首发失败 4h 后补发
+    expect(hint).toContain('即将自动通过');
+    expect(hint).not.toMatch(/\d{2}:\d{2}/);
   });
 });

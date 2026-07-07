@@ -173,6 +173,11 @@ export interface WorkType {
   // 豁免该检查（probe 全程休息、requirement 立项/交付合法休息）。缺省 ⇒ 恒 may-rest（probe/noop 零回归）。
   // 容器调用此方法不算解释业务语义（先例 topology()）。
   liveness?(item: WorkItem): 'must-progress' | 'may-rest';
+  // DELEGATE（审查修复）：委托自动通过的业务 guard（机器信号判定）。watchdog 委托到点先问一声——guard
+  // 不过就不 enqueue delegation_due（否则被桥层拦下的中性事件每 delegationDelaySec 重发一次，整夜空转
+  // 刷锚点卡、事件表膨胀）。缺省 ⇒ 恒放行（桥层消费方仍有 fail-closed 兜底）。容器调用此方法不算解释
+  // 业务语义（先例 topology()/liveness()）。
+  delegationGuard?(reason: string, events: WorkItemEvent[]): boolean;
 }
 
 export interface CreateInput {

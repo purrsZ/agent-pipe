@@ -1,9 +1,9 @@
 import type { WorkitemsConfig } from './config.js';
 import type { ReducerRuntime } from './reducer.js';
 import type { WorkTypeRegistry } from './registry.js';
-import type { LoggerLike } from './shared.js';
+import { humanDeclinedSince, type LoggerLike } from './shared.js';
 import type { WorkitemsStore } from './store.js';
-import type { Clock } from './types.js';
+import type { Clock, Delegation } from './types.js';
 
 type BeatSource = {
   lastBeat(assignmentId: string): number | undefined;
@@ -38,9 +38,10 @@ export class Watchdog {
   private interval: ReturnType<typeof setInterval> | undefined;
   // WS-1.2 防抖：workitemId → 首次观测到活性违反的时刻。恢复正常即删除；持续 ≥ grace 才报警。
   private readonly livenessViolations = new Map<string, number>();
-  // DELEGATE D1.3 节流：waitId → 上次 enqueue delegation_due 的时刻。消费方（桥层）resolve 失败/静默
-  // 跳过时每 delegationDelaySec 重发一次而非每 tick 重发（事件流不被灌爆）；重启丢失只是提早重发一次，
-  // 消费方幂等无害。wait 关闭后条目随 tick 清扫。
+  // DELEGATE D1.3 节流：waitId → 上次「到点深检查」的时刻（enqueue 成功或被深检查拦下都算）。深检查与
+  // 重发都以 delegationDelaySec 为窗口，而非每 tick（事件流与查询都不被灌爆）；enqueue 本身失败（瞬时 DB
+  // 错误）不刷新，下 tick 立即重试（审查修复——原先先刷后发，一次瞬时故障白等一个窗口）。重启丢失只是
+  // 提早重扫一次，消费方幂等无害。wait 关闭后条目随 tick 清扫。
   private readonly delegationNotified = new Map<string, number>();
 
   constructor(private readonly deps: WatchdogDeps) {}
@@ -161,19 +162,57 @@ export class Watchdog {
     this.scanLiveness(now);
   }
 
-  // DELEGATE D1.3：单条 human wait 的委托到点判定。首发 due = createdAt + delegationDelaySec（冷静期，
-  // D-3：灯卡先发、人在场可抢先手动）；发过后每 delegationDelaySec 重发一次（节流，消费失败自愈）。
+  // DELEGATE D1.3：单条 human wait 的委托到点判定。首发 due = max(wait 挂起, 授权下达) + delegationDelaySec
+  // （冷静期，D-3：灯卡先发、人在场可抢先手动——审查修复：原先只锚 wait.createdAt，灯先亮、人睡前才
+  // /delegate 时下一 tick 即秒过，承诺的反悔窗口为零）；之后每 delegationDelaySec 重扫一次（节流，消费
+  // 失败自愈）。到点后过一遍深检查（delegationBlocked），任一不过 → 刷新节流静默跳过，下窗口再看（局面
+  // 可能已变）；全过才 enqueue 中性事件 delegation_due，业务收尾在桥层消费方。
   private scanDelegation(
     wait: { id: string; workitemId: string; reason: string; createdAt: number },
     now: number,
   ): void {
     const grant = this.deps.store.activeDelegation(wait.workitemId, now);
-    if (!grant || !grant.reasons.includes(wait.reason)) return;
+    if (!grant?.reasons.includes(wait.reason)) return;
     const last = this.delegationNotified.get(wait.id);
-    const due = (last ?? wait.createdAt) + this.deps.cfg.delegationDelaySec * 1000;
+    const due =
+      (last ?? Math.max(wait.createdAt, grant.createdAt)) + this.deps.cfg.delegationDelaySec * 1000;
     if (now < due) return;
-    this.delegationNotified.set(wait.id, now);
-    this.safeEnqueue(wait.workitemId, { kind: 'delegation_due', payload: { waitId: wait.id } });
+    if (this.delegationBlocked(wait, grant)) {
+      this.delegationNotified.set(wait.id, now);
+      return;
+    }
+    if (
+      this.safeEnqueue(wait.workitemId, { kind: 'delegation_due', payload: { waitId: wait.id } })
+    ) {
+      this.delegationNotified.set(wait.id, now);
+    }
+  }
+
+  // 委托到点的深检查（每 delegationDelaySec 窗口一次，不进 1Hz 热路径）。三条都是机械判定，不解释业务语义：
+  private delegationBlocked(
+    wait: { id: string; workitemId: string; reason: string },
+    grant: Delegation,
+  ): boolean {
+    // (a) 同单还有授权未覆盖的 open human wait（取消确认/病历/判大…）→ 人有未决事项，预授权不覆盖当下
+    // 局面，先不自动过（审查修复——原先自动关单会把进行中的 /cancel 确认与未处理病历随终态静默埋掉）。
+    // reason 匹配同 grant.reasons 的 opaque 逐字节比较。
+    const others = this.deps.store
+      .listOpenWaits(wait.workitemId)
+      .some((o) => o.kind === 'human' && o.id !== wait.id && !grant.reasons.includes(o.reason));
+    if (others) return true;
+    const events = this.deps.store.listEvents(wait.workitemId);
+    // (b) 授权之后人显式打回过同名 wait → 人的更晚决定优先，该 reason 在本次授权内不再自动过（审查修复——
+    // 原先「暂不关单」10 分钟后被系统整单 done 推翻）。重新 /delegate 即重置（grant.createdAt 更新）。
+    if (
+      humanDeclinedSince(events, wait.reason, grant.createdAt, (id) => this.deps.store.getWait(id))
+    )
+      return true;
+    // (c) worktype 业务 guard（机器信号）不过 → 不 enqueue（审查修复——原先永拦的灯③事件每窗口重发，
+    // 整夜空转刷锚点卡）。容器调 worktype 方法不算解释业务语义（先例 liveness()）。缺省恒放行，桥层兜底。
+    const item = this.deps.store.getWorkItem(wait.workitemId);
+    const type = item ? this.deps.registry.get(item.type) : undefined;
+    if (type?.delegationGuard && !type.delegationGuard(wait.reason, events)) return true;
+    return false;
   }
 
   // WS-1.2 活性不变式看门（D-D）：把「漏一个事件×相位分支 = 静默卡死」整类 bug 从真机暴露变成系统自曝。
@@ -218,12 +257,15 @@ export class Watchdog {
   // A single poisoned workitem (constraint clash, handler throw, SQLITE_FULL, …)
   // must never crash the 1Hz tick — that would take the whole bridge down and
   // re-trigger from the same persisted state on every restart. Isolate per
-  // workitem: log and move on, leaving the rest of the sweep intact.
-  private safeEnqueue(workitemId: string, event: { kind: string; payload?: unknown }): void {
+  // workitem: log and move on, leaving the rest of the sweep intact. Returns
+  // whether the enqueue committed (delegation throttling only refreshes on success).
+  private safeEnqueue(workitemId: string, event: { kind: string; payload?: unknown }): boolean {
     try {
       this.deps.reducer.enqueue(workitemId, event);
+      return true;
     } catch (err) {
       this.deps.logger?.error?.({ err, workitemId, kind: event.kind }, 'watchdog enqueue failed');
+      return false;
     }
   }
 

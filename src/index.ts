@@ -57,13 +57,18 @@ import { createWorkbenchAdapter } from './workitems/workbench-adapter.js';
 import { createTokenAuth } from './workbench/auth.js';
 import { createWorkbenchServer } from './workbench/server.js';
 import { OpenLimitError } from './workitems/errors.js';
-import { isTerminalStatus } from './workitems/shared.js';
+import { humanDeclinedSince, isTerminalStatus } from './workitems/shared.js';
 import type { WorkItem, WorkItemEvent } from './workitems/types.js';
 import { createAgentRunHandler } from './worktypes/agent-run/run-handler.js';
 import { registerProbe } from './worktypes/probe/index.js';
-import { checkpointBoundaryOf, checkpointReason } from './worktypes/requirement/checkpoint.js';
-import { DELEGABLE_WAIT_REASONS, registerRequirement } from './worktypes/requirement/index.js';
-import { INCIDENT_REASONS } from './worktypes/requirement/advisor.js';
+import { checkpointBoundaryOf } from './worktypes/requirement/checkpoint.js';
+import {
+  DELEGABLE_WAIT_REASONS,
+  delegationGuardFor,
+  integrationCheckOutcome,
+  registerRequirement,
+} from './worktypes/requirement/index.js';
+import { advisorRunInFlight, INCIDENT_REASONS } from './worktypes/requirement/advisor.js';
 import { createIntegrationCheckHandler } from './worktypes/requirement/integration.js';
 import {
   createGatekeeperReviewHandler,
@@ -331,11 +336,17 @@ export function caseFileLabel(reason: string): string | undefined {
   }
 }
 
-// ENHANCE E4：三类业务事故（INCIDENT_REASONS，与 E1 派参谋同一份常量）弹卡时，参谋已同批派出——在
-// 卡片详情尾部注明「建议在路上」，避免人拿到最生的事故单就急着独自想方案。机械故障病历（run_failed 等）
-// 不派参谋，也不加此行。纯函数。
-export function withAdvisorHint(reason: string, detail: string | undefined): string | undefined {
-  if (!INCIDENT_REASONS.includes(reason)) return detail;
+// ENHANCE E4：三类业务事故（INCIDENT_REASONS，与 E1 派参谋同一份常量）弹卡时，若参谋 run 确实在途
+// （advisorInFlight，调用方从 listInflightEffects 判定）——在卡片详情尾部注明「建议在路上」，避免人拿到
+// 最生的事故单就急着独自想方案。审查修复：原先只凭 reason 就承诺，declined 重弹病历不重派参谋（reRaiseWait
+// 零 dispatch），重弹卡带着永远兑现不了的承诺让人空等——卡片必须陈述事实而非推断。机械故障病历
+// （run_failed 等）不派参谋，也不加此行。纯函数。
+export function withAdvisorHint(
+  reason: string,
+  detail: string | undefined,
+  advisorInFlight: boolean,
+): string | undefined {
+  if (!advisorInFlight || !INCIDENT_REASONS.includes(reason)) return detail;
   const hint = '🧭 参谋正在分析，建议稍后以卡片贴出——可参考后在上方意见框写下你的修正再点按钮。';
   return detail ? `${detail}\n${hint}` : hint;
 }
@@ -398,32 +409,23 @@ export function caseFileDetail(events: WorkItemEvent[], reason: string): string 
   return undefined;
 }
 
-// WS-7.3 灯③（集成→交付 gate）证据 note：读最后一条 integration_check_passed 的 reason，把「静态对账是否
-// 生效」如实注在灯③卡上。no_contract/no_claims = 静态对账未生效（单仓/无跨仓契约/各仓未声明改动）→ 提醒
-// 以交付清单人工验收；无 reason（真对账通过）→ 通过。
+// WS-7.3 灯③（集成→交付 gate）证据 note：把「静态对账是否生效」如实注在灯③卡上。解读走 worktype 导出的
+// integrationCheckOutcome 单一来源（审查修复——原先本函数与委托 guard 各自倒扫事件、各自解释 payload.reason，
+// 已有 null/未知 reason 的语义分叉：卡上 ✅ 而 guard 拦下）。未生效 → 提醒以交付清单人工验收；未知 reason /
+// 异形 payload → 与 guard 同一保守面（无法解读 ≠ 通过）；真通过 → ✅（有 interfaceCount 则标注契约规模）。
 export function deliverGateNote(events: WorkItemEvent[]): string | undefined {
-  let reason: string | undefined;
-  let interfaceCount: number | undefined;
-  for (let i = events.length - 1; i >= 0; i--) {
-    const ev = events[i];
-    if (ev?.kind !== 'integration_check_passed') continue;
-    const p = ev.payload;
-    if (typeof p === 'object' && p !== null) {
-      reason = (p as { reason?: unknown }).reason?.toString();
-      const n = (p as { interfaceCount?: unknown }).interfaceCount;
-      if (typeof n === 'number' && n > 0) interfaceCount = n;
+  const oc = integrationCheckOutcome(events);
+  if (oc.checked && !oc.genuine) {
+    if (oc.reason === 'no_contract') {
+      return '⚠️ 静态跨仓对账未生效（本单无跨仓契约）——请以下方交付清单与工人回执为准人工验收';
     }
-    break;
+    if (oc.reason === 'no_claims') {
+      return '⚠️ 静态跨仓对账未生效（各仓未声明改动）——请以下方交付清单人工验收';
+    }
+    return '⚠️ 静态跨仓对账结果无法解读——请以下方交付清单人工验收';
   }
-  if (reason === 'no_contract') {
-    return '⚠️ 静态跨仓对账未生效（本单无跨仓契约）——请以下方交付清单与工人回执为准人工验收';
-  }
-  if (reason === 'no_claims') {
-    return '⚠️ 静态跨仓对账未生效（各仓未声明改动）——请以下方交付清单人工验收';
-  }
-  // 真对账通过：有条数（新事件）→ 标注契约规模；读不到（历史事件无 interfaceCount）→ 回落原文案。
-  return interfaceCount !== undefined
-    ? `✅ 静态跨仓对账通过（契约 ${interfaceCount} 条接口）`
+  return oc.interfaceCount !== undefined
+    ? `✅ 静态跨仓对账通过（契约 ${oc.interfaceCount} 条接口）`
     : '✅ 静态跨仓对账通过';
 }
 
@@ -542,36 +544,25 @@ export async function runDelegateCommand(
     expiresAt,
     createdBy: msg.userId,
   });
-  // 确认文案诚实交代边界（D2.2）：三灯范围 + 冷静期 + 灯③ 机器 guard + 判大/病历不受委托。
+  // 确认文案诚实交代边界（D2.2）：三灯范围 + 冷静期 + 灯③ 机器 guard + 判大/病历不受委托 + 打回优先。
   const mins = Math.round(deps.delaySec / 60);
   await deps.reply(
     `已开启委托至 ${hhmm(expiresAt)}——拆解/验收/关单三灯在无人处理 ${mins} 分钟后自动通过` +
-      '（验收灯需静态对账真通过才放行）；**监工判大与一切病历仍会等你**。随时 /delegate off 撤销。',
+      '（验收灯需静态对账真通过才放行）；**监工判大与一切病历仍会等你**，你手动打回过的灯本次委托' +
+      '不再自动过。随时 /delegate off 撤销。',
   );
 }
 
-// DELEGATE D-4：委托 guard——**只认机器信号，不认 AI 报告**（AI 质检/参谋报告只进人眼，E5 D-1）。
-// 灯③ 自动通过的前提 = 最后一条 integration_check_passed 是真通过（payload 无 reason；no_contract /
-// no_claims = 静态对账未生效 → 不放行，等人。推论：lite 单仓的灯③ 永不自动过，设计上有意保守）。
-// 灯②/灯④ 无 guard（拆解结论有对账 effect 兜底、关单前灯③已人批或真通过）；非白名单恒 false（双保险，
-// 白名单本身已在命令入口约束）。扫描姿势同 deliverGateNote。纯函数。
-export function delegationGuardFor(reason: string, events: WorkItemEvent[]): boolean {
-  if (!DELEGABLE_WAIT_REASONS.includes(reason)) return false;
-  if (reason !== checkpointReason(PHASE.deliver)) return true;
-  for (let i = events.length - 1; i >= 0; i--) {
-    const ev = events[i];
-    if (ev?.kind !== 'integration_check_passed') continue;
-    const p = ev.payload;
-    const r = typeof p === 'object' && p !== null ? (p as { reason?: unknown }).reason : undefined;
-    return r === undefined;
-  }
-  return false; // 从无 integration_check_passed → 不放行
-}
+// DELEGATE D-4：委托 guard 迁至 worktypes/requirement/delegation.ts（审查修复——与白名单同址同源、
+// fail-closed，watchdog 与本桥层消费方共用）。此处 re-export 保持既有导入路径（tests/delegation-bridge）。
+export { delegationGuardFor, integrationCheckOutcome };
 
 // DELEGATE D2.3：delegation_due 的桥层执行器（依赖注入式导出，先例 backfillClaimedChats）。幂等：
-// wait 已 resolve（人抢先手动 / watchdog 节流重发竞态）→ return；授权已撤销/到期 → return；guard 不过
-// → 静默 return（催办照常，人醒来正常处理）。通过则走 resolveWait 唯一写口（operator=delegation 留痕）
-// 并群内通知；通知失败只 log——resolve 已生效，通知是尽力而为。
+// wait 已 resolve（人抢先手动 / watchdog 节流重发竞态）→ return；授权已撤销/到期 → return；同单还有授权
+// 未覆盖的 open human wait（/cancel 确认、病历——事件在途窗口内才升起的也算）/ 授权后人显式打回过同名
+// wait / guard 不过 → 静默 return（与 watchdog 深检查同一套判定，消费侧兜竞态；催办照常，人醒来正常处理）。
+// 通过则走 resolveWait 唯一写口（operator=delegation 留痕）并群内通知；通知失败只 log——resolve 已生效，
+// 通知是尽力而为。
 export async function runDelegationDue(
   deps: {
     workitems: {
@@ -582,7 +573,10 @@ export async function runDelegationDue(
         activeDelegation(
           workitemId: string,
           now: number,
-        ): { grantNote: string; expiresAt: number } | undefined;
+        ):
+          | { reasons: string[]; grantNote: string; expiresAt: number; createdAt: number }
+          | undefined;
+        listOpenWaits(workitemId: string): Array<{ id: string; kind: string; reason: string }>;
       };
       api: {
         listEvents(id: string): WorkItemEvent[];
@@ -609,8 +603,22 @@ export async function runDelegationDue(
   const wait = deps.workitems.store.getWait(waitId);
   if (!wait || wait.resolvedAt !== null) return;
   const grant = deps.workitems.store.activeDelegation(wait.workitemId, deps.now?.() ?? Date.now());
-  if (!grant) return;
-  if (!delegationGuardFor(wait.reason, deps.workitems.api.listEvents(wait.workitemId))) return;
+  if (!grant?.reasons.includes(wait.reason)) return;
+  // 人有未决事项（授权未覆盖的 open human wait）→ 不自动过。自动关单曾把 /cancel 确认与未处理病历随
+  // 终态静默埋掉（terminal_cleanup 无差别关闭所有 open waits），此处与 watchdog 双保险。
+  const others = deps.workitems.store
+    .listOpenWaits(wait.workitemId)
+    .some((o) => o.kind === 'human' && o.id !== waitId && !grant.reasons.includes(o.reason));
+  if (others) return;
+  const events = deps.workitems.api.listEvents(wait.workitemId);
+  // 授权之后人显式打回过同名 wait → 人的更晚决定优先（与 watchdog 同一份 humanDeclinedSince）。
+  if (
+    humanDeclinedSince(events, wait.reason, grant.createdAt, (id) =>
+      deps.workitems.store.getWait(id),
+    )
+  )
+    return;
+  if (!delegationGuardFor(wait.reason, events)) return;
   const r = deps.workitems.api.resolveWait(waitId, {
     operator: 'delegation',
     reason: `【委托】${grant.grantNote}（至 ${hhmm(grant.expiresAt)}）`,
@@ -759,18 +767,24 @@ export async function runScoutResult(
 
 // DELEGATE D3（可选项，已做）：灯卡/关单卡尾部的「委托生效中」灰字提示。只在真会自动过时才提示——
 // 有生效授权 ∧ reason 命中 ∧ guard 放行（灯③ no_contract/no_claims 不提示，否则卡上承诺自动通过而
-// 实际 guard 拦住，不诚实）∧ 到点时授权还活着。纯函数。
+// 实际 guard 拦住，不诚实）∧ 到点时授权还活着。时刻锚点与 watchdog 同式：max(wait 挂起, 授权下达) +
+// delay（审查修复——原先只锚 wait.createdAt，灯先亮后放权时卡上时刻与实际行为漂移）；补发卡时 autoAt
+// 已成过去（首发失败数小时后 wait_reminder 触发重发）→ 改说「即将」，不给人展示过去时刻（审查修复）。
+// 「HH:mm 前」对齐设计文档 D3 节（到点即过，「后」有歧义）。纯函数。
 export function delegationCardHint(
   wait: { reason: string; createdAt: number },
-  grant: { reasons: string[]; expiresAt: number } | undefined,
+  grant: { reasons: string[]; expiresAt: number; createdAt: number } | undefined,
   events: WorkItemEvent[],
   delaySec: number,
+  now: number,
 ): string | undefined {
-  if (!grant || !grant.reasons.includes(wait.reason)) return undefined;
+  if (!grant?.reasons.includes(wait.reason)) return undefined;
   if (!delegationGuardFor(wait.reason, events)) return undefined;
-  const autoAt = wait.createdAt + delaySec * 1000;
+  const autoAt = Math.max(wait.createdAt, grant.createdAt) + delaySec * 1000;
   if (autoAt >= grant.expiresAt) return undefined; // 到点前授权已过期 → 不会自动过
-  return `⏱ 委托生效中：无人处理将于 ${hhmm(autoAt)} 后自动通过（/delegate off 可撤销）`;
+  return autoAt <= now
+    ? '⏱ 委托生效中：即将自动通过（/delegate off 可撤销）'
+    : `⏱ 委托生效中：无人处理将于 ${hhmm(autoAt)} 前自动通过（/delegate off 可撤销）`;
 }
 
 // WS-9：AUQ 表单答案组装（bridge task 与 workitem run 两条回灌路径共用，避免两份逻辑漂移）。每题 input
@@ -2463,8 +2477,15 @@ export function createWorkitemsRuntime(deps: {
   ): Promise<void> => {
     // DELEGATE D3：灯卡/关单卡出卡时若该单有生效授权且该灯真会自动过，尾部注灰字提示（delaySec 与
     // 容器 watchdog 读同一 env，卡上时刻不与实际行为漂移）。
-    const grant = workitems.store.activeDelegation(workitemId, Date.now());
+    const now = Date.now();
+    const grant = workitems.store.activeDelegation(workitemId, now);
     const delegationDelaySec = loadWorkitemsConfig().delegationDelaySec;
+    // 全量事件史/在途参谋判定按需取、整次调用最多一次（审查修复——原先循环内各分支重复拉全表事件史）。
+    let eventsMemo: WorkItemEvent[] | undefined;
+    const getEvents = () => (eventsMemo ??= workitems.api.listEvents(workitemId));
+    let advisingMemo: boolean | undefined;
+    const advising = () =>
+      (advisingMemo ??= advisorRunInFlight(workitems.store.listInflightEffects(workitemId)));
     for (const w of workitems.store.listOpenWaits(workitemId)) {
       if (w.kind !== 'human' || w.cardMsgId !== null) continue;
       // WS-10.3：选卡判定收敛到 waitCardKindFor（纯函数，全覆盖断言据此钉死每个 reason 都有专属卡）。
@@ -2472,13 +2493,10 @@ export function createWorkitemsRuntime(deps: {
       if (cardKind === null) continue; // 非关卡灯 / 非病历 / 无专属卡 → 跳过
       let card: object;
       if (cardKind === 'closure') {
-        // WS-7.7 灯④：交付待关单卡。D3：可自动关单时带委托提示。
-        const note = delegationCardHint(
-          w,
-          grant,
-          workitems.api.listEvents(workitemId),
-          delegationDelaySec,
-        );
+        // WS-7.7 灯④：交付待关单卡。D3：可自动关单时带委托提示（grant 为空时 hint 必空，不必拉事件史）。
+        const note = grant
+          ? delegationCardHint(w, grant, getEvents(), delegationDelaySec, now)
+          : undefined;
         card = buildClosureCard({ title, note }, { itemId: workitemId, waitId: w.id });
       } else if (cardKind === 'cancel-confirm') {
         // WS-10.9 取消确认卡。
@@ -2487,11 +2505,10 @@ export function createWorkitemsRuntime(deps: {
         // 关卡灯(checkpoint:*) → 灯卡(通过/打回)。WS-7.3 灯③ 厚化：交付 gate 卡带对账证据 note，人拍板有据。
         // D3：委托生效且 guard 会放行时追加提示行（lite/no_contract 的灯③ 不提示——guard 拦住不会自动过）。
         const boundary = checkpointBoundaryOf(w.reason)!;
-        const events = workitems.api.listEvents(workitemId);
         const note =
           [
-            boundary === PHASE.deliver ? deliverGateNote(events) : undefined,
-            delegationCardHint(w, grant, events, delegationDelaySec),
+            boundary === PHASE.deliver ? deliverGateNote(getEvents()) : undefined,
+            grant ? delegationCardHint(w, grant, getEvents(), delegationDelaySec, now) : undefined,
           ]
             .filter((s): s is string => !!s)
             .join('\n') || undefined;
@@ -2501,21 +2518,15 @@ export function createWorkitemsRuntime(deps: {
         );
       } else if (cardKind === 'gatekeeper-big') {
         // WS-5：监工判大用三按钮卡（已改图纸·重对账并返工 / 无需改·放行 / 终止需求），红线出口不再只有放行。
-        // E4：判大属 INCIDENT_REASONS，detail 尾部注明参谋在路上。
-        const detail = withAdvisorHint(
-          w.reason,
-          caseFileDetail(workitems.api.listEvents(workitemId), w.reason),
-        );
+        // E4：判大属 INCIDENT_REASONS，参谋 run 确在途时 detail 尾部注明参谋在路上（重弹卡不再假承诺）。
+        const detail = withAdvisorHint(w.reason, caseFileDetail(getEvents(), w.reason), advising());
         card = buildGatekeeperBigCard(
           { title, label: caseFileLabel(w.reason)!, detail },
           { itemId: workitemId, waitId: w.id },
         );
       } else {
-        // 病历(对账冲突/执行报错/集成未决/…) → 病历卡(已处理·继续/终止需求)。E4：仅三类业务事故加参谋提示。
-        const detail = withAdvisorHint(
-          w.reason,
-          caseFileDetail(workitems.api.listEvents(workitemId), w.reason),
-        );
+        // 病历(对账冲突/执行报错/集成未决/…) → 病历卡(已处理·继续/终止需求)。E4：仅三类业务事故且参谋确在途。
+        const detail = withAdvisorHint(w.reason, caseFileDetail(getEvents(), w.reason), advising());
         card = buildCaseFileCard(
           { title, label: caseFileLabel(w.reason)!, detail },
           { itemId: workitemId, waitId: w.id },

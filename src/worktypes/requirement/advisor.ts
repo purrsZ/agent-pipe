@@ -24,6 +24,23 @@ export const INCIDENT_REASONS: readonly string[] = [
   INTEGRATION_UNRESOLVED_REASON,
 ];
 
+// 参谋 run 的 dispatch payload.stage 值（index.ts 的 STAGE.advise 引用此常量，单一来源）。
+export const ADVISE_STAGE = 'advise';
+
+// E4（审查修复）：卡片承诺「参谋正在分析」必须是事实——检查该单是否真有参谋 run 在途（dispatch 落下的
+// run effect 尚未收尾）。declined 重弹病历只重弹 wait 不重派参谋（reRaiseWait 零 dispatch），重弹出的新卡
+// 不得再带此承诺，否则人空等一份永远不会贴出的建议卡；参谋已收尾（建议卡已贴/已失败）同样不再承诺。
+// 输入取 store.listInflightEffects(workitemId)（pending/running）。纯函数。
+export function advisorRunInFlight(
+  effects: ReadonlyArray<{ kind: string; payload: unknown }>,
+): boolean {
+  return effects.some((e) => {
+    if (e.kind !== 'run') return false;
+    const p = e.payload;
+    return typeof p === 'object' && p !== null && (p as { stage?: unknown }).stage === ADVISE_STAGE;
+  });
+}
+
 // ── 事故单渲染（纯，防御式）：从事故事件 payload 抽关键字段拼成人话 + 机械明细，喂参谋 prompt。 ──────────
 
 // 监工判大：payload = { raises: WorkerRaise[] }（repo / interfaceId / question）。

@@ -42,8 +42,10 @@
   steer_escalated，"已处理·继续"意味着人做过处置，自动点=空转）、cancel_confirm（破坏性）、立项 gate
   （料都没收齐，自动过无意义）。白名单由 requirement 纯核心导出常量声明，命令入口只接受白名单，
   容器对语义零感知。
-- **D-3 延迟生效（冷静期）**。到点自动过不是秒过：wait open 后至少等 `delegationDelaySec`（默认 600s，
-  env `WORKITEMS_DELEGATION_DELAY_SEC`）才触发——灯卡照发、人在场可抢先手动、E5 质检报告有时间先贴出。
+- **D-3 延迟生效（冷静期）**。到点自动过不是秒过：`max(wait 挂起, 授权下达)` 后至少等
+  `delegationDelaySec`（默认 600s，env `WORKITEMS_DELEGATION_DELAY_SEC`）才触发——灯卡照发、人在场可
+  抢先手动、E5 质检报告有时间先贴出。（审查修复 2026-07-06：原文只锚 wait open 时刻，灯先亮、人后
+  /delegate 时冷静期已耗尽会秒过——改锚较晚者，放权后必有完整反悔窗口。）
 - **D-4 灯③ 带机器信号 guard，guard 只认机器不认 AI**。灯③ 自动通过的前提 = 最后一条
   integration_check_passed 是**真通过**（payload 无 reason；no_contract / no_claims = 静态对账未生效 →
   guard 不过，等人）。用户说的"参谋建议为通过则自动过"以此保守近似——AI 报告只进人眼（E5 D-1），
@@ -94,7 +96,8 @@
 ```
 const grant = store.activeDelegation(item.id, now);
 if (grant && grant.reasons.includes(wait.reason)
-    && now >= wait.createdAt + cfg.delegationDelaySec * 1000) {
+    && now >= max(wait.createdAt, grant.createdAt) + cfg.delegationDelaySec * 1000  // 审查修复：锚较晚者
+    && !delegationBlocked(wait, grant)) {  // 审查修复：到点深检查，见文末记要
   safeEnqueue(item.id, { kind: 'delegation_due', payload: { waitId: wait.id } });
 }
 ```
@@ -187,16 +190,19 @@ export const DELEGABLE_WAIT_REASONS: readonly string[] = [
 ```
 人：/delegate 8h ──► workitem_delegations（持久，每单一条，可撤销，≤24h）
                           │
-watchdog 每 tick：有生效授权 ∧ wait.reason ∈ 授权列表 ∧ 年龄 ≥ 10min（机械匹配，零语义）
+watchdog 每 tick：有生效授权 ∧ wait.reason ∈ 授权列表 ∧ 距 max(灯挂起, 放权) ≥ 10min（机械匹配，零语义）
+                          │  到点深检查（每窗口一次，审查修复）：同单无授权外的 open human wait
+                          │  ∧ 授权后人没打回过同名 wait ∧ worktype guard 放行 —— 任一不过则不发事件
                           ▼
                  delegation_due（中性事件，同 wait_reminder 类）
                           ▼
-桥层：wait 还开着？授权还活着？guard 过吗（灯③需静态对账真通过——机器信号，不认 AI 报告）
+桥层：wait 还开着？授权还活着？（同一套深检查双保险）guard 过吗（灯③需静态对账真通过——机器信号，不认 AI 报告）
                           ▼
         resolveWait(approved=true, operator=delegation, reason=【委托】原文)   ← 唯一写口，全程留痕
                           ▼
         既有 onWaitResolved 路由推进 + 群内「⏱ 已按你的委托自动通过」通知
-边界：判大 / 病历 / 取消确认 永不可委托（白名单守护断言钉死）；委托只通过、永不打回。
+边界：判大 / 病历 / 取消确认 永不可委托（白名单守护断言钉死）；委托只通过、永不打回；
+     人显式打回过的灯，本次授权内不再自动过（人的更晚决定优先）。
 ```
 
 ---
@@ -262,3 +268,55 @@ watchdog 每 tick：有生效授权 ∧ wait.reason ∈ 授权列表 ∧ 年龄 
 - 飞书出口未真机验：`/delegate` 确认回复、自动通过的锚点话题通知、灯卡灰字渲染——见 OVERHAUL 附录 B 项 11。
 - guard 依赖的 `integration_check_passed` payload 形状按现网事件推断（无 reason 字段=真通过），与
   deliverGateNote 同源；若历史库存在异形 payload，guard 保守面（不放行）兜底。
+
+---
+
+## 🔧 审查修复记要（2026-07-06，对抗审查 10 条）
+
+对 DELEGATE D1~D3 + ENHANCE 收尾 6 提交做 8 角度对抗审查（逐行/删行/跨文件/复用/简化/效率/高度/规范
+→ 逐条验证），10 条存活全部修复。基线 896 测试全绿（+18）。
+
+**委托链对「人的在场信号」零感知（一簇 3 条，最严重）**——watchdog `scanDelegation` 到点后加深检查
+（`delegationBlocked`，每 delegationDelaySec 窗口一次，不进 1Hz 热路径），`runDelegationDue` 同一套判定
+双保险（防扫描间隙竞态，共用 `shared.ts::humanDeclinedSince`）：
+
+1. **自动关单埋掉未决事项**：同单存在授权未覆盖的 open human wait（/cancel 的 cancel_confirm、
+   steer_escalated 等病历）时不自动过——原先 awaiting_close 自动 approved → 终态 terminal_cleanup 把
+   这些 wait 无差别静默关闭，想终止的单被自动「完成」。
+2. **人打回被系统翻案**：授权之后人显式打回过同名 wait（wait_resolved 带 decision.approved=false，
+   容器自己写的载荷字段，读回不算解释语义）→ 该 reason 本次授权内不再自动过，重新 /delegate 即重置——
+   原先「暂不关单」declined → reRaiseWait 新 wait → 10 分钟后又被自动 done。/delegate 确认文案补一句
+   如实交代。
+3. **冷静期锚点**：due 锚 `max(wait.createdAt, grant.createdAt)`——原先灯已挂数小时后 /delegate，
+   下一 tick 秒过，确认文案承诺的反悔窗口为零（D-3 修订见上文）。
+
+**guard 单一来源化（3 条）**：
+
+4. **白名单与 guard 同址同源 + fail-closed**：新建 `src/worktypes/requirement/delegation.ts`，
+   `DELEGABLE_WAIT_REASONS = Object.keys(DELEGATION_GUARDS)`——加白名单必须同时声明机器信号 guard，
+   结构上不可能漂移；未声明恒不放行。原先 guard 在桥层 src/index.ts、白名单在 worktype，跨文件仅约定耦合，
+   且对非灯③默认 fail-open。
+5. **异形 payload 保守面兑现**：`integrationCheckOutcome` 对非对象 payload / null reason / 未知 reason
+   一律判「非真通过」——原先 `r === undefined` 三元式把无法解读的事件当真通过放行灯③，与本文档
+   「guard 保守面兜底」的承诺相反。
+6. **deliverGateNote 与 guard 共用解读**：两处原各自倒扫 integration_check_passed 且语义已分叉
+   （null/未知 reason 时卡上 ✅ 而 guard 拦下）；现同吃 `integrationCheckOutcome`，未知/异形走 ⚠️
+   人工验收提示。
+
+**空转与可靠性（2 条）**：
+
+7. **永拦的灯不再整夜刷卡**：WorkType 新增可选 `delegationGuard`（先例 liveness()），requirement 接
+   `delegationGuardFor`——watchdog 深检查 guard 不过就不 enqueue，原先 lite 单灯③（恒 no_contract）
+   每窗口重发 delegation_due → postStatus → updateCard，8h 委托 ≈48 次无意义锚点刷新 + 事件表膨胀。
+8. **节流顺序**：enqueue 成功才刷新节流 Map（深检查被拦也刷新——每窗口只深扫一次）；原先先刷后发，
+   一次瞬时 DB 错误让自动通过顺延整整一个窗口。
+
+**卡片诚实（2 条）**：
+
+9. **参谋提示事实耦合**：`withAdvisorHint` 增加 advisorInFlight 参数（`advisor.ts::advisorRunInFlight`
+   查 inflight run effect 的 stage=advise）——原先只凭 reason 就承诺「参谋正在分析」，declined 重弹病历
+   不重派参谋，重弹卡让人空等一份永远不会贴出的建议卡。
+10. **委托灰字提示**：时刻锚点与 watchdog 同式（max 锚）；autoAt 已成过去（首发失败数小时后补发）改说
+    「即将自动通过」；「将于 HH:mm **前**自动通过」对齐本文档 D3 节（原代码写「后」，有歧义）。
+    顺带：surfaceCheckpoints 的全量事件史/在途参谋判定改惰性 memo，每次调用至多各取一次（原循环内
+    最多 4 处重复拉全表）。

@@ -180,18 +180,28 @@ describe('DELEGATE 委托模式 e2e（真容器 + 真 watchdog + 真执行器）
       expect(store.listAssignments(item.id).every((a) => a.status !== 'running')).toBe(true),
     );
 
-    // 冷静期内 tick 不发；推过 delay → delegation_due（payload 指向灯③ wait）。
+    // 冷静期内 tick 不发；推过 delay：双仓但无跨仓契约 → integration_check_passed 带 reason（no_contract，
+    // 静态对账未生效）→ watchdog 前置 worktype guard 直接拦住，连 delegation_due 都不发（审查修复——原先
+    // 永拦的事件每窗口重发一次，整夜空转刷锚点卡）。灯③ 保持 open 等人（D-4 保守面）。
     watchdog.tick();
     const dues = () => store.listEvents(item.id).filter((e) => e.kind === 'delegation_due');
     expect(dues()).toHaveLength(0);
     now = light3.createdAt + DELAY_MS;
     watchdog.tick();
-    await waitFor(() => expect(dues()).toHaveLength(1));
-    expect(dues()[0]!.payload).toEqual({ waitId: light3.id });
+    now += DELAY_MS; // 再推一个窗口，仍不发（每窗口只重扫一次，不 enqueue）
+    watchdog.tick();
+    expect(dues()).toHaveLength(0);
+    expect(store.getWait(light3.id)!.resolvedAt).toBeNull();
 
-    // 桥层执行器消费：双仓但无跨仓契约 → integration_check_passed 带 reason（no_contract，静态对账未生效）
-    // → guard 拦住、灯③ 保持 open 等人（D-4 保守面）。
-    await runDelegationDue(bridgeDeps, dues()[0]!);
+    // 消费方防线（双保险）：即便一条 delegation_due 挤进来（合成事件模拟扫描间隙竞态），guard 同样拦住。
+    await runDelegationDue(bridgeDeps, {
+      id: 0,
+      workitemId: item.id,
+      seq: 0,
+      kind: 'delegation_due',
+      payload: { waitId: light3.id },
+      createdAt: now,
+    });
     expect(store.getWait(light3.id)!.resolvedAt).toBeNull();
     expect(notices).toHaveLength(0);
 
@@ -225,5 +235,81 @@ describe('DELEGATE 委托模式 e2e（真容器 + 真 watchdog + 真执行器）
     // 幂等：对同一条已消费的 delegation_due 重放执行器（watchdog 重发竞态）→ 无副作用。
     await runDelegationDue(bridgeDeps, closeDue);
     expect(notices).toHaveLength(1);
+  });
+
+  it('人点「暂不关」打回灯④ → 重弹的同名 wait 在本次委托内不再自动过（打回优先，审查修复）', async () => {
+    const { store, api, watchdog } = harness();
+    const item = api.createWorkItem({
+      type: 'requirement',
+      title: '打回优先',
+      source: {},
+      repos: ['repo-a', 'repo-b'],
+    }).item;
+    for (const f of [
+      { key: 'name', value: '需求' },
+      { key: 'summary', value: '背景' },
+      { key: 'prd', value: 'PRD' },
+      { key: 'acceptance', value: '验收' },
+      { key: 'repos', value: ['repo-a', 'repo-b'] },
+    ]) {
+      api.injectIntakeField(item.id, f);
+    }
+    await waitFor(() =>
+      expect(
+        store.listOpenWaits(item.id).some((w) => w.reason === `checkpoint:${PHASE.split}`),
+      ).toBe(true),
+    );
+    api.resolveWait(
+      store.listOpenWaits(item.id).find((w) => w.reason === `checkpoint:${PHASE.split}`)!.id,
+      { operator: 'lichao', reason: 'go', decision: { approved: true } },
+    );
+    await waitFor(() =>
+      expect(
+        store.listOpenWaits(item.id).some((w) => w.reason === `checkpoint:${PHASE.deliver}`),
+      ).toBe(true),
+    );
+    // 睡前放权（打回发生在放权之后 → 打回优先必须压过预授权）。
+    store.upsertDelegation(item.id, {
+      reasons: [...DELEGABLE_WAIT_REASONS],
+      grantNote: '/delegate 8h',
+      expiresAt: now + 24 * 3_600 * 1000,
+      createdBy: 'u-1',
+    });
+    await waitFor(() =>
+      expect(store.listAssignments(item.id).every((a) => a.status !== 'running')).toBe(true),
+    );
+    // 人手动过灯③ → 挂灯④；人在场点「暂不关」（declined）→ 业务侧重弹同名 wait（reRaiseWait）。
+    const light3 = store
+      .listOpenWaits(item.id)
+      .find((w) => w.reason === `checkpoint:${PHASE.deliver}`)!;
+    api.resolveWait(light3.id, { operator: 'lichao', reason: 'ok', decision: { approved: true } });
+    await waitFor(() => expect(store.getWorkItem(item.id)!.phase).toBe(PHASE.deliver));
+    const closeWait = store.listOpenWaits(item.id).find((w) => w.reason === 'awaiting_close')!;
+    api.resolveWait(closeWait.id, {
+      operator: 'lichao',
+      reason: '暂不',
+      decision: { approved: false },
+    });
+    await waitFor(() =>
+      expect(
+        store
+          .listOpenWaits(item.id)
+          .some((w) => w.reason === 'awaiting_close' && w.id !== closeWait.id),
+      ).toBe(true),
+    );
+    const reRaised = store
+      .listOpenWaits(item.id)
+      .find((w) => w.reason === 'awaiting_close' && w.id !== closeWait.id)!;
+
+    // 重弹 wait 远超冷静期：watchdog 深检查识别「授权后人打回过同名 wait」→ 连 delegation_due 都不发，
+    // 单保持打开等人（原缺陷：10 分钟后 resolveWait(approved) 整单 done，人的「暂不」被系统推翻）。
+    now = reRaised.createdAt + DELAY_MS * 3;
+    watchdog.tick();
+    now += DELAY_MS;
+    watchdog.tick();
+    const dues = store.listEvents(item.id).filter((e) => e.kind === 'delegation_due');
+    expect(dues).toHaveLength(0);
+    expect(store.getWait(reRaised.id)!.resolvedAt).toBeNull();
+    expect(store.getWorkItem(item.id)!.status).not.toBe('done');
   });
 });

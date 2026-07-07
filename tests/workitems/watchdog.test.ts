@@ -452,6 +452,183 @@ describe('Watchdog.tick', () => {
       expect(dueEvents(store, item.id)).toHaveLength(0);
       store.close();
     });
+
+    // ── 审查修复：冷静期锚点 / 人的未决事项 / 打回优先 / worktype guard 前置 / 节流顺序 ─────────
+
+    it('灯先亮、人后放权 → 冷静期锚 grant.createdAt：/delegate 后仍有完整反悔窗口，不秒过', () => {
+      const { api, store, watchdog } = harness();
+      const item = createItem(api);
+      store.insertWait(
+        makeWait('wt-h', item.id, { kind: 'human', reason: 'r-a', createdAt: 1000 }),
+      );
+      // 灯已挂远超一个冷静期，人才放权（授权行 createdAt 取 store 时钟 = now）。
+      now = 1000 + DELAY_MS * 3;
+      const grantAt = now;
+      store.upsertDelegation(item.id, {
+        reasons: ['r-a'],
+        grantNote: '/delegate 8h',
+        expiresAt: now + 24 * 3_600 * 1000,
+        createdBy: 'u-1',
+      });
+      watchdog.tick(); // 放权当刻
+      now = grantAt + DELAY_MS - 1; // 差 1ms 到「授权 + 冷静期」
+      watchdog.tick();
+      expect(dueEvents(store, item.id)).toHaveLength(0);
+      now = grantAt + DELAY_MS;
+      watchdog.tick();
+      expect(dueEvents(store, item.id)).toHaveLength(1);
+      store.close();
+    });
+
+    it('同单还有授权未覆盖的 open human wait → 不发；该 wait 关闭后下窗口恢复', () => {
+      const { store, watchdog, item } = delegated();
+      store.insertWait(
+        makeWait('wt-x', item.id, { kind: 'human', reason: 'r-incident', createdAt: 1000 }),
+      );
+      now = 1000 + DELAY_MS;
+      watchdog.tick();
+      expect(dueEvents(store, item.id)).toHaveLength(0); // 人有未决事项，授权不覆盖当下局面
+      store.updateWait('wt-x', { resolvedAt: now, resolvedBy: 'user', resolveReason: 'ok' });
+      now += DELAY_MS; // 深检查被拦也刷新节流 → 下一个窗口
+      watchdog.tick();
+      expect(dueEvents(store, item.id)).toHaveLength(1);
+      store.close();
+    });
+
+    it('授权后人显式打回过同名 wait → 重弹的 wait 不再自动过（人的更晚决定优先）', () => {
+      const { api, store, watchdog, item } = delegated();
+      // 人打回（decision.approved=false 走真 API，落 wait_resolved 事件）→ 业务侧重弹同名 wait。
+      api.resolveWait('wt-h', {
+        operator: 'lichao',
+        reason: '暂不',
+        decision: { approved: false },
+      });
+      store.insertWait(
+        makeWait('wt-h2', item.id, { kind: 'human', reason: 'r-a', createdAt: 1000 }),
+      );
+      now = 1000 + DELAY_MS * 5;
+      watchdog.tick();
+      expect(dueEvents(store, item.id)).toHaveLength(0);
+      store.close();
+    });
+
+    it('打回发生在授权之前 → 不影响（重新放权即重置打回记忆）', () => {
+      const { api, store, watchdog } = harness();
+      const item = createItem(api);
+      store.insertWait(
+        makeWait('wt-old', item.id, { kind: 'human', reason: 'r-a', createdAt: 1000 }),
+      );
+      api.resolveWait('wt-old', {
+        operator: 'lichao',
+        reason: '暂不',
+        decision: { approved: false },
+      });
+      now = 5000; // 打回之后才放权
+      store.upsertDelegation(item.id, {
+        reasons: ['r-a'],
+        grantNote: '/delegate 8h',
+        expiresAt: now + 24 * 3_600 * 1000,
+        createdBy: 'u-1',
+      });
+      store.insertWait(
+        makeWait('wt-new', item.id, { kind: 'human', reason: 'r-a', createdAt: 5000 }),
+      );
+      now = 5000 + DELAY_MS;
+      watchdog.tick();
+      expect(dueEvents(store, item.id)).toHaveLength(1);
+      store.close();
+    });
+
+    it('worktype delegationGuard 不过 → 不 enqueue（永拦的灯不整夜刷事件/刷卡），每窗口只重扫', () => {
+      const enqueued: Array<{ kind: string }> = [];
+      const wait = makeWait('wt-g', 'wi-1', { kind: 'human', reason: 'r-a', createdAt: 1000 });
+      const grant = {
+        id: 1,
+        workitemId: 'wi-1',
+        reasons: ['r-a'],
+        grantNote: 'g',
+        expiresAt: 10 * DELAY_MS,
+        createdBy: 'u',
+        createdAt: 1000,
+        revokedAt: null,
+      };
+      const guarded: WorkType = { ...workType(), id: 'guarded', delegationGuard: () => false };
+      const registry = new WorkTypeRegistry();
+      registry.register(guarded);
+      const wd = new Watchdog({
+        store: {
+          listOpenWaits: () => [wait],
+          listRunningAssignments: () => [],
+          listNonTerminal: () => [],
+          activeDelegation: () => grant,
+          listEvents: () => [],
+          getWorkItem: () => ({ id: 'wi-1', type: 'guarded', status: 'active' }) as WorkItem,
+          getWait: () => undefined,
+        } as unknown as WorkitemsStore,
+        reducer: {
+          enqueue: (_id: string, e: { kind: string }) => {
+            enqueued.push(e);
+          },
+        } as unknown as ReducerRuntime,
+        effects: { lastBeat: () => undefined },
+        clock,
+        logger,
+        cfg: loadWorkitemsConfig({}),
+        registry,
+      });
+      now = 1000 + DELAY_MS * 3;
+      wd.tick();
+      wd.tick();
+      // 既无 delegation_due 也不该有别的（wait_reminder 首催窗口 4h 未到）。
+      expect(enqueued.filter((e) => e.kind === 'delegation_due')).toHaveLength(0);
+    });
+
+    it('enqueue 瞬时失败 → 节流不刷新，下 tick 立即重试（不白等一个冷静期窗口）', () => {
+      const enqueued: string[] = [];
+      let failOnce = true;
+      const wait = makeWait('wt-r', 'wi-1', { kind: 'human', reason: 'r-a', createdAt: 1000 });
+      const grant = {
+        id: 1,
+        workitemId: 'wi-1',
+        reasons: ['r-a'],
+        grantNote: 'g',
+        expiresAt: 10 * DELAY_MS,
+        createdBy: 'u',
+        createdAt: 1000,
+        revokedAt: null,
+      };
+      const wd = new Watchdog({
+        store: {
+          listOpenWaits: () => [wait],
+          listRunningAssignments: () => [],
+          listNonTerminal: () => [],
+          activeDelegation: () => grant,
+          listEvents: () => [],
+          getWorkItem: () => undefined,
+          getWait: () => undefined,
+        } as unknown as WorkitemsStore,
+        reducer: {
+          enqueue: (_id: string, e: { kind: string }) => {
+            if (e.kind === 'delegation_due' && failOnce) {
+              failOnce = false;
+              throw new Error('SQLITE_BUSY');
+            }
+            enqueued.push(e.kind);
+          },
+        } as unknown as ReducerRuntime,
+        effects: { lastBeat: () => undefined },
+        clock,
+        logger,
+        cfg: loadWorkitemsConfig({}),
+        registry: new WorkTypeRegistry(),
+      });
+      now = 1000 + DELAY_MS;
+      wd.tick(); // enqueue 抛错被隔离，节流未刷新
+      expect(enqueued.filter((k) => k === 'delegation_due')).toHaveLength(0);
+      now += 1000; // 下一个 1Hz tick 即重试成功，无需等满一个 delegationDelaySec
+      wd.tick();
+      expect(enqueued.filter((k) => k === 'delegation_due')).toHaveLength(1);
+    });
   });
 
   it('never drives a terminal workitem — no timer/agent/assignment spam (v4 #3)', () => {

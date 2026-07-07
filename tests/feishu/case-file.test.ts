@@ -152,6 +152,16 @@ describe('deliverGateNote (WS-7.3 灯③ 证据 note，审查修复 F3)', () => 
       '静态跨仓对账未生效',
     );
   });
+
+  // 审查修复：与委托 guard 共用 integrationCheckOutcome 单一解读——未知 reason / 异形 payload 不再落穿
+  // 到 ✅（原先卡上 ✅ 而 guard 拦下，两处解读无声漂移），统一走保守面提示人工验收。
+  it('未知 reason / 异形 payload → 保守 ⚠️ 提示人工验收，不显示 ✅（与 guard 同一保守面）', () => {
+    expect(
+      deliverGateNote([ev('integration_check_passed', { reason: 'future_reason' })]),
+    ).toContain('⚠️');
+    expect(deliverGateNote([ev('integration_check_passed', null)])).toContain('无法解读');
+    expect(deliverGateNote([ev('integration_check_passed', { reason: null })])).toContain('⚠️');
+  });
 });
 
 describe('waitCardKindFor 全覆盖（审查修复 T3：每个会 raise 的 human wait reason 都有专属卡）', () => {
@@ -180,16 +190,23 @@ describe('waitCardKindFor 全覆盖（审查修复 T3：每个会 raise 的 huma
 });
 
 describe('withAdvisorHint（ENHANCE E4：事故卡注明参谋在路上）', () => {
-  it('三类业务事故 → detail 尾部追加参谋提示；detail 为空时只给提示', () => {
+  it('三类业务事故且参谋 run 在途 → detail 尾部追加参谋提示；detail 为空时只给提示', () => {
     for (const reason of ['gatekeeper_big', 'reconcile_conflict', 'integration_unresolved']) {
-      expect(withAdvisorHint(reason, '出事了'), reason).toContain('参谋正在分析');
-      expect(withAdvisorHint(reason, '出事了'), reason).toContain('出事了');
-      expect(withAdvisorHint(reason, undefined), reason).toContain('参谋正在分析');
+      expect(withAdvisorHint(reason, '出事了', true), reason).toContain('参谋正在分析');
+      expect(withAdvisorHint(reason, '出事了', true), reason).toContain('出事了');
+      expect(withAdvisorHint(reason, undefined, true), reason).toContain('参谋正在分析');
     }
   });
 
+  // 审查修复：卡片承诺必须是事实——declined 重弹病历不重派参谋（reRaiseWait 零 dispatch），重弹出的新卡
+  // 不得再承诺「建议稍后贴出」让人空等；参谋已收尾（建议卡已贴/已失败）同理。
+  it('参谋 run 不在途（重弹卡/参谋已收尾）→ 不加提示，detail 原样透传', () => {
+    expect(withAdvisorHint('reconcile_conflict', '出事了', false)).toBe('出事了');
+    expect(withAdvisorHint('gatekeeper_big', undefined, false)).toBeUndefined();
+  });
+
   it('机械故障病历不加提示（不派参谋，detail 原样透传）', () => {
-    expect(withAdvisorHint('run_failed', '报错了')).toBe('报错了');
-    expect(withAdvisorHint('retry_exhausted', undefined)).toBeUndefined();
+    expect(withAdvisorHint('run_failed', '报错了', true)).toBe('报错了');
+    expect(withAdvisorHint('retry_exhausted', undefined, true)).toBeUndefined();
   });
 });
