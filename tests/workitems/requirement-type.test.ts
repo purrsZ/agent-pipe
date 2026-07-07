@@ -930,3 +930,133 @@ describe('requirement WS-8 run_failed 先自动重试一次', () => {
     ).toEqual({});
   });
 });
+
+// VERIFY V2（#3 意见双派修复）：拍板/打回意见注入带 silent → onHumanMessage 不自派 steer；意见经
+// decision.payload.note 透传给病历重派的 worker。真机 #3：一次点击既由 resolve 路由派 run、又由意见注入
+// 派 steer = 双 run 空烧；灯③打回带意见更会双 steer 串行（台账未发现）。
+describe('VERIFY V2（#3）意见注入 silent + note 透传', () => {
+  const stageOf = (d: unknown): string | undefined =>
+    (d as { payload?: { stage?: string } } | undefined)?.payload?.stage;
+
+  it('silent human_message（意见回灌）→ onHumanMessage 返回 {} 不自派 steer', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    const out = t.onEvent(
+      item,
+      ev('human_message', { text: '【打回意见】改一下', silent: true, runningOwners: 0 }),
+    );
+    expect(out).toEqual({});
+  });
+
+  it('非 silent human_message → 照旧派 steer（回归，silent 不误伤正常消息）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement });
+    const out = t.onEvent(item, ev('human_message', { text: '正常说话', runningOwners: 0 }));
+    expect(out.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'steer' } });
+    // silent 显式为 false 也当普通消息。
+    const out2 = t.onEvent(
+      item,
+      ev('human_message', { text: '正常说话', silent: false, runningOwners: 0 }),
+    );
+    expect(out2.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'steer' } });
+  });
+
+  it('run_failed 病历带意见（decision.payload.note）approved → worker 重派带 note', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a'] });
+    const out = t.onEvent(
+      item,
+      ev('wait_resolved', {
+        decision: { approved: true, payload: { reason: 'x', note: '重点改退款回原卡' } },
+        resolvedWaitReason: 'run_failed',
+      }),
+    );
+    expect(out.dispatch?.[0]).toMatchObject({
+      role: 'worker',
+      payload: { note: '重点改退款回原卡' },
+    });
+  });
+
+  it('run_failed approved 无意见 → worker 重派 payload 不带 note（回归）', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a'] });
+    const out = t.onEvent(
+      item,
+      ev('wait_resolved', { decision: { approved: true }, resolvedWaitReason: 'run_failed' }),
+    );
+    const spec = out.dispatch?.[0] as { payload?: Record<string, unknown> };
+    expect(spec?.payload).not.toHaveProperty('note');
+  });
+
+  it('stalled_no_path / retry_exhausted approved 带意见 → worker 重派同样带 note', () => {
+    for (const reason of ['stalled_no_path', 'retry_exhausted']) {
+      const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a'] });
+      const out = t.onEvent(
+        item,
+        ev('wait_resolved', {
+          decision: { approved: true, payload: { reason: 'r', note: `处理:${reason}` } },
+          resolvedWaitReason: reason,
+        }),
+      );
+      expect(out.dispatch?.[0], reason).toMatchObject({
+        role: 'worker',
+        payload: { note: `处理:${reason}` },
+      });
+    }
+  });
+
+  it('多仓病历带意见重派 → 每个 worker 都带同一 note', () => {
+    const item = makeWorkItem('wi-1', {
+      phase: PHASE.implement,
+      repos: ['repo-a', 'repo-b'],
+    });
+    const out = t.onEvent(
+      item,
+      ev('wait_resolved', {
+        decision: { approved: true, payload: { reason: 'r', note: '两仓都要改' } },
+        resolvedWaitReason: 'run_failed',
+      }),
+    );
+    expect(out.dispatch).toHaveLength(2);
+    for (const spec of out.dispatch ?? []) {
+      expect(spec).toMatchObject({ role: 'worker', payload: { note: '两仓都要改' } });
+    }
+  });
+
+  it('e2e（transition 层）：run_failed 病历带意见点继续 → 恰一个 worker（带 note）、零 steer', () => {
+    // 一次点击产生的两个事件（handleCheckpointAction 的动作序列，reducer 按 seq 逐条 apply）：
+    // ① applyCheckpointOpinion 注入 silent human_message；② resolveWait 带 decision.payload.note。
+    const item = makeWorkItem('wi-1', { phase: PHASE.implement, repos: ['repo-a'] });
+    const fromInject = t.onEvent(
+      item,
+      ev('human_message', { text: '【打回意见】改退款回原卡', silent: true, runningOwners: 0 }),
+    );
+    const fromResolve = t.onEvent(
+      item,
+      ev('wait_resolved', {
+        decision: { approved: true, payload: { reason: 'x', note: '改退款回原卡' } },
+        resolvedWaitReason: 'run_failed',
+      }),
+    );
+    expect(fromInject).toEqual({}); // 意见注入不再自派 steer
+    const dispatches = fromResolve.dispatch ?? [];
+    expect(dispatches).toHaveLength(1); // resolve 恰派一个 worker
+    expect(dispatches[0]).toMatchObject({ role: 'worker', payload: { note: '改退款回原卡' } });
+    // 两个事件合计零 steer（修复前 fromInject 会多派一个 steer = 双 run 空烧）。
+    const steers = [...(fromInject.dispatch ?? []), ...dispatches].filter(
+      (d) => stageOf(d) === 'steer',
+    );
+    expect(steers).toHaveLength(0);
+  });
+
+  it('e2e（transition 层）：灯③打回带意见 → 只一个 steer（redoPhase 的），意见注入不叠第二个', () => {
+    const item = makeWorkItem('wi-1', { phase: PHASE.integrate });
+    const fromInject = t.onEvent(
+      item,
+      ev('human_message', { text: '【打回意见】灯③不过', silent: true, runningOwners: 0 }),
+    );
+    const fromResolve = t.onEvent(item, ev('wait_resolved', { decision: { approved: false } }));
+    expect(fromInject).toEqual({}); // silent 不自派 steer
+    expect(fromResolve.dispatch?.[0]).toMatchObject({ role: 'owner', payload: { stage: 'steer' } });
+    const steers = [...(fromInject.dispatch ?? []), ...(fromResolve.dispatch ?? [])].filter(
+      (d) => stageOf(d) === 'steer',
+    );
+    expect(steers).toHaveLength(1); // 修复前会是 2（redoPhase steer + 意见注入 steer）
+  });
+});

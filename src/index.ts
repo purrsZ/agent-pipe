@@ -450,7 +450,7 @@ export function waitCardKindFor(
 export function applyCheckpointOpinion(deps: {
   workitems: {
     store: { getWait(id: string): { resolvedAt: number | null } | undefined };
-    api: { injectHumanMessage(itemId: string, msg: { text: string }): void };
+    api: { injectHumanMessage(itemId: string, msg: { text: string; silent?: boolean }): void };
   };
   itemId: string;
   waitId: string;
@@ -459,12 +459,35 @@ export function applyCheckpointOpinion(deps: {
 }): boolean {
   const { workitems, itemId, waitId, approved, opinion } = deps;
   if (opinion && workitems.store.getWait(waitId)?.resolvedAt === null) {
+    // VERIFY V2（#3）：silent=true——意见进下一轮 run 的 batch 窗口供 resolve 路由派出的 owner run 当 followup
+    // 读到（消息必达不变），但不再触发 onHumanMessage 自派 steer（否则一次点击双起 run）。worker 重派另经
+    // decision.payload.note 拿到同一意见（worker 不读 followups）。
     workitems.api.injectHumanMessage(itemId, {
       text: `【${approved ? '拍板意见' : '打回意见'}】${opinion}`,
+      silent: true,
     });
     return true;
   }
   return false;
+}
+
+// VERIFY V2（#4 发卡竞态守卫）：同一 key 的异步动作在飞行期间只跑一次——并发进入者直接拿到 undefined。用于
+// surfaceCheckpoints 的发灯卡：worker done 后 reducer 级联（gatekeeper_passed → integration_check_passed →
+// manifest_ready …）让 postStatus 在 1~2 秒内连调多次，replyCard 是网络级慢动作 → 多次调用都在首张卡回执落库
+// 前读到 cardMsgId=null → 三张全发（真机 #4）。TOCTOU 是并发窗口，非缺判断，故用飞行守卫收口。与 cardMsgId
+// 持久化互补（重启丢守卫最坏重发一张，可接受）。导出以便直测（先例 runScoutResult）。
+export async function withInFlightGuard<T>(
+  key: string,
+  inFlight: Set<string>,
+  fn: () => Promise<T>,
+): Promise<T | undefined> {
+  if (inFlight.has(key)) return undefined;
+  inFlight.add(key);
+  try {
+    return await fn();
+  } finally {
+    inFlight.delete(key);
+  }
 }
 
 // ── DELEGATE 委托模式（睡前放权）────────────────────────────────────────────────────────────
@@ -2040,20 +2063,27 @@ async function main() {
     const reason = opinion || (approved ? '飞书拍板：通过' : '飞书拍板：打回，请按反馈修改');
     // 监工判大三按钮把 value.action（rework/proceed）透传进 decision.payload，worktype 据此路由（走 resolveWait
     // 单写口，与 cancel 分支同源）；其余检查点走 workbenchAdapter（板与飞书共用同一口）。
+    // VERIFY V2（#3）：opinion 也塞进 decision.payload.note——病历（run_failed/stalled/retry_exhausted）「已处理·
+    // 继续」重派的 worker 靠它当定向施工指令（worker 不读 followups）。有 action 或有 opinion → 走 resolveWait
+    // 单写口带 payload；两者都无 → 保持 workbenchAdapter（行为不变，二者底层同一 api.resolveWait）。
     const decisionAction = typeof value.action === 'string' ? value.action : undefined;
-    const ok = decisionAction
-      ? workitems.api.resolveWait(waitId, {
-          operator: action.operatorId,
-          reason,
-          decision: { approved, payload: { reason, action: decisionAction } },
-        }).resolved
-      : workbenchAdapter.actions.resolve({
-          itemId,
-          waitId,
-          operator: action.operatorId,
-          approved,
-          reason,
-        }).ok;
+    const payload: Record<string, unknown> = { reason };
+    if (decisionAction) payload.action = decisionAction;
+    if (opinion) payload.note = opinion;
+    const ok =
+      decisionAction || opinion
+        ? workitems.api.resolveWait(waitId, {
+            operator: action.operatorId,
+            reason,
+            decision: { approved, payload },
+          }).resolved
+        : workbenchAdapter.actions.resolve({
+            itemId,
+            waitId,
+            operator: action.operatorId,
+            approved,
+            reason,
+          }).ok;
     if (caseLabel) {
       await patch(buildCaseFileAnsweredCard(title, caseLabel, false));
     } else {
@@ -2470,6 +2500,9 @@ export function createWorkitemsRuntime(deps: {
   // Surface any new human checkpoint wait as an interactive 灯卡 replied under the anchor (so it
   // lands in the thread). The worktype owns the phase→灯 mapping (checkpointBoundaryOf/lights);
   // this kernel-exempt observer only renders + routes.
+  // VERIFY V2（#4）：发卡飞行守卫（closure 级，跨并发 postStatus 调用共享）。防级联事件在首张卡回执落库前
+  // 的并发窗口内重复发同一 waitId 的卡。
+  const cardsInFlight = new Set<string>();
   const surfaceCheckpoints = async (
     workitemId: string,
     title: string,
@@ -2491,6 +2524,8 @@ export function createWorkitemsRuntime(deps: {
       // WS-10.3：选卡判定收敛到 waitCardKindFor（纯函数，全覆盖断言据此钉死每个 reason 都有专属卡）。
       const cardKind = waitCardKindFor(w.reason);
       if (cardKind === null) continue; // 非关卡灯 / 非病历 / 无专属卡 → 跳过
+      // VERIFY V2（#4）：该 waitId 的卡正在飞行中（另一并发 postStatus 已进入发送）→ 本次跳过，别重复建卡/发卡。
+      if (cardsInFlight.has(w.id)) continue;
       let card: object;
       if (cardKind === 'closure') {
         // WS-7.7 灯④：交付待关单卡。D3：可自动关单时带委托提示（grant 为空时 hint 必空，不必拉事件史）。
@@ -2532,8 +2567,12 @@ export function createWorkitemsRuntime(deps: {
           { itemId: workitemId, waitId: w.id },
         );
       }
-      const posted = await deps.sender.replyCard(anchorMsgId, card);
-      // 发卡成功 → 记 cardMsgId（重启不重发）；失败 → cardMsgId 仍空、下次事件/提醒重试。
+      // VERIFY V2（#4）：发送经飞行守卫收口——同一 waitId 在飞行期间只发一张。守卫在 await 前登记、finally
+      // 注销；并发进入者拿到 undefined（下面 if(posted) 一并当「未发」跳过，与发送失败同处理）。
+      const posted = await withInFlightGuard(w.id, cardsInFlight, () =>
+        deps.sender.replyCard(anchorMsgId, card),
+      );
+      // 发卡成功 → 记 cardMsgId（重启不重发）；失败/并发跳过 → cardMsgId 仍空、下次事件/提醒重试。
       if (posted) workitems.store.updateWait(w.id, { cardMsgId: posted });
     }
   };

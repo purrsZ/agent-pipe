@@ -75,7 +75,13 @@ export class WorkitemsApi {
    * short-circuits the enqueue — the bridge releases the claim on close so a closed thread
    * never reaches this with a stale claim.
    */
-  injectHumanMessage(workitemId: string, payload: { text: string; feishuMsgId?: string }): void {
+  injectHumanMessage(
+    workitemId: string,
+    // VERIFY V2（#3）：`silent?` 由桥层意见回灌带上（applyCheckpointOpinion 注入拍板/打回意见时置 true）。
+    // 容器只**搬运**这个字段进 human_message 事件 payload、不解释语义（worktype onHumanMessage 见 silent
+    // 即不自派 steer——意见改由 resolve 路由派出的 owner run 作 followup 读到，避免一次点击双起 run）。中性透传。
+    payload: { text: string; feishuMsgId?: string; silent?: boolean },
+  ): void {
     this.deps.reducer.enqueue(workitemId, { kind: 'human_message', payload });
   }
 

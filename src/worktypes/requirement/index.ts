@@ -480,7 +480,11 @@ function onWaitResolved(item: WorkItem, ev: WorkItemEvent): Transition {
       : { dispatch: [ownerSpec(item, STAGE.assess)] };
   }
   if (reason === RUN_FAILED_REASON) {
-    return decision.approved ? retryCurrentPhase(item) : reRaiseWait(RUN_FAILED_REASON);
+    // VERIFY V2（#3）：带上打回/拍板意见（decision.payload.note）→ worker 重派把它当「定向施工指令」读到
+    // （worker 不读 followups，故必须走 note 透传）。owner 分支无需 note——意见走 followups。
+    return decision.approved
+      ? retryCurrentPhase(item, noteFromDecision(ev))
+      : reRaiseWait(RUN_FAILED_REASON);
   }
   if (reason === INTEGRATION_UNRESOLVED_REASON) {
     return decision.approved && item.phase === PHASE.integrate
@@ -489,10 +493,14 @@ function onWaitResolved(item: WorkItem, ev: WorkItemEvent): Transition {
   }
   // WS-1.3/1.5：活性自曝病历 + 两类容器病历的显式分支（approved → 重试当前阶段入口 / declined → 重弹）。
   if (reason === STALLED_NO_PATH_REASON) {
-    return decision.approved ? retryCurrentPhase(item) : reRaiseWait(STALLED_NO_PATH_REASON);
+    return decision.approved
+      ? retryCurrentPhase(item, noteFromDecision(ev))
+      : reRaiseWait(STALLED_NO_PATH_REASON);
   }
   if (reason === RETRY_EXHAUSTED_REASON) {
-    return decision.approved ? retryCurrentPhase(item) : reRaiseWait(RETRY_EXHAUSTED_REASON);
+    return decision.approved
+      ? retryCurrentPhase(item, noteFromDecision(ev))
+      : reRaiseWait(RETRY_EXHAUSTED_REASON);
   }
   if (reason === THRASH_REASON) {
     // thrash 时容器已清 discardStreak；人确认即可（approved → {}），或重弹留观（declined）。
@@ -523,15 +531,19 @@ function onWaitResolved(item: WorkItem, ev: WorkItemEvent): Transition {
 }
 
 // run 失败病历被 approve（人已处理环境/问题）→ 重试当前阶段的入口工作。
-function retryCurrentPhase(item: WorkItem): Transition {
+// VERIFY V2（#3）：note = 人在病历卡里写的处理意见（decision.payload.note）——透传给重派的 worker 当「定向
+// 施工指令」（worker 不读 followups）。owner 对账分支不带 note（意见由 followups 送达 owner run）。
+function retryCurrentPhase(item: WorkItem, note?: string): Transition {
   // WS-6：lite 单在拆解阶段自愈（stalled_no_path 等 approve）→ 派 worker 而非 owner 对账（lite 从不过对账，
   // 派回 owner 会跑错流程）。此处 item.repos 已提升（非 onReposSet 的旧值），isLite 可信。
   if (item.phase === PHASE.split) {
     return isLite(item)
-      ? { dispatch: workerDispatches(item, undefined) }
+      ? { dispatch: workerDispatches(item, undefined, undefined, note) }
       : { dispatch: [ownerSpec(item, STAGE.reconcile)] };
   }
-  if (item.phase === PHASE.implement) return { dispatch: workerDispatches(item, undefined) };
+  if (item.phase === PHASE.implement) {
+    return { dispatch: workerDispatches(item, undefined, undefined, note) };
+  }
   if (item.phase === PHASE.integrate) return { effects: [{ kind: 'integration_check' }] };
   return {};
 }
@@ -582,6 +594,10 @@ function redoPhase(item: WorkItem): Transition {
 }
 
 function onHumanMessage(item: WorkItem, ev: WorkItemEvent): Transition {
+  // VERIFY V2（#3）：拍板/打回意见由 applyCheckpointOpinion 注入时带 silent=true——它只为进入下一轮 run 的
+  // batch 窗口供 owner run 当 followup 读到（消息必达），**不该**在此再自派一个 steer。否则一次点击既由 resolve
+  // 路由派 run、又由这里的意见注入派 steer = 双 run 空烧（真机 #3）。非 silent（用户群里正常说话）照旧派 steer。
+  if (silentOf(ev.payload)) return {};
   const text = humanText(ev.payload).trim();
   if (text === '/cancel') {
     // 防误触: confirm before tearing down. The confirm card resolves with a cancel decision.
@@ -642,17 +658,21 @@ function workerDispatches(
   // WS-6：onReposSet 的 lite 路径在 item.repos 提升前调用（applyReposSet 只写 DB），须显式传入正在提升的
   // 仓，否则读到旧的空 repos 会派 0 个 worker。其它调用点（reconcile_passed / retry）item.repos 已就位，省略即可。
   reposOverride?: string[],
+  // VERIFY V2（#3）：病历带意见重派时，把意见落进每个 worker 的 payload.note → composeWorkerPrompt 经
+  // noteFromPayload 读成「定向施工指令」（E6 标题，链路现成）。空/缺省 → 不带（正常首派/无意见重派）。
+  note?: string,
 ): AssignmentSpec[] {
   const t = ttlsOf(item);
   const source = reposOverride ?? item.repos;
   const repos = source.length > 0 ? source : [''];
+  const trimmed = note?.trim();
   return repos.map((repo) => ({
     role: 'worker' as const,
     repo: repo || undefined,
     deadlineTtlSec: t.deadlineTtlSec,
     wallclockCapSec: t.wallclockCapSec,
     parentAssignmentId,
-    payload: { stage: 'implement', repo },
+    payload: trimmed ? { stage: 'implement', repo, note: trimmed } : { stage: 'implement', repo },
   }));
 }
 
@@ -676,6 +696,19 @@ function reposSetOf(payload: unknown): string[] {
 function resolvedWaitReasonOf(payload: unknown): string | undefined {
   const v = asObject(payload).resolvedWaitReason;
   return typeof v === 'string' ? v : undefined;
+}
+
+// VERIFY V2（#3）：从 wait_resolved 的 decision.payload.note 取人写的处理意见（handleCheckpointAction 拍板/打回
+// 时落）。缺省/空白 → undefined（无意见的正常 approve）。防御式，仿 noteFromPayload。
+function noteFromDecision(ev: WorkItemEvent): string | undefined {
+  const v = asObject(checkpointDecisionOf(ev)?.payload).note;
+  return typeof v === 'string' && v.trim().length > 0 ? v : undefined;
+}
+
+// VERIFY V2（#3）：human_message payload 的 silent 标记（applyCheckpointOpinion 注入意见时置 true）。true → 该
+// 消息只供 owner run 当 followup 读，onHumanMessage 不再自派 steer。防御式：非 true 一律当普通消息（回归）。
+function silentOf(payload: unknown): boolean {
+  return asObject(payload).silent === true;
 }
 
 function roleOf(payload: unknown): string | undefined {
