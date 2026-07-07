@@ -12,6 +12,10 @@ vi.mock('../../src/agents/worktree.js', () => ({
     throw new Error('remove failed');
   }),
   worktreePrune: vi.fn(),
+  // VERIFY V1：GC 删除前先 worktreeIsDirty 判空——这里叶子是空 plain 目录（无 git），钉死 clean 走 remove 降级
+  // 路径（本测专测降级 prune，不测兜底提交）。
+  worktreeIsDirty: vi.fn(() => false),
+  worktreeCommitAll: vi.fn(),
 }));
 
 import { mainRepoOf, worktreePrune, worktreeRemove } from '../../src/agents/worktree.js';

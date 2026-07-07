@@ -48,7 +48,16 @@ export interface RunStrategy {
   }): RunOptions;
   resolveCwd(args: { workitem: WorkItem; assignment: Assignment; defaultCwd: string }): string;
   /** Create/ready the cwd before the run (probe: mkdir; requirement worker: worktree add). */
-  prepareWorkspace(args: { workitem: WorkItem; assignment: Assignment; cwd: string }): void;
+  prepareWorkspace(args: {
+    workitem: WorkItem;
+    assignment: Assignment;
+    cwd: string;
+    // VERIFY V1（R5 血统续接）：full event history — the requirement worker reads it to base a
+    // fresh换轮 worktree off the last worker branch (lastWorkerBranch) instead of always HEAD.
+    // Same neutral pass-through as composePrompt's events; probe ignores it. Optional so unit
+    // tests may omit it (run-handler always supplies it in production).
+    events?: WorkItemEvent[];
+  }): void;
   canResume(payload: unknown, assignment: Assignment | undefined, workitem: WorkItem): boolean;
   /**
    * Optional post-run hook (SUCCESS path only). Runs AFTER report.md is persisted and BEFORE
@@ -212,7 +221,9 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
   // 2) Managed shadow task (per-assignment id, fresh session). The strategy resolves cwd
   //    (probe: repos[0]; requirement worker: its worktree) and readies it (mkdir / worktree add).
   const cwd = strategy.resolveCwd({ workitem, assignment, defaultCwd: deps.defaultCwd });
-  strategy.prepareWorkspace({ workitem, assignment, cwd });
+  // VERIFY V1（R5 血统续接）：透传全历史事件流，让 requirement worker 的 prepareWorkspace 以上一轮 worker
+  // 分支为 base 新开 worktree（血统续接），而非一律从 HEAD。allEvents 是 runAgent 开头已取的同一快照（复用）。
+  strategy.prepareWorkspace({ workitem, assignment, cwd, events: allEvents });
   const task = deps.kernelStore.upsertTask({
     id: `managed:${assignment.id}`,
     display_name: workitemTitle(workitem).slice(0, 60) || assignment.id,

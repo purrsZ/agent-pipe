@@ -1,5 +1,11 @@
 import * as fs from 'node:fs';
-import { worktreeAdd, worktreeIsDirty, worktreePathFor } from '../../agents/worktree.js';
+import {
+  branchExists,
+  worktreeAdd,
+  worktreeCommitAll,
+  worktreeIsDirty,
+  worktreePathFor,
+} from '../../agents/worktree.js';
 import type { Assignment, WorkItem, WorkItemEvent } from '../../workitems/types.js';
 import type { RunStrategy } from '../agent-run/run-handler.js';
 import { composeAdvisePrompt, composeInspectPrompt, renderEventDigest } from './advisor.js';
@@ -197,12 +203,18 @@ export function createRequirementRunStrategy(opts: {
     resolveCwd: ({ workitem, assignment, defaultCwd }) =>
       workerCwd(workitem, assignment) ?? assignment.repo ?? workitem.repos[0] ?? defaultCwd,
 
-    prepareWorkspace: ({ workitem, assignment, cwd }) => {
+    prepareWorkspace: ({ workitem, assignment, cwd, events }) => {
       const wt = workerCwd(workitem, assignment);
       if (wt && assignment.repo) {
         // idempotent: a resume reuses the existing worktree; a fresh dispatch creates it.
         if (!fs.existsSync(wt)) {
-          worktreeAdd(assignment.repo, wt, branchFor(workitem, assignment), base);
+          // VERIFY V1（R5 血统续接）：换轮的新 worktree 不再一律从主仓 HEAD 新开。先找本仓上一轮 worker
+          // 分支（run_completed 血统，排除自己），确认它真存在则以它为 base——新分支即含前轮已提交改动；无
+          // 历史 / 分支不在则回落 opts.baseRef ?? 'HEAD'。这一处修改覆盖**所有换轮类型**（rework/fix/retry/
+          // stall 重派），无需在各 dispatch 点穿传。分支在 worktreeAdd 时即建，血统链对崩溃也成立。
+          const lineage = lastWorkerBranch(events ?? [], workitem, assignment.repo, assignment.id);
+          const lineageBase = lineage && branchExists(assignment.repo, lineage) ? lineage : base;
+          worktreeAdd(assignment.repo, wt, branchFor(workitem, assignment), lineageBase);
         }
       } else {
         fs.mkdirSync(cwd, { recursive: true });
@@ -226,6 +238,18 @@ export function createRequirementRunStrategy(opts: {
 
     // owner run 收尾的两件结构化产物（artifact-only，绝不把 run 翻成 failure；解析不到优雅降级）：
     afterRun: ({ report, workitem, assignment, writeArtifact, effectPayload }) => {
+      // VERIFY V1（#5+R5 兜底自动提交）：worker run 成功收尾时若 worktree 仍有未提交改动 → 自动提交到当前
+      // 分支（worktree git 归 kernel 原语 worktree.ts，本文件不碰 child_process——effect-handler 红线）。结构性
+      // 保证交付清单读得到真 diff、GC 不吞产出。afterRun 仅走成功路径且被 run-handler 的 try/catch 兜住：提交
+      // 失败只 log、不翻 run 为 failed、不拖累 onRunEnd 收尾。与 canResume 的 dirty 判定无冲突（那是崩溃恢复
+      // 用，成功收尾后本就该 clean）。
+      if (assignment.role === 'worker') {
+        const wt = workerCwd(workitem, assignment);
+        if (wt && fs.existsSync(wt) && worktreeIsDirty(wt)) {
+          worktreeCommitAll(wt, 'chore: run 收尾兜底提交（自动）');
+        }
+        return;
+      }
       if (assignment.role !== 'owner') return;
       const stage = stageFromPayload(effectPayload);
       // 跨仓对账（拆解，或 WS-5 implement 相位内重对账 stage=reconcile）→ 落两份：reconcile.json（完整对账
@@ -320,6 +344,31 @@ export function lastWorkerWorktrees(
     });
   }
   return [...byRepo.values()];
+}
+
+// VERIFY V1（R5 血统续接）：本仓最后一条 role==='worker' 的 run_completed（seq-ascending 覆盖写取最后，排除
+// 自己 excludeAssignmentId；先例 lastWorkerWorktrees），推出那轮 worker 的分支名（branchFor，与建 worktree /
+// 交付清单共用同一份推导）。换轮的新 worktree 以它为 base → 前轮已提交改动带进本轮。无历史 → undefined
+// （prepareWorkspace 回落 HEAD）。纯函数（无 IO）。只认 run_completed：崩溃轮（run_failed 无 run_completed）不入
+// 血统，其未提交部分本就该由重试轮重做。
+export function lastWorkerBranch(
+  events: WorkItemEvent[],
+  workitem: WorkItem,
+  repo: string,
+  excludeAssignmentId: string,
+): string | undefined {
+  let branch: string | undefined;
+  for (const ev of events) {
+    if (ev.kind !== 'run_completed') continue;
+    const p = ev.payload;
+    if (typeof p !== 'object' || p === null) continue;
+    const o = p as Record<string, unknown>;
+    if (o.role !== 'worker' || o.repo !== repo) continue;
+    const assignmentId = typeof o.assignmentId === 'string' ? o.assignmentId : '';
+    if (!assignmentId || assignmentId === excludeAssignmentId) continue;
+    branch = branchFor(workitem, { id: assignmentId, repo });
+  }
+  return branch;
 }
 
 // assess / steer 共用：全历史 run_completed 报告路径 → 有界回执（最近 N 份、每份截断），防 prompt 随工人数 ×

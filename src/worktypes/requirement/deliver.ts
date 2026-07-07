@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import { worktreeDiffStat, worktreePathFor } from '../../agents/worktree.js';
 import type { EffectContext, EffectHandler } from '../../workitems/effects.js';
 import { branchFor } from './branch.js';
@@ -53,13 +54,23 @@ async function deliverManifest(
     // 避免 worktree 内 HEAD...HEAD 恒空导致「(无改动)」。
     const diffstat = worktreeDiffStat(wt, opts.baseRef);
     repoBranches.push({ repo: d.repo, branch });
+    // VERIFY V1（#5）：接手命令随 worktree 是否仍在分流。worktree 还在时，分支正被这个 linked worktree
+    // 占用，主仓直接 `git switch <branch>` 会「branch already checked out」失败——给工作副本路径 + 先移除
+    // worktree 再 switch 的正确命令。已被 GC 清理 → 回落原来的主仓 switch。fs.existsSync 判断（effect handler
+    // 允许 IO）。
+    const handoffLines = fs.existsSync(wt)
+      ? [
+          `- 工作副本：cd ${wt}  （分支已在此 worktree 签出，改动就在这里）`,
+          `- 主仓接手：git worktree remove ${wt} 后 cd ${d.repo} && git switch ${branch}（或等自动清理后直接 switch）`,
+        ]
+      : [`- 本地接手：cd ${d.repo} && git switch ${branch}`];
     sections.push(
       [
         `## ${d.repo}`,
         `- 分支：${branch} （已在主仓创建，worktree 删除后依然存在）`,
         `- 改动概览：${diffstat}`,
         `- 工人回执：${d.reportPath || '(无)'}`,
-        `- 本地接手：cd ${d.repo} && git switch ${branch}`,
+        ...handoffLines,
         `- 推送开 MR：git push origin ${branch} 后到代码平台发起 MR`,
       ].join('\n'),
     );

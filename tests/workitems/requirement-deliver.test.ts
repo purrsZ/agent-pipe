@@ -1,6 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { worktreeAdd, worktreePathFor } from '../../src/agents/worktree.js';
 import type { EffectContext } from '../../src/workitems/effects.js';
 import type { WorkItemEvent } from '../../src/workitems/types.js';
+import { branchFor } from '../../src/worktypes/requirement/branch.js';
 import { createDeliverManifestHandler } from '../../src/worktypes/requirement/deliver.js';
 import { makeWorkItem } from '../helpers/workitems.js';
 
@@ -85,10 +91,14 @@ describe('deliver_manifest effect (WS-7)', () => {
     expect(payload.summaryText).toContain('交付清单');
   });
 
-  it('worktree 不存在 → diffstat 占位（不抛）', async () => {
+  it('worktree 不存在 → diffstat 占位（不抛）+ 接手命令回落主仓 git switch', async () => {
     const { ctx, written } = fakeCtx([workerDone('/repos/x', 'as-000000zz', 'r', 1)], ['/repos/x']);
     await handler.run(ctx);
-    expect(written['delivery/manifest.md']).toContain('(worktree 已清理或不可读)');
+    const md = written['delivery/manifest.md']!;
+    expect(md).toContain('(worktree 已清理或不可读)');
+    // VERIFY V1：worktree 已清理 → 回落原来的「本地接手：cd <repo> && git switch」，不出 worktree remove 提示。
+    expect(md).toContain('本地接手：cd /repos/x && git switch');
+    expect(md).not.toContain('git worktree remove');
   });
 
   it('无 worker 记录 → 空清单不炸', async () => {
@@ -124,5 +134,57 @@ describe('deliver_manifest effect (WS-7)', () => {
     expect(payload.summaryText.length).toBeLessThanOrEqual(3000); // O2：截断后总长不越界
     expect(payload.repos).toHaveLength(20); // repos 数组完整不截断
     expect(full.length).toBeGreaterThan(payload.summaryText.length); // artifact 为全文
+  });
+});
+
+// VERIFY V1（#5）：worktree 仍存在时，分支被 linked worktree 占用，主仓直接 git switch 会失败——manifest 改给
+// 工作副本路径 + 先移除 worktree 再 switch 的正确命令。真仓建 worktree 验证。
+describe('deliver_manifest 接手命令随 worktree 是否在分流 (VERIFY V1)', () => {
+  let tmpDir: string;
+  let repoPath: string;
+
+  function git(cwd: string, args: string[]): string {
+    return execFileSync('git', args, { cwd, encoding: 'utf8' });
+  }
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ap-deliver-wt-'));
+    repoPath = path.join(tmpDir, 'repo');
+    fs.mkdirSync(repoPath, { recursive: true });
+    git(repoPath, ['init', '-b', 'main']);
+    git(repoPath, ['config', 'user.email', 't@t']);
+    git(repoPath, ['config', 'user.name', 't']);
+    fs.writeFileSync(path.join(repoPath, 'README.md'), 'base\n');
+    git(repoPath, ['add', '-A']);
+    git(repoPath, ['commit', '-m', 'base']);
+  });
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it('worktree 仍在 → 给「工作副本 cd 路径」+「worktree remove 后 switch」，不给裸 git switch', async () => {
+    const worktreesDir = path.join(tmpDir, 'worktrees');
+    const assignmentId = 'as-live0000';
+    const wi = makeWorkItem('wi-1', { type: 'requirement', repos: [repoPath], title: '真机交付' });
+    const wtPath = worktreePathFor(worktreesDir, 'wi-1', assignmentId, repoPath);
+    // 真的建一个 worktree（分支被它占用）。
+    worktreeAdd(repoPath, wtPath, branchFor(wi, { id: assignmentId, repo: repoPath }), 'HEAD');
+    // worker 在 worktree 里提交了改动（血统/兜底提交后的状态）。
+    fs.writeFileSync(path.join(wtPath, 'feature.ts'), 'export const f = 1;\n');
+    git(wtPath, ['add', '-A']);
+    git(wtPath, ['commit', '-m', 'work']);
+
+    const { ctx, written } = fakeCtx(
+      [workerDone(repoPath, assignmentId, `assignments/${assignmentId}/report.md`, 1)],
+      [repoPath],
+    );
+    const handler = createDeliverManifestHandler({ worktreesDir });
+    await handler.run(ctx);
+
+    const md = written['delivery/manifest.md']!;
+    expect(md).toContain(`工作副本：cd ${wtPath}`); // 指向真实工作副本
+    expect(md).toContain(`git worktree remove ${wtPath}`); // 先移除 worktree
+    expect(md).not.toContain(`本地接手：cd ${repoPath} && git switch`); // 不再给会失败的裸 switch
+    expect(md).toContain('feature.ts'); // diffstat 读到真实改动（兜底提交后不再「(无改动)」）
   });
 });

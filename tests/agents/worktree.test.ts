@@ -4,7 +4,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  branchExists,
   worktreeAdd,
+  worktreeCommitAll,
   worktreeIsDirty,
   worktreePathFor,
   worktreePrune,
@@ -85,6 +87,36 @@ describe('worktree lifecycle (D-27)', () => {
   it('worktreeAdd throws on a missing base (caller raises its hand, R05.AC-6)', () => {
     const wt = worktreePathFor(tmpDir, 'scope3', 'run3', 'repo');
     expect(() => worktreeAdd(repoPath, wt, 'feature/z', 'nonexistent-base')).toThrow();
+  });
+
+  // VERIFY V1（#5+R5）：worktreeCommitAll 把 worktree 全部改动（含 untracked）提交到当前分支——交付/GC 兜底。
+  it('worktreeCommitAll 把 tracked 改动 + untracked 产出都提交到分支（提交后 clean）', () => {
+    const wt = worktreePathFor(tmpDir, 'scopeC', 'runC', 'repo');
+    worktreeAdd(repoPath, wt, 'feature/commit', 'main');
+    fs.writeFileSync(path.join(wt, 'README.md'), 'edited\n'); // tracked 改动
+    fs.mkdirSync(path.join(wt, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(wt, 'src', 'new.ts'), 'export const x = 1;\n'); // untracked 新增
+    expect(worktreeIsDirty(wt)).toBe(true);
+
+    worktreeCommitAll(wt, 'chore: 兜底提交');
+    expect(worktreeIsDirty(wt)).toBe(false); // add -A 覆盖 tracked + untracked
+    // 提交真落在 feature/commit 分支上，含新增文件。
+    const log = git(wt, ['log', '--oneline', '-1']);
+    expect(log).toContain('兜底提交');
+    const show = git(wt, ['show', '--stat', 'HEAD']);
+    expect(show).toContain('src/new.ts');
+    worktreeRemove(wt);
+  });
+
+  // VERIFY V1（R5 血统续接）：branchExists 判分支存在与否——换轮 base 回落判据。
+  it('branchExists：存在的分支 → true，不存在 → false（不抛）', () => {
+    const wt = worktreePathFor(tmpDir, 'scopeB', 'runB', 'repo');
+    worktreeAdd(repoPath, wt, 'req/lineage/repo-abcd', 'main');
+    expect(branchExists(repoPath, 'req/lineage/repo-abcd')).toBe(true);
+    expect(branchExists(repoPath, 'req/never/created-0000')).toBe(false);
+    worktreeRemove(wt);
+    // worktree 删除后分支仍在（remove 只删检出、留分支）→ 血统 base 依然可用。
+    expect(branchExists(repoPath, 'req/lineage/repo-abcd')).toBe(true);
   });
 
   // 审查修复 F4：worktreePrune 清主仓里工作目录已消失的陈旧注册（GC 里 worktreeRemove 失败降级 rm 后补的一手）。

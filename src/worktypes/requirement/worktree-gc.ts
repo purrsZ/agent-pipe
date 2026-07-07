@@ -1,6 +1,12 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { mainRepoOf, worktreePrune, worktreeRemove } from '../../agents/worktree.js';
+import {
+  mainRepoOf,
+  worktreeCommitAll,
+  worktreeIsDirty,
+  worktreePrune,
+  worktreeRemove,
+} from '../../agents/worktree.js';
 
 interface GcLogger {
   info(o: unknown, m?: string): void;
@@ -62,6 +68,9 @@ export function runWorktreeGc(deps: {
     // 注册、留分支），再整目录兜底删。remove 失败降级 rm 会在主仓 .git/worktrees/ 留下陈旧注册 → 记下主仓，
     // 兜底删后补 git worktree prune（WS-7.4「降级 rm + prune」）。
     const pruneRepos = new Set<string>();
+    // VERIFY V1（#5 GC 兜底提交）：某叶子 worktree 有未提交改动但兜底提交失败 → 宁留勿丢，跳过整目录删除，
+    // 下次 GC 再试。afterRun 兜底提交是主防线，这里是 worker 从没成功收尾过（崩溃/中断）时最后一道 GC 防线。
+    let keepDirDirtyCommitFailed = false;
     for (const wt of leafWorktrees(dir)) {
       // wt 目录删除后 mainRepoOf 就算不出了，故 remove 前先缓存主仓路径（本身可能抛，包 try）。
       let repo: string | undefined;
@@ -70,12 +79,27 @@ export function runWorktreeGc(deps: {
       } catch {
         repo = undefined;
       }
+      // 删除前兜底提交：worktree 有未提交改动 → 先 add -A && commit 到分支（分支永远保留），绝不连未提交
+      // 产出一起删。提交失败 → 这个 worktree 不删、标记跳过整目录、warn（宁留勿丢）。
+      try {
+        if (worktreeIsDirty(wt)) worktreeCommitAll(wt, 'chore: GC 前兜底提交（自动）');
+      } catch (err) {
+        deps.logger.warn({ err, wt }, 'worktree gc: pre-remove commit failed, keeping worktree');
+        keepDirDirtyCommitFailed = true;
+        continue;
+      }
       try {
         worktreeRemove(wt);
       } catch (err) {
         deps.logger.warn({ err, wt }, 'worktree gc: worktree remove failed, will rm dir');
         if (repo) pruneRepos.add(repo);
       }
+    }
+    if (keepDirDirtyCommitFailed) {
+      // 有 worktree 兜底提交失败 → 整目录保留不删（不 purgeDir、不 prune），下次 GC 再试。
+      deps.logger.warn({ dir }, 'worktree gc: keeping item dir (pre-remove commit failed)');
+      kept++;
+      continue;
     }
     purgeDir(dir, deps.logger);
     for (const repo of pruneRepos) {

@@ -69,6 +69,31 @@ export function worktreeIsDirty(worktreePath: string): boolean {
 }
 
 /**
+ * VERIFY V1（#5+R5 交付完整性）：`git add -A && git commit -m <message>` —— 把 worktree 全部改动
+ * （含 untracked）提交到其当前分支。交付链假设 worker 会提交但契约没长牙——本函数是兜底（afterRun /
+ * GC 前）把「未提交产出」变成分支上持久的 commit：交付清单读得到真 diff、GC 不再吞产出。仅在
+ * `worktreeIsDirty` 为真时调用（clean 时提交会以 nonzero 退出抛错）。不 push、不建 MR（分支即唯一交付物）。
+ */
+export function worktreeCommitAll(worktreePath: string, message: string): void {
+  git(worktreePath, ['add', '-A']);
+  git(worktreePath, ['commit', '-m', message]);
+}
+
+/**
+ * VERIFY V1（R5 血统续接）：`git rev-parse --verify --quiet refs/heads/<branch>` —— 分支是否存在。
+ * 换轮新 worktree 以上一轮 worker 分支为 base 前，先确认那条分支真在（上一轮可能被 GC 删了 worktree
+ * 但分支永远保留，故一般都在；防御式判空回落 HEAD）。不存在 → git 非零退出 → 抛 → catch 返回 false。
+ */
+export function branchExists(repoPath: string, branch: string): boolean {
+  try {
+    git(repoPath, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * WS-7 交付清单：worktree 相对 base 的改动概览（`git diff --stat <base>...HEAD`，三点自动取 merge-base）。
  * base 缺省时以主仓当前 HEAD 为基线——worktree 分支从主仓 HEAD fork，其自身 HEAD 即工作分支本身，
  * `HEAD...HEAD` 恒空；取主仓 HEAD 才拿得到真实改动，且主仓 fork 后又前进也不影响（三点取共同祖先）。

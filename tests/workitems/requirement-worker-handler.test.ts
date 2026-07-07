@@ -4,9 +4,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { worktreePathFor } from '../../src/agents/worktree.js';
+import { branchFor } from '../../src/worktypes/requirement/branch.js';
 import { PHASE } from '../../src/worktypes/requirement/phases.js';
 import {
   createRequirementRunStrategy,
+  lastWorkerBranch,
   lastWorkerWorktrees,
 } from '../../src/worktypes/requirement/worker-handler.js';
 import type { WorkItemEvent } from '../../src/workitems/types.js';
@@ -61,6 +63,23 @@ describe('requirement worker run strategy (write profile + worktree)', () => {
     });
     expect(prompt).not.toContain('只读');
     expect(prompt).toContain('加下单接口');
+  });
+
+  it('VERIFY V1：worker prompt 含提交契约（必 commit 到当前分支 + 禁止 push/建 MR）', () => {
+    const s = strategy();
+    const prompt = s.composePrompt({
+      title: '加下单接口',
+      followups: [],
+      workitem: item(),
+      assignment: worker(),
+      batch: [],
+      readArtifact: () => undefined,
+    });
+    expect(prompt).toContain('提交纪律');
+    expect(prompt).toContain('git commit');
+    expect(prompt).toContain('唯一交付物');
+    expect(prompt).toContain('禁止'); // 禁止 push / 禁止建 MR
+    expect(prompt).toContain('push');
   });
 
   it('owner: readonly, cwd falls back to repo, prompt is the coordinator句', () => {
@@ -815,5 +834,124 @@ describe('requirement 立项勘探 run (stage=scout)', () => {
     expect(prompt).toContain('- /Users/zwh');
     expect(prompt).toContain('posapp → /Users/zwh/posapp');
     expect(prompt).toContain('绝不编造路径');
+  });
+});
+
+// VERIFY V1（#5+R5 交付完整性）：血统续接（换轮新 worktree 以上一轮 worker 分支为 base）+ worker afterRun
+// 兜底自动提交。真仓（beforeEach 已建 repoPath），钉死 R5 回归。
+describe('VERIFY V1：worker 血统续接 + afterRun 兜底提交', () => {
+  const worktreesDir = () => path.join(tmpDir, 'worktrees');
+  const strategy = () => createRequirementRunStrategy({ worktreesDir: worktreesDir() });
+  const item = () => makeWorkItem('wi-1', { type: 'requirement', repos: [repoPath] });
+  const workerDone = (assignmentId: string, seq: number): WorkItemEvent => ({
+    id: seq,
+    workitemId: 'wi-1',
+    seq,
+    kind: 'run_completed',
+    payload: {
+      role: 'worker',
+      repo: repoPath,
+      assignmentId,
+      reportPath: `assignments/${assignmentId}/report.md`,
+    },
+    createdAt: 1000 + seq,
+  });
+
+  it('lastWorkerBranch：两轮取最后 / 排除自己 / 无历史 undefined / 别仓不算', () => {
+    const wi = item();
+    const events: WorkItemEvent[] = [workerDone('as-round1aa', 1), workerDone('as-round2bb', 2)];
+    // 取最后一轮（排除范围外）。
+    expect(lastWorkerBranch(events, wi, repoPath, 'as-none')).toBe(
+      branchFor(wi, { id: 'as-round2bb', repo: repoPath }),
+    );
+    // 排除自己（本轮 assignmentId）→ 回到上一轮。
+    expect(lastWorkerBranch(events, wi, repoPath, 'as-round2bb')).toBe(
+      branchFor(wi, { id: 'as-round1aa', repo: repoPath }),
+    );
+    // 无历史 → undefined。
+    expect(lastWorkerBranch([], wi, repoPath, 'as-x')).toBeUndefined();
+    // 别仓的 run_completed 不算本仓血统。
+    const otherRepo: WorkItemEvent = {
+      ...workerDone('as-other000', 3),
+      payload: {
+        role: 'worker',
+        repo: '/some/other/repo',
+        assignmentId: 'as-other000',
+        reportPath: 'r',
+      },
+    };
+    expect(lastWorkerBranch([otherRepo], wi, repoPath, 'as-x')).toBeUndefined();
+  });
+
+  it('血统续接：第二轮新 worktree 含第一轮已提交改动（R5 回归钉死）', () => {
+    const s = strategy();
+    const wi = item();
+    // 第一轮 worker：建 worktree（无历史 → base HEAD），产出并提交一个文件到本轮分支。
+    const w1 = makeAssignment('as-round1aa', 'wi-1', { role: 'worker', repo: repoPath });
+    const cwd1 = s.resolveCwd({ workitem: wi, assignment: w1, defaultCwd: '/x' });
+    s.prepareWorkspace({ workitem: wi, assignment: w1, cwd: cwd1, events: [] });
+    fs.writeFileSync(path.join(cwd1, 'round1.ts'), 'export const round1 = 1;\n');
+    git(cwd1, ['add', '-A']);
+    git(cwd1, ['commit', '-m', 'round1 work']);
+
+    // 第二轮 worker（新 assignment → 新 worktree）：events 带第一轮 run_completed → base = 第一轮分支。
+    const w2 = makeAssignment('as-round2bb', 'wi-1', { role: 'worker', repo: repoPath });
+    const cwd2 = s.resolveCwd({ workitem: wi, assignment: w2, defaultCwd: '/x' });
+    expect(cwd2).not.toBe(cwd1); // 确实是不同 worktree
+    s.prepareWorkspace({
+      workitem: wi,
+      assignment: w2,
+      cwd: cwd2,
+      events: [workerDone('as-round1aa', 1)],
+    });
+    // 血统续接：第一轮的改动出现在第二轮全新 worktree 里。
+    expect(fs.existsSync(path.join(cwd2, 'round1.ts'))).toBe(true);
+    expect(fs.readFileSync(path.join(cwd2, 'round1.ts'), 'utf8')).toContain('round1');
+  });
+
+  it('血统回落：上一轮分支不存在（如从未建）→ base 回落 HEAD，不带前轮改动', () => {
+    const s = strategy();
+    const wi = item();
+    // 造一轮 run_completed，但其分支从没通过 worktreeAdd 建过 → branchExists false → 回落 HEAD。
+    const w = makeAssignment('as-fresh0cc', 'wi-1', { role: 'worker', repo: repoPath });
+    const cwd = s.resolveCwd({ workitem: wi, assignment: w, defaultCwd: '/x' });
+    s.prepareWorkspace({
+      workitem: wi,
+      assignment: w,
+      cwd,
+      events: [workerDone('as-ghost00x', 1)], // 幽灵轮：分支不存在
+    });
+    expect(fs.existsSync(path.join(cwd, 'README.md'))).toBe(true); // HEAD 检出
+    expect(fs.existsSync(path.join(cwd, 'round1.ts'))).toBe(false); // 无前轮改动
+  });
+
+  it('afterRun 兜底提交：worker 收尾时 worktree 脏 → 自动提交到分支（提交后 clean）', () => {
+    const s = strategy();
+    const wi = item();
+    const w = makeAssignment('as-commit01', 'wi-1', { role: 'worker', repo: repoPath });
+    const cwd = s.resolveCwd({ workitem: wi, assignment: w, defaultCwd: '/x' });
+    s.prepareWorkspace({ workitem: wi, assignment: w, cwd, events: [] });
+    // worker 做了活但没提交（真机 #5：CLI 默认不主动 commit）。
+    fs.writeFileSync(path.join(cwd, 'produced.ts'), 'export const y = 2;\n');
+    expect(git(cwd, ['status', '--porcelain']).trim().length).toBeGreaterThan(0);
+
+    s.afterRun?.({ report: 'r', workitem: wi, assignment: w, writeArtifact: () => {} });
+
+    expect(git(cwd, ['status', '--porcelain']).trim()).toBe(''); // 兜底提交后 clean
+    expect(git(cwd, ['log', '--oneline', '-1'])).toContain('兜底提交');
+    expect(git(cwd, ['show', '--stat', 'HEAD'])).toContain('produced.ts');
+  });
+
+  it('afterRun 兜底提交：worker 收尾时 worktree 已 clean → 不产生空提交', () => {
+    const s = strategy();
+    const wi = item();
+    const w = makeAssignment('as-clean002', 'wi-1', { role: 'worker', repo: repoPath });
+    const cwd = s.resolveCwd({ workitem: wi, assignment: w, defaultCwd: '/x' });
+    s.prepareWorkspace({ workitem: wi, assignment: w, cwd, events: [] });
+    const before = git(cwd, ['rev-list', '--count', 'HEAD']).trim();
+
+    s.afterRun?.({ report: 'r', workitem: wi, assignment: w, writeArtifact: () => {} });
+
+    expect(git(cwd, ['rev-list', '--count', 'HEAD']).trim()).toBe(before); // 无新提交
   });
 });
