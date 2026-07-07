@@ -278,13 +278,17 @@ async function runAgent(ctx: EffectContext, deps: AgentRunDeps): Promise<void> {
 
   // 4) Permission/options come from the strategy: probe → readonly; requirement worker →
   //    write + writableDirs=[worktree] (never full, R04.AC-6).
-  const options = strategy.runOptions({
+  const strategyOptions = strategy.runOptions({
     workitem,
     assignment,
     cwd,
     effectPayload: ctx.effect.payload,
     events: allEvents,
   });
+  // VERIFY V4（#2）：managed run 一律收窄 MCP——worktype runOptions 未显式指定 mcpServers 时兜底为 []（严格空），
+  // 防 worker/owner/probe 子进程继承用户全局 MCP（firecrawl/lark/n8n/mobile 全套：增噪 + 扩大攻击面 + 拖慢冷启）。
+  // 一处收口，防各 worktype 再漏。bridge 普通会话不经此 handler（保持 undefined = 继承，现状不变）。
+  const options = { ...strategyOptions, mcpServers: strategyOptions.mcpServers ?? [] };
 
   // 5) Abort bridge: container abort (stall / close) → SIGINT the runner.
   ctx.signal.addEventListener('abort', () => deps.pool.abort(task.id), { once: true });

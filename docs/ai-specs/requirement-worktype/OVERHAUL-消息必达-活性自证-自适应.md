@@ -675,6 +675,34 @@ if (retries === 0) return retryFailedRun(item, ev);               // 首败自�
 15. **立项勘探 手动 `/scout` + notFound**：立项群里发 `/scout <一个本地找不到的仓名>` → 回「🔍 收到，我去本地找找」→ 勘探 → `notFound` → 群里「没找到 xxx，请给绝对路径或 /scout 重试」。再验搜索根为空（不设 `INTAKE_SCOUT_ROOTS` 且登记表空）时 `/scout` 直接回「勘探不可用：没有可搜索的根目录」。
 16. **立项仓内收料 L2（可选）**：满配单，勘探确定仓后仓里有 PRD/README → `scout_result.materials` → PRD/验收/背景**空字段**被填入带「【AI 从 <path> 提取，立项卡上请确认】」标记的草稿；已有值的字段**不被覆盖**；群里「📎 顺路从仓里找到候选材料」。真机验证点：gate 必填语义不变（L2 只递草稿，人在立项完成时确认）。
 
+> **VERIFY 首轮真机 6 题修复复验（⑰~㉒，对应 `VERIFY-真机修复方案.md` V1~V4）：**
+
+⑰ **交付清单出真实 diffstat + 接手命令可执行（#5，V1）**：满配单走完，worker 不手动 commit → 收尾后交付清单
+`改动概览` 出真实 diffstat（不再「(无改动)」）；worktree 仍在时接手命令是「工作副本：cd <worktreePath>」+「主仓接手：
+git worktree remove <path> 后 switch」（直接在主仓 `git switch` 会 branch-already-checked-out 失败，故不给裸 switch）；
+worktree 被 GC 清后回落主仓 switch。真机验证点：兜底提交真落在分支上（`git log` 见「run 收尾兜底提交」）、GC 7 天后
+未提交产出不丢（删前兜底提交）。
+
+⑱ **二轮返工新 worktree 含首轮改动（R5，V1）**：诱导两轮返工（灯③打回或 run 失败重试）→ 第二轮 worker 开局的
+worktree **含第一轮已提交改动**（不再空 worktree 从 HEAD 新开）。真机验证点：无需再靠恰好存在的旧 codex 分支兜底；
+四条换轮路径（stall/gatekeeper rework/integration fix/retry）任取两条验证。
+
+⑲ **病历带意见点继续只起一个 worker 且 note 进 prompt（#3，V2）**：run_failed 病历卡填意见「重点改 X」点「已处理·
+继续」→ **恰一个 worker 重派**（不再同时冒出 owner steer 调查报告卡 = 双 run）→ 该 worker 的 prompt 含「定向施工指令：
+重点改 X」（note 透传）。真机验证点：灯③打回带意见同理只起一个 steer（redoPhase 的），不再双 steer 串行空烧。
+
+⑳ **灯③级联只出一张卡（#4，V2）**：worker done 触发 gatekeeper_passed→integration_check_passed→manifest_ready 级联 →
+灯③卡**只发一张**（不再三张相同卡 + 两张孤卡）。真机验证点：DB 里该 wait 的 card_msg_id 唯一、无孤卡。
+
+㉑ **拔网线 5 分钟流式卡出「⏳ 无新输出」标注、恢复或超时自动重试（#1，V3）**：worker 跑动中断网（或代理断流）→
+90s 后流式卡橙字「⏳ 已 N 分钟无新输出（最后活动 HH:mm:ss）——等待模型响应中，超时将自动重试」（不再静默定格误判
+卡死）→ 恢复则正常刷新覆盖；持续静默超 `AGENT_STREAM_IDLE_TIMEOUT_MS`（默认 300s）→ 子进程被 kill、run 以
+`stream idle timeout` 失败 → WS-8 首败自动重试（日志 retries=1）。真机验证点：卡片标注由真实最后事件时刻驱动、非假活心跳。
+
+㉒ **worker 子进程无用户 MCP（#2，V4）**：worker/owner/probe 任一 managed run 起跑 → 子进程**不再加载** firecrawl/lark/
+n8n/mobile 等用户全局 MCP（`ps`/进程树核对）；spawn 日志 `mcpMode=strict-empty`。真机验证点：bridge 普通会话仍继承
+用户 MCP（`mcpMode=inherit`，现状不变）——三分语义各行其道。
+
 每项通过与否记录在本文档落地记要中，未通过项按「真机暴露」惯例开修。
 
 ---

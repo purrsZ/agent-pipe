@@ -163,6 +163,40 @@ describe('agent-run handler (WI-2)', () => {
     expect(report?.content).toBe('REPORT BODY');
   });
 
+  it('VERIFY V4（#2）：managed run 兜底把 mcpServers 收窄为 []（worktype 未指定时）', async () => {
+    const { pool, sends } = fakePool(() => ({ fullText: 'r', sessionId: 's' }) as TurnResult);
+    const { store } = fakeStore();
+    const rec = makeCtx({});
+    // strategy 的 runOptions 不指定 mcpServers（默认 probe 只读档就是这样）。
+    const handler = createAgentRunHandler({ pool, kernelStore: store, defaultCwd: tmpDir });
+    await handler.run(rec.ctx);
+    // 收口到 [] = 严格空，子进程不继承用户全局 MCP（runner 据此写空 config + --strict-mcp-config）。
+    expect(sends[0]?.options?.mcpServers).toEqual([]);
+  });
+
+  it('VERIFY V4（#2）：worktype 显式指定 mcpServers → 原样透传，不被兜底覆盖', async () => {
+    const { pool, sends } = fakePool(() => ({ fullText: 'r', sessionId: 's' }) as TurnResult);
+    const { store } = fakeStore();
+    const rec = makeCtx({});
+    const handler = createAgentRunHandler({
+      pool,
+      kernelStore: store,
+      defaultCwd: tmpDir,
+      strategyFor: () => ({
+        composePrompt: () => 'p',
+        runOptions: () => ({
+          permission: { mode: 'readonly' },
+          mcpServers: [{ name: 'lark', command: 'lark-cli' }],
+        }),
+        resolveCwd: ({ defaultCwd }) => defaultCwd,
+        prepareWorkspace: () => {},
+        canResume: () => false,
+      }),
+    });
+    await handler.run(rec.ctx);
+    expect(sends[0]?.options?.mcpServers).toEqual([{ name: 'lark', command: 'lark-cli' }]);
+  });
+
   it('uses workitem.repos[0] as cwd when present', async () => {
     const repoDir = path.join(tmpDir, 'repo');
     const { pool } = fakePool(() => ({ fullText: 'r', sessionId: 's' }) as TurnResult);

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildClaudeArgs } from '../../src/agents/claude/runner.js';
+import { buildClaudeArgs, mcpModeOf, resolveMcpConfig } from '../../src/agents/claude/runner.js';
 
 describe('buildClaudeArgs (WI-A)', () => {
   it('matches the legacy arg vector byte-for-byte with no options (zero regression)', () => {
@@ -40,6 +40,41 @@ describe('buildClaudeArgs (WI-A)', () => {
     expect(buildClaudeArgs({ model: 'm', effort: 'high', sessionId: null })).not.toContain(
       '--mcp-config',
     );
+  });
+});
+
+// VERIFY V4（#2）：MCP 三分语义——undefined=继承（无 config/无 strict）；[]=严格空（写空 config + strict）；
+// 非空=严格指定集。此前 [] 与 undefined 同等对待 → managed worker 空数组也没收窄 → 继承用户全局 MCP。
+describe('resolveMcpConfig / mcpModeOf 三分语义 (VERIFY V4)', () => {
+  it('undefined → 继承：config=null（无 --mcp-config → 无 --strict-mcp-config）', () => {
+    expect(resolveMcpConfig(undefined)).toBeNull();
+    expect(mcpModeOf(undefined)).toBe('inherit');
+    // 无 config path → buildClaudeArgs 不带 strict 标志。
+    const args = buildClaudeArgs({ model: 'm', effort: 'high', sessionId: null });
+    expect(args).not.toContain('--strict-mcp-config');
+  });
+
+  it('显式 [] → 严格空：config={"mcpServers":{}}（有 config → 带 --strict-mcp-config）', () => {
+    expect(resolveMcpConfig([])).toEqual({ mcpServers: {} });
+    expect(mcpModeOf([])).toBe('strict-empty');
+    // 有 config path → buildClaudeArgs 带 strict 标志（子进程不继承任何用户 MCP）。
+    const args = buildClaudeArgs({
+      model: 'm',
+      effort: 'high',
+      sessionId: null,
+      mcpConfigPath: '/tmp/empty-mcp.json',
+    });
+    expect(args).toContain('--strict-mcp-config');
+  });
+
+  it('非空 → 严格指定集：config 含该 server（照旧）', () => {
+    const cfg = resolveMcpConfig([
+      { name: 'lark', command: 'lark-cli', args: ['serve'], env: { TOKEN: 'x' } },
+    ]);
+    expect(cfg).toEqual({
+      mcpServers: { lark: { command: 'lark-cli', args: ['serve'], env: { TOKEN: 'x' } } },
+    });
+    expect(mcpModeOf([{ name: 'lark', command: 'lark-cli' }])).toBe('strict-set');
   });
 });
 

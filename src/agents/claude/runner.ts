@@ -140,6 +140,27 @@ export class StreamIdleWatchdog {
   }
 }
 
+// VERIFY V4（#2）：MCP 三分语义的可测纯函数。undefined = 继承（不写 config → 无 --strict-mcp-config）；显式 [] =
+// 严格空（写 {"mcpServers":{}} → 带 --strict-mcp-config，不继承任何用户 MCP）；非空 = 严格指定集。
+export function resolveMcpConfig(
+  mcpServers: RunOptions['mcpServers'],
+): { mcpServers: Record<string, unknown> } | null {
+  if (mcpServers === undefined) return null;
+  const servers: Record<string, unknown> = {};
+  for (const s of mcpServers) {
+    servers[s.name] = { command: s.command, args: s.args ?? [], env: s.env ?? {} };
+  }
+  return { mcpServers: servers };
+}
+
+// 实际生效的 MCP 模式（日志/核对用）。
+export function mcpModeOf(
+  mcpServers: RunOptions['mcpServers'],
+): 'inherit' | 'strict-empty' | 'strict-set' {
+  if (mcpServers === undefined) return 'inherit';
+  return mcpServers.length === 0 ? 'strict-empty' : 'strict-set';
+}
+
 export function createClaudeFactory(cfg: ClaudeFactoryConfig): AgentFactory {
   return {
     kind: 'claude',
@@ -333,13 +354,12 @@ class ClaudeRunner implements Runner {
   }
 
   private writeMcpConfig(options?: RunOptions): string | null {
-    if (!options?.mcpServers?.length) return null;
-    const servers: Record<string, unknown> = {};
-    for (const s of options.mcpServers) {
-      servers[s.name] = { command: s.command, args: s.args ?? [], env: s.env ?? {} };
-    }
+    // VERIFY V4（#2）：三分语义（见 resolveMcpConfig）。此前 `!options?.mcpServers?.length` 把 [] 与 undefined 同等
+    // 对待 → managed run 空数组也没收窄 → worker 子进程继承 firecrawl/lark/n8n/mobile 全套（真机 #2）。
+    const config = resolveMcpConfig(options?.mcpServers);
+    if (config === null) return null;
     const file = path.join(os.tmpdir(), `agent-pipe-mcp-${this.taskId}-${this.mcpSeq++}.json`);
-    fs.writeFileSync(file, JSON.stringify({ mcpServers: servers }));
+    fs.writeFileSync(file, JSON.stringify(config));
     return file;
   }
 
@@ -402,6 +422,9 @@ class ClaudeRunner implements Runner {
 
     // Observability (WI-B 顺带): surface the injected MCP servers + permission profile
     // server-side, so per-run injection is visible in logs, not only the agent's output.
+    // VERIFY V4（#2）：日志保留实际生效的 MCP 模式（strict-empty/inherit/strict-set），便于真机核对子进程是否
+    // 真收窄了用户 MCP（下次拔网线/看进程即可对账）。
+    const mcpMode = mcpModeOf(options?.mcpServers);
     this.deps.logger.info(
       {
         taskId: this.taskId,
@@ -409,6 +432,7 @@ class ClaudeRunner implements Runner {
         hasResume: !!this.sessionId,
         model,
         mcpServers: (options?.mcpServers ?? []).map((s) => s.name),
+        mcpMode,
         permission: mode,
         writableDirs: mode === 'write' ? (options?.writableDirs ?? []) : undefined,
       },
