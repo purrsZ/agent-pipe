@@ -124,3 +124,50 @@ describe('StreamingCard throttle', () => {
     await card.stop();
   });
 });
+
+// VERIFY V3（#1）：流长时间无「真实事件」（onText/onToolUse）→ 卡片如实标注「已 N 分钟无新输出…超时将自动
+// 重试」，让用户分清「还在跑 / 流断了」，不再对着定格卡误判卡死。stale 由真实最后事件时刻驱动（非心跳）。
+describe('StreamingCard 停更标注（VERIFY V3 #1）', () => {
+  const lastCard = (calls: object[]): string => previewOf(calls[calls.length - 1]!);
+
+  it('90s 内有输出 → 不标注；连续静默越过 90s → 出「无新输出」如实标注', async () => {
+    const { sender, calls } = makeSender();
+    const card = new StreamingCard(sender, 'om_1', 'task', 'claude');
+    card.onText('跑长任务中');
+    await vi.advanceTimersByTimeAsync(0); // leading flush
+    // 60s 静默：还没到 90s 阈值 → 不该有停更标注（心跳仍在刷 elapsed）。
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(lastCard(calls)).not.toContain('无新输出');
+    // 再 40s（累计 100s）→ 越过 90s → 出停更标注（含「超时将自动重试」，不假装处理中）。
+    await vi.advanceTimersByTimeAsync(40_000);
+    expect(lastCard(calls)).toContain('无新输出');
+    expect(lastCard(calls)).toContain('超时将自动重试');
+    await card.stop();
+  });
+
+  it('恢复事件到来 → 真实事件驱动清掉停更标注（下一帧不再带 stale 文案）', async () => {
+    const { sender, calls } = makeSender();
+    const card = new StreamingCard(sender, 'om_1', 'task', 'claude');
+    card.onText('起步');
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(100_000); // 进入 stale
+    expect(lastCard(calls)).toContain('无新输出');
+    // 模型又开始产出 → 真实事件 → lastEventAt 更新 + 清 stale。
+    card.onText('恢复输出了');
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+    expect(lastCard(calls)).not.toContain('无新输出'); // 停更标注被覆盖
+    expect(lastCard(calls)).toContain('恢复输出了');
+    await card.stop();
+  });
+
+  it('时钟心跳本身不算「真实事件」→ 不会自我复位 stale（不做假活心跳）', async () => {
+    const { sender, calls } = makeSender();
+    const card = new StreamingCard(sender, 'om_1', 'task', 'claude');
+    card.onText('起步');
+    await vi.advanceTimersByTimeAsync(0);
+    // 纯靠心跳走 200s（无任何 onText/onToolUse）→ 必须一直是 stale（心跳刷 elapsed 但不清 stale）。
+    await vi.advanceTimersByTimeAsync(200_000);
+    expect(lastCard(calls)).toContain('无新输出');
+    await card.stop();
+  });
+});

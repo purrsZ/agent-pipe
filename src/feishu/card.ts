@@ -290,6 +290,9 @@ export function buildStreamingCard(
     toolCount: number;
     currentTool: string | null;
     text: string;
+    // VERIFY V3（#1）：流长时间无新输出时的如实标注（「已 N 分钟无新输出…等待模型响应中，超时将自动重试」）。
+    // 由真实事件时刻驱动（StreamingCard），绝不假装「处理中」；恢复事件到来即清空。
+    staleNote?: string;
   },
 ): object {
   const who = agentKind === 'codex' ? 'Codex' : 'Claude';
@@ -297,6 +300,13 @@ export function buildStreamingCard(
   const elements: object[] = [
     { tag: 'markdown', content: `<font color="grey">${activity}</font>` },
   ];
+  // 停更标注紧跟活动行、橙字醒目：让用户一眼分清「还在跑 / 流断了」，不再对着定格的卡误判卡死。
+  if (s.staleNote?.trim()) {
+    elements.push({
+      tag: 'markdown',
+      content: `<font color="orange">${s.staleNote.trim()}</font>`,
+    });
+  }
 
   const preview = (s.text ?? '').trim();
   if (preview) {

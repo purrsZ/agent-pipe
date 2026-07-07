@@ -84,6 +84,62 @@ export function buildClaudeArgs(p: {
   return args;
 }
 
+// VERIFY V3（#1 流空闲超时）：真机暴露——worker 卡在等模型 API 的流式 SSE 响应（连接 ESTABLISHED 但流中途
+// 不再来数据），runner 只有 ready 30s 超时、对「跑动中的流」无空闲超时 → 没有新 stream 事件 → 卡片时间与内容
+// 双双定格、用户误判卡死。这里加**流空闲超时**：每收一条 stream 事件 kick 一次，连续 timeoutMs 无任何事件 →
+// onTimeout（runner 里 kill 子进程 + run 以 error 失败 → managed 路径 WS-8 首败自动重试）。0 = 禁用。
+// 吸取 ai-sentinel「假活心跳」教训：这是**真实事件驱动**的 watchdog，绝不做独立于真实进度的心跳。
+const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 300_000;
+
+// 空闲阈值：env AGENT_STREAM_IDLE_TIMEOUT_MS（0=禁用；负/坏值回落默认）。长工具（跑测试/装依赖）期间 CLI
+// 事件间隙可达分钟级——300s 起步，勿激进。
+export function streamIdleTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.AGENT_STREAM_IDLE_TIMEOUT_MS;
+  if (raw === undefined) return DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+}
+
+function hhmmss(ts: number): string {
+  const d = new Date(ts);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+// 超时错误串。**绝不含** 'write-guard fail-closed'（否则 onRunFailed 会当安全护栏失效弹病历而非 WS-8 重试）。
+export function streamIdleTimeoutError(timeoutMs: number, lastActivityMs: number): string {
+  return `stream idle timeout (${Math.round(timeoutMs / 1000)}s, 最后事件 ${hhmmss(lastActivityMs)})`;
+}
+
+// 流空闲看门狗：kick() 在收到 stream 事件时重置计时；连续 timeoutMs 无 kick → onTimeout()。timeoutMs<=0 禁用。
+// 抽成可测小件（假时钟直测），runner 只负责在流事件/turn 起点 kick、在 done/close/error/dispose/abort stop。
+export class StreamIdleWatchdog {
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  constructor(
+    private readonly timeoutMs: number,
+    private readonly onTimeout: () => void,
+  ) {}
+  // 收到活动 → 重置计时（禁用则不装表）。
+  kick(): void {
+    if (this.timeoutMs <= 0) return;
+    this.stop();
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      this.onTimeout();
+    }, this.timeoutMs);
+    this.timer.unref?.();
+  }
+  stop(): void {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+  }
+  get active(): boolean {
+    return this.timer !== null;
+  }
+}
+
 export function createClaudeFactory(cfg: ClaudeFactoryConfig): AgentFactory {
   return {
     kind: 'claude',
@@ -129,6 +185,11 @@ class ClaudeRunner implements Runner {
   // script). Same lifecycle as mcpConfigPath — cleaned on dispose AND proc close/error.
   private guardPaths: { settings: string; script: string } | null = null;
   private guardSeq = 0;
+  // VERIFY V3（#1）：流空闲看门狗——每条 stream 事件 kick，连续静默超阈值 → onStreamIdle（kill + 失败）。
+  private readonly idleTimeoutMs = streamIdleTimeoutMs();
+  private readonly idleWatchdog = new StreamIdleWatchdog(this.idleTimeoutMs, () =>
+    this.onStreamIdle(),
+  );
 
   constructor(
     private task: Task,
@@ -211,19 +272,46 @@ class ClaudeRunner implements Runner {
         this.state = 'idle';
         this.inflight = null;
         reject(new Error('claude process stdin unavailable'));
+      } else {
+        // VERIFY V3（#1）：turn 起点起表——即便子进程从此一条输出都不来（首事件前就卡死），也会在阈值后超时。
+        this.idleWatchdog.kick();
       }
     });
   }
 
   abort(): boolean {
     if (!this.proc || this.proc.killed || !this.proc.pid) return false;
+    this.idleWatchdog.stop(); // VERIFY V3（#1）：主动中断 → 撤空闲计时（由 close 收尾）
     this.deps.logger.info({ taskId: this.taskId }, 'sending SIGINT to claude');
     this.proc.kill('SIGINT');
     return true;
   }
 
+  // VERIFY V3（#1）：流空闲超时——连续 idleTimeoutMs 无任何 stream 事件（子进程卡在读死流 SSE）→ 强杀子进程 +
+  // 让本轮 run 以 error 失败。error 串**不含** 'write-guard fail-closed' → managed 路径 WS-8 首败自动重试（瞬时
+  // 流断自愈）；bridge 会话同样适用（同一失败模式，caller 收到 reject）。close 处理器随后清理临时文件 + 复位。
+  private onStreamIdle(): void {
+    this.idleWatchdog.stop();
+    const inflight = this.inflight;
+    if (!inflight) return; // 无在途 turn → 忽略（防御，正常路径 done/close 已 stop）
+    this.inflight = null; // 抢在 close 处理器之前，让它跳过默认的 'claude exited' 拒绝
+    this.deps.logger.warn(
+      { taskId: this.taskId, idleTimeoutMs: this.idleTimeoutMs, lastActivity: this._lastActivity },
+      'stream idle timeout — killing wedged claude',
+    );
+    if (this.proc && !this.proc.killed) {
+      try {
+        this.proc.kill('SIGKILL'); // 卡死进程不响应温和信号 → 强杀确保它死
+      } catch {
+        /* ignore */
+      }
+    }
+    inflight.reject(new Error(streamIdleTimeoutError(this.idleTimeoutMs, this._lastActivity)));
+  }
+
   dispose(): void {
     this.disposed = true;
+    this.idleWatchdog.stop(); // VERIFY V3（#1）：runner 弃用 → 撤空闲计时
     // Reject any in-flight turn so the caller's promise resolves instead of leaking.
     // All current callers (/clear, /model, /agent, evictLRU, killAll) check isBusy()
     // first so this should only fire in defensive paths or future-added flows.
@@ -352,6 +440,9 @@ class ClaudeRunner implements Runner {
     const rl = readline.createInterface({ input: proc.stdout! });
     rl.on('line', (line) => {
       this._lastActivity = Date.now();
+      // VERIFY V3（#1）：真实 stream 事件驱动重置空闲计时（仅在有在途 turn 时，避免 turn 结束后再起表）。绝不
+      // 做独立于真实进度的心跳（ai-sentinel「假活」教训）。
+      if (this.inflight) this.idleWatchdog.kick();
       // WI-9: liveness tick on EVERY stdout line (before parsing) — a thinking/long turn that
       // streams no assistant text still signals "alive". A consumer bridges this to its own
       // liveness heartbeat so a silence judgement can mean "stdout fully silent", not "no
@@ -367,6 +458,7 @@ class ClaudeRunner implements Runner {
     });
 
     proc.on('close', (code) => {
+      this.idleWatchdog.stop(); // VERIFY V3（#1）：进程终结 → 撤空闲计时
       this.deps.logger.warn(
         { taskId: this.taskId, code, stderr: this.stderrBuf.slice(-500) },
         'claude exited',
@@ -389,6 +481,7 @@ class ClaudeRunner implements Runner {
     });
 
     proc.on('error', (err) => {
+      this.idleWatchdog.stop(); // VERIFY V3（#1）：spawn 出错 → 撤空闲计时
       this.deps.logger.error({ err, taskId: this.taskId }, 'claude spawn error');
       this.cleanupMcpConfig();
       this.cleanupGuard();
@@ -452,6 +545,7 @@ class ClaudeRunner implements Runner {
         break;
       case 'done': {
         if (!inflight) return;
+        this.idleWatchdog.stop(); // VERIFY V3（#1）：turn 收尾 → 撤空闲计时
         const latest = this.parser.latestUsage;
         const result: TurnResult = {
           fullText: this.parser.fullText,

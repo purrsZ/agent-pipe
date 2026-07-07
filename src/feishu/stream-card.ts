@@ -8,6 +8,23 @@ const MIN_INTERVAL_MS = 900;
 // elapsed 也持续走表。5s 一拍 = 每任务每分钟最多 12 次 PATCH，远低于飞书限频。
 const CLOCK_TICK_MS = 5_000;
 
+// VERIFY V3（#1）：流长时间无「真实事件」（onText/onToolUse）→ 卡上如实标注「已 N 分钟无新输出…超时将自动
+// 重试」，让用户分清「还在跑 / 流断了」，不再对着定格的卡误判卡死。stale 判定必须由**真实最后事件时刻**驱动，
+// 绝不做独立于真实进度的心跳（ai-sentinel「假活」教训）。阈值要大于长工具的静默窗口（跑测试/装依赖分钟级）。
+const STALE_AFTER_MS = 90_000; // 超过 90s 无新输出 → 进入 stale 标注
+const STALE_REPATCH_MS = 300_000; // 同一 stale 期至多每 5 分钟刷一次（防飞书 API 刷屏）
+
+function hhmmss(ts: number): string {
+  const d = new Date(ts);
+  const p = (n: number): string => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
+function renderStaleNote(silentMs: number, lastEventAt: number): string {
+  const mins = Math.max(1, Math.round(silentMs / 60_000));
+  return `⏳ 已 ${mins} 分钟无新输出（最后活动 ${hhmmss(lastEventAt)}）——等待模型响应中，超时将自动重试`;
+}
+
 /**
  * Throttled in-progress card updater. Runners fire onToolUse / onText many times a
  * second; this collapses them into at most one `updateCard` per MIN_INTERVAL_MS.
@@ -33,6 +50,11 @@ export class StreamingCard {
   private trailing: ReturnType<typeof setTimeout> | null = null;
   private stopped = false;
   private readonly ticker: ReturnType<typeof setInterval>;
+  // VERIFY V3（#1）：真实最后事件时刻（onText/onToolUse 驱动，**不**含时钟心跳）+ 当前 stale 标注 + 上次标注
+  // 时刻（5 分钟刷屏节流）。
+  private lastEventAt = Date.now();
+  private staleNote: string | null = null;
+  private staleNotedAt = 0;
 
   constructor(
     private sender: Pick<Sender, 'updateCard'>,
@@ -40,18 +62,41 @@ export class StreamingCard {
     private taskName: string,
     private agentKind: string,
   ) {
-    this.ticker = setInterval(() => this.schedule(), CLOCK_TICK_MS);
+    // 时钟心跳兼任 stale 巡检：每拍先按真实事件时刻判 stale，再走原有 elapsed 刷新（组件生命周期内，stop 清理）。
+    this.ticker = setInterval(() => this.tick(), CLOCK_TICK_MS);
     this.ticker.unref?.();
   }
 
   onToolUse(name: string): void {
     this.toolCount++;
     this.currentTool = name;
+    this.markEvent();
     this.schedule();
   }
 
   onText(fullText: string): void {
     this.text = fullText;
+    this.markEvent();
+    this.schedule();
+  }
+
+  // 真实事件到来：记时刻并清 stale 标注（恢复）——下一帧 flush 渲染不带 stale 文案，覆盖掉停更提示。
+  private markEvent(): void {
+    this.lastEventAt = Date.now();
+    if (this.staleNote) {
+      this.staleNote = null;
+      this.staleNotedAt = 0;
+    }
+  }
+
+  // 时钟心跳每拍：先按真实最后事件时刻判 stale（超阈值且距上次标注过了刷屏间隔 → 更新 stale 文案），再刷新。
+  private tick(): void {
+    if (this.stopped) return;
+    const silent = Date.now() - this.lastEventAt;
+    if (silent >= STALE_AFTER_MS && Date.now() - this.staleNotedAt >= STALE_REPATCH_MS) {
+      this.staleNote = renderStaleNote(silent, this.lastEventAt);
+      this.staleNotedAt = Date.now();
+    }
     this.schedule();
   }
 
@@ -102,6 +147,7 @@ export class StreamingCard {
         toolCount: this.toolCount,
         currentTool: this.currentTool,
         text: this.text,
+        staleNote: this.staleNote ?? undefined,
       });
       const sig = JSON.stringify(card);
       if (sig === this.lastSig) return;
