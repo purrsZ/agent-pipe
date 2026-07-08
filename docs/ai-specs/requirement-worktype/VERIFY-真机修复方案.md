@@ -246,3 +246,35 @@ VERIFY 范畴**，作者可自行 reorder / squash / `git reset --soft` 还原�
   worktype 显式指定则原样透传。
 - 非显然点：`runOptionsFingerprint` 把 undefined 与 [] 都归空（不区分继承/严格空），但 managed run 恒传 []、bridge
   恒 undefined，同一 runner 不混用 → 池的进程重建判据无碍，未改 fingerprint。
+
+---
+
+## 🔍 独立复核记录（2026-07-07，V1~V4 + e3cf0f2 checkpoint 全部核验通过）
+
+三路并行核验 + 全量 934/105 独立复跑确认。V1 深查（血统续接对旧分支被签出场景、崩溃轮不入血统的取舍）
+全过；V2 深查（灯③打回恰一 steer、silent 无误伤既有六类注入点、followups 不过滤 silent 保消息必达）全过；
+V3 深查（kill+reject 接线无测试评估为低风险，防御完备）；V4 深查（fingerprint 不改的自述成立）。
+**e3cf0f2 定性**：非在途半截，是完整的 DELEGATE 对抗审查修复批（10 条，含两条严重：委托自动关单埋未决
+wait / 人打回被翻案），独立复核 10/10 通过、红线辩护成立、与 VERIFY 四刀无冲突。
+
+### 复核新发现待办（下轮顺手修，均不阻塞）
+
+1. 【中】**intake-extract 影子 run 未被 V4 收口**（src/index.ts pool.send 直调，不经 run-handler 兜底）→
+   仍继承全套用户 MCP。方案盲点非执行偏差。补修时注意：fingerprint 对 []/undefined 同折叠，同 taskId
+   复用旧进程会绕过收窄，需一并评估。
+2. 【低】**V1 GC 边界回归**：worktree-gc 把「worktreeIsDirty 本身抛错（非 git 叶子/主仓被删/.git 损坏）」
+   与「兜底提交失败」混在同一 catch → 这类目录永久保留且每日 GC 永远在同处失败。应把「无可抢救分支」
+   分流回原 purgeDir 降级路径。
+3. 【低】**DELEGATE 二次放权冷静期缝隙**：watchdog 节流条目（delegationNotified）不随授权换代失效，
+   同一 wait 上撤销后重新 /delegate，下一窗口边界即自动过。修法：节流值携带 grant 标识，换代视为无条目。
+4. 【低】stale 标注与卡 header/meta 的「处理中…」同屏矛盾（文案观察项）。
+5. 【极低·记录】onStreamIdle 后 state 短暂滞留 busy（不可达窗口）；humanDeclinedSince 倒序早停依赖
+   createdAt 不回拨；deliverGateNote checked:false 分支仍 ✅（当前不可达）；manifest 的 worktree remove
+   未提示 dirty 时需 --force（保护性失败）；api.ts silent 注释带业务词（该层无守卫约束，供定夺）。
+
+### 建议（未执行）：e3cf0f2 改写提交信息
+
+该 commit 实为完整审查修复批，"chore: 在途 checkpoint" 的信息严重降格了它（考古时会误判）。分支未 push，
+可安全改史：`git rebase -i a07bda6` 将 e3cf0f2 reword 为
+`fix(delegation): 委托对抗审查 10 条修复——在场信号深检查/guard 单一来源/冷静期锚 (DELEGATE 复审)`。
+不改也不影响功能，纯历史可读性。
