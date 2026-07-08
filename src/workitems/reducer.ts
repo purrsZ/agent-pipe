@@ -133,7 +133,8 @@ export class ReducerRuntime {
           payload,
           createdAt: now,
         };
-        this.applyTransitionWrites(item, seq, type.onEvent(item, event));
+        // bootstrap（create-time）没有 postCommit 通道：新单不可能有在途 effect，终态 abort 列表恒空。
+        this.applyTransitionWrites(item, seq, type.onEvent(item, event), []);
         recomputeRollup(this.deps.store, item.id, now);
         return { created: true, item: this.deps.store.getWorkItem(item.id) ?? item };
       });
@@ -149,7 +150,13 @@ export class ReducerRuntime {
   private applyEvent(workitemId: string, pending: PendingEvent): void {
     const item = this.deps.store.getWorkItem(workitemId);
     if (!item) {
-      throw new Error(`WorkItem not found: ${workitemId}`);
+      // 单可能已被删除（/cancel 即删）：自然完赛的 run 收尾、催办 timer 等迟到事件落在已删单上只
+      // warn 不抛——抛会打穿 enqueue 的任意调用方（桥路由 / effects 收尾 / watchdog tick）。
+      this.deps.logger?.warn?.(
+        { workitemId, kind: pending.kind },
+        'event dropped: workitem missing',
+      );
+      return;
     }
     const type = this.deps.registry.get(item.type);
     if (!type) {
@@ -227,7 +234,7 @@ export class ReducerRuntime {
         this.containerTransition(event, now, postCommit),
         type.onEvent(item, this.enrichEventForType(item, event)),
       );
-      this.applyTransitionWrites(item, seq, transition);
+      this.applyTransitionWrites(item, seq, transition, postCommit);
       if (isRunConclusion(pending.kind) && item.wakePending) {
         this.releaseWakePending(item, seq, now);
       }
@@ -263,7 +270,12 @@ export class ReducerRuntime {
     );
   }
 
-  private applyTransitionWrites(item: WorkItem, seq: number, transition: Transition): void {
+  private applyTransitionWrites(
+    item: WorkItem,
+    seq: number,
+    transition: Transition,
+    postCommit: PostCommitAction[],
+  ): void {
     const now = this.deps.clock.now();
     if (transition.phase) {
       const from = this.deps.store.getWorkItem(item.id)?.phase ?? item.phase;
@@ -287,7 +299,7 @@ export class ReducerRuntime {
       // watchdog never sees a terminal item with an unresolved wait or running
       // assignment (v4 #3: otherwise it re-enqueues timer_fired/agent_stalled every
       // tick and the reducer's terminal short-circuit only appends audit forever).
-      this.finalizeTerminalState(item, now);
+      this.finalizeTerminalState(item, now, postCommit);
       // A terminal transition is mutually exclusive with new work: a done/failed
       // item must never spawn dispatch/waits/effects — that would resurrect a zombie
       // run (drainOne/recovery would pick it up) and feed the watchdog's terminal
@@ -349,7 +361,7 @@ export class ReducerRuntime {
     }
   }
 
-  private finalizeTerminalState(item: WorkItem, now: number): void {
+  private finalizeTerminalState(item: WorkItem, now: number, postCommit: PostCommitAction[]): void {
     let cleaned = 0;
     for (const wait of this.deps.store.listOpenWaits(item.id)) {
       this.deps.store.updateWait(wait.id, {
@@ -364,6 +376,16 @@ export class ReducerRuntime {
         this.deps.store.updateAssignment(assignment.id, { status: 'superseded', endedAt: now });
         cleaned += 1;
       }
+    }
+    // 终态击杀在途 effect（真机：/cancel 后 worker/owner 流式卡还滚了 2 分钟——旧行为只把派工标
+    // superseded，不碰 effect 与子进程）。状态必须就地在本 tx 翻 aborted：走 effect_aborted 事件不通
+    // ——终态短路只留审计不应用状态翻转，这正是取消后 effect 卡死 running 的根因。postCommit 的
+    // abort_effect 只为触发 signal（run-handler SIGINT 子进程 + 流式卡就地收「中断」）；effects.abort
+    // 见状态已 aborted 会先 signal 再早退、不补发事件，恰好幂等。
+    for (const effect of this.deps.store.listInflightEffects(item.id)) {
+      this.deps.store.setEffectStatus(effect.id, 'aborted');
+      postCommit.push({ kind: 'abort_effect', effectId: effect.id, reason: 'workitem_terminal' });
+      cleaned += 1;
     }
     // WS-1.4：清空 parked（防终态后被补派复活成僵尸 run）。
     for (const row of this.deps.store.listParked(item.id)) {

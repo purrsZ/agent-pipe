@@ -87,6 +87,12 @@ export function registerRequirement(registry: { register(type: WorkType): void }
   registry.register(requirementWorkType);
 }
 
+// /cancel 即删（2026-07-08 用户拍板）的 purge 判定：解释 status 属于 worktype 层——index.ts 只接线
+// （架构守卫 tests/workitems/index-wiring 禁止桥层直接比较 workitem 的 status/phase）。
+export function shouldPurgeCancelledUnit(item: { type: string; status: string }): boolean {
+  return item.type === 'requirement' && item.status === 'cancelled';
+}
+
 export function requirementTransition(item: WorkItem, ev: WorkItemEvent): Transition {
   switch (ev.kind) {
     case 'workitem_created':

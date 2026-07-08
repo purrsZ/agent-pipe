@@ -432,6 +432,21 @@ export class WorkitemsStore {
         PRAGMA user_version = 6;
       `);
     }
+    if (version < 7) {
+      // /cancel 即删（2026-07-08）：deleteWorkItem 的级联要过 no_delete 触发器。换成守卫版——父单
+      // 还在 → 照旧 RAISE（事件流对外仍 append-only）；父单已删（SQLite 级联先删父行再删子行，已实证）
+      // → 放行。DROP + 重建幂等（user_version 守卫只跑一次）。
+      this.db.exec(`
+        DROP TRIGGER IF EXISTS workitem_events_no_delete;
+        CREATE TRIGGER workitem_events_no_delete
+        BEFORE DELETE ON workitem_events
+        WHEN EXISTS (SELECT 1 FROM workitems WHERE id = OLD.workitem_id)
+        BEGIN
+          SELECT RAISE(ABORT, 'workitem_events are append-only');
+        END;
+        PRAGMA user_version = 7;
+      `);
+    }
   }
 
   insertWorkItem(row: WorkItem): void {
@@ -491,6 +506,13 @@ export class WorkitemsStore {
       )
       .all(...TERMINAL_STATUSES)
       .map((row) => toWorkItem(row as DbWorkItem));
+  }
+
+  // /cancel 即删（2026-07-08 用户拍板）：整单从库里抹掉——全部子表（events/effects/waits/assignments/
+  // parked/delegations）建表即带 ON DELETE CASCADE（constructor 已 pragma foreign_keys=ON），一条 DELETE
+  // 连根清。调用方负责先完成对外收尾（击杀在途 run / 刷卡片 / 释放话题认领），删除必须是最后一步。
+  deleteWorkItem(id: string): boolean {
+    return this.db.prepare('DELETE FROM workitems WHERE id = ?').run(id).changes > 0;
   }
 
   updateWorkItem(id: string, patch: Partial<WorkItem>): void {
