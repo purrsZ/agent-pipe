@@ -71,7 +71,10 @@ export interface RepoRegistryRow {
   path: string;
   name: string;
   last_used_at: number;
-  source: string; // 'unit' | 'scout' | 'backfill'
+  source: string; // 'unit' | 'scout' | 'backfill' | 'task' | 'manual' | 'scan'
+  // 用户起的短名（小写唯一，NULL=未起名）。只由 setRepoAlias/clearRepoAlias 写——自动登记
+  // （upsertRepoRegistry）永不触碰此列，人起的名不会被 backfill/scout 刷掉。
+  alias: string | null;
 }
 
 export class Store {
@@ -153,12 +156,14 @@ export class Store {
         path         TEXT PRIMARY KEY,
         name         TEXT NOT NULL,
         last_used_at INTEGER NOT NULL,
-        source       TEXT NOT NULL
+        source       TEXT NOT NULL,
+        alias        TEXT
       );
       CREATE INDEX IF NOT EXISTS idx_repo_registry_name ON repo_registry(name);
     `);
     this.migrateTasksLegacy();
     this.migrateThreadClaimsLegacy();
+    this.migrateRepoRegistryLegacy();
     this.db.prepare("DELETE FROM state WHERE key = 'current_task_id'").run();
   }
 
@@ -208,6 +213,22 @@ export class Store {
     if (!names.has('chat_type')) {
       this.db.exec(`ALTER TABLE thread_claims ADD COLUMN chat_type TEXT`);
     }
+  }
+
+  // 别名列：新库随 CREATE TABLE 建，旧库守卫式 ADD COLUMN 回填 NULL（先例 anchor_msg_id）。唯一
+  // 部分索引必须等列就位后建，故放这里而非 migrate() 的主 exec（旧库跑主 exec 时还没有 alias 列）。
+  private migrateRepoRegistryLegacy(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(repo_registry)`).all() as Array<{
+      name: string;
+    }>;
+    const names = new Set(cols.map((c) => c.name));
+    if (!names.has('alias')) {
+      this.db.exec(`ALTER TABLE repo_registry ADD COLUMN alias TEXT`);
+    }
+    this.db.exec(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_repo_registry_alias
+         ON repo_registry(alias) WHERE alias IS NOT NULL`,
+    );
   }
 
   isAllowed(openId: string): boolean {
@@ -381,14 +402,64 @@ export class Store {
   }
 
   // INTAKE L0：按仓名线索小写包含匹配（返回全部命中——歧义交上层裁量/问人）。空线索 → 空数组。
+  // 别名参与包含匹配（与 name 同权），精确别名寻址走 getRepoByAlias。
   matchRepoRegistry(hint: string): RepoRegistryRow[] {
     const needle = hint.trim().toLowerCase();
     if (needle.length === 0) return [];
+    const like = escapeLike(needle);
     return this.db
       .prepare(
-        "SELECT * FROM repo_registry WHERE name LIKE '%' || ? || '%' ESCAPE '\\' ORDER BY last_used_at DESC",
+        `SELECT * FROM repo_registry
+          WHERE name LIKE '%' || ? || '%' ESCAPE '\\'
+             OR alias LIKE '%' || ? || '%' ESCAPE '\\'
+          ORDER BY last_used_at DESC`,
       )
-      .all(escapeLike(needle)) as RepoRegistryRow[];
+      .all(like, like) as RepoRegistryRow[];
+  }
+
+  // 别名三件套：只有这两个写口会碰 alias 列（与 upsertRepoRegistry 的自动登记语义相互隔离）。
+  // setRepoAlias：行不存在则顺手登记（source='manual'，name=basename 小写化）；已存在只写
+  // alias + last_used_at，不碰 name/source。别名撞已有别名由唯一部分索引兜底抛错——命令层先查
+  // getRepoByAlias 给友好提示，这里不吞。
+  setRepoAlias(repoPath: string, alias: string, now: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO repo_registry (path, name, last_used_at, source, alias)
+         VALUES (?, ?, ?, 'manual', ?)
+         ON CONFLICT(path) DO UPDATE SET
+           alias = excluded.alias,
+           last_used_at = excluded.last_used_at`,
+      )
+      .run(repoPath, path.basename(repoPath).toLowerCase(), now, alias.toLowerCase());
+  }
+
+  clearRepoAlias(alias: string): boolean {
+    return (
+      this.db
+        .prepare('UPDATE repo_registry SET alias = NULL WHERE alias = ?')
+        .run(alias.toLowerCase()).changes > 0
+    );
+  }
+
+  getRepoByAlias(alias: string): RepoRegistryRow | undefined {
+    return this.db
+      .prepare('SELECT * FROM repo_registry WHERE alias = ?')
+      .get(alias.toLowerCase()) as RepoRegistryRow | undefined;
+  }
+
+  getRepoByPath(repoPath: string): RepoRegistryRow | undefined {
+    return this.db.prepare('SELECT * FROM repo_registry WHERE path = ?').get(repoPath) as
+      | RepoRegistryRow
+      | undefined;
+  }
+
+  // 使用触碰：只刷新 last_used_at（不碰 name/source/alias——区别于 upsertRepoRegistry 的整行刷新）。
+  // 返回 false = 该 path 未登记（调用方裁量是否补登记）。
+  touchRepoRegistry(repoPath: string, now: number): boolean {
+    return (
+      this.db.prepare('UPDATE repo_registry SET last_used_at = ? WHERE path = ?').run(now, repoPath)
+        .changes > 0
+    );
   }
 
   releaseThreadClaim(rootId: string): void {

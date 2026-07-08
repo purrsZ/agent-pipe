@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { Store, AgentKind } from '../store.js';
@@ -6,14 +7,20 @@ import type { Config } from '../config.js';
 import type { Logger } from '../logger.js';
 import type { IncomingMessage } from '../feishu/types.js';
 import type { AgentPool } from '../agents/pool.js';
-import { buildTaskRootCard } from '../feishu/card.js';
+import { buildTaskRootCard, shortenHome } from '../feishu/card.js';
 import { isImagePath } from '../feishu/sender.js';
 
 const SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,40}$/;
+// 别名放开点号（pos2.0 这类版本味短名）。首字符仍限字母数字——删除哨兵 '-' 与路径样式（/ ~ .）
+// 永远不可能是合法别名，简写糖的分词不会歧义。
+const ALIAS_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,40}$/;
 
 const HELP_TEXT = [
   '命令:',
-  '  /new <name> [--agent claude|codex] [--cwd <path>] [--model <m>]  新建任务（自动切为当前任务）',
+  '  /new <name> [仓库] [--agent claude|codex] [--cwd <path>] [--model <m>]  新建任务（自动切为当前任务）',
+  '      仓库 = 别名 / 仓名线索 / 路径，见 /repo；不给则开 sandbox 空目录',
+  '  /repo                                     已登记仓库列表（[别名] 可直接用于 /new）',
+  '  /repo <别名> <线索|路径>                   给仓库起别名（可加点号）；/repo <别名> - 删除',
   '  /list                                     任务列表（★ 标出本会话当前）',
   '  /use <name>                               切换本会话当前任务',
   '  /use                                      查看本会话当前任务',
@@ -81,6 +88,9 @@ export class CommandHandler {
       switch (cmd) {
         case '/new':
           await this.handleNew(msg, rest);
+          return;
+        case '/repo':
+          await this.handleRepo(msg, rest);
           return;
         case '/list':
           await this.handleList(msg);
@@ -172,7 +182,7 @@ export class CommandHandler {
     if (!name) {
       await this.sender.reply(
         msg.messageId,
-        '用法: /new <name> [--agent claude|codex] [--cwd <path>] [--model <m>]',
+        '用法: /new <name> [仓库] [--agent claude|codex] [--cwd <path>] [--model <m>]\n仓库 = 别名 / 仓名线索 / 路径（见 /repo）；不给则开 sandbox。',
       );
       return;
     }
@@ -198,17 +208,33 @@ export class CommandHandler {
     let mode: 'project' | 'sandbox' = 'sandbox';
     let cwd = path.join(this.config.sessionsDir, name);
 
+    // 仓库寻址二选一：第二位置参数（别名/线索/路径，手机友好）或 --cwd（老逃生门）。都给拒收，
+    // 避免静默采信其一。
+    const repoHint = positional[1];
     const rawCwd = flags.cwd;
-    if (rawCwd) {
-      const resolved = this.resolveCwd(rawCwd);
+    if (repoHint && rawCwd) {
+      await this.sender.reply(msg.messageId, '仓库参数和 --cwd 只能给一个');
+      return;
+    }
+    const target = rawCwd ?? repoHint;
+    if (target) {
+      const resolved = rawCwd ? this.resolveCwd(rawCwd) : this.resolveRepoTarget(target);
       if (typeof resolved !== 'string') {
         await this.sender.reply(msg.messageId, resolved.error);
         return;
       }
       mode = 'project';
       cwd = resolved;
+      this.registerRepoUse(cwd);
     } else {
       fs.mkdirSync(cwd, { recursive: true });
+      // sandbox 空目录 git init：真机暴露过「not a git repository」会被 agent 当环境异常信号
+      // （worktree 类工具也直接报错）。git 缺失不阻塞——sandbox 照常可用。
+      try {
+        execFileSync('git', ['init', '-q'], { cwd });
+      } catch (err) {
+        this.logger.warn({ err, cwd }, 'sandbox git init failed');
+      }
     }
 
     const task = this.store.createTask({
@@ -224,7 +250,11 @@ export class CommandHandler {
       model: flags.model ?? null,
     });
 
-    const rootMsgId = await this.sender.sendCard(msg.chatId, buildTaskRootCard(task));
+    const repoAlias = mode === 'project' ? this.store.getRepoByPath(cwd)?.alias : undefined;
+    const rootMsgId = await this.sender.sendCard(
+      msg.chatId,
+      buildTaskRootCard(task, repoAlias ?? undefined),
+    );
     if (!rootMsgId) {
       this.store.deleteTask(task.id);
       await this.sender.reply(msg.messageId, '任务主帖发送失败，已回滚');
@@ -245,7 +275,10 @@ export class CommandHandler {
     const lines = tasks.map((t) => {
       const age = humanDuration(Date.now() - t.last_active_at);
       const mark = t.id === current ? '★' : '•';
-      return `${mark} ${t.display_name}  [${t.agent_kind}/${t.status}] (${t.mode})  ${age}前活跃\n    ${t.cwd}`;
+      // 有别名的仓显示别名（路径缩 ~ 收进括号），手机上一眼认出任务落在哪个项目。
+      const alias = this.store.getRepoByPath(t.cwd)?.alias;
+      const loc = alias ? `${alias} (${shortenHome(t.cwd)})` : shortenHome(t.cwd);
+      return `${mark} ${t.display_name}  [${t.agent_kind}/${t.status}] (${t.mode})  ${age}前活跃\n    ${loc}`;
     });
     await this.sender.reply(
       msg.messageId,
@@ -502,6 +535,127 @@ export class CommandHandler {
     }
   }
 
+  // /repo：仓库登记表的用户面。list 给手机上可抄的别名清单；alias 起短名（唯一），之后
+  // `/new <name> <别名>` 秒开项目任务。不设 admin 门——白名单即信任边界（与 /rm 同一先例）。
+  private async handleRepo(msg: IncomingMessage, rest: string[]): Promise<void> {
+    const sub = rest[0];
+    if (!sub || sub === 'list') {
+      const rows = this.store.listRepoRegistry(50);
+      if (rows.length === 0) {
+        await this.sender.reply(
+          msg.messageId,
+          '登记表为空。/repo alias <别名> <路径> 手动登记，或开过项目任务后自动登记。',
+        );
+        return;
+      }
+      const lines = rows.map((r) => {
+        const age = humanDuration(Date.now() - r.last_used_at);
+        const aliasCol = r.alias ? `[${r.alias}]` : '·';
+        return `${aliasCol} ${r.name}  ${shortenHome(r.path)}  (${age}前)`;
+      });
+      await this.sender.reply(
+        msg.messageId,
+        `已登记仓库 ${rows.length} 个（[别名] 可直接 /new <name> <别名> 开任务）:\n${lines.join('\n')}`,
+      );
+      return;
+    }
+    if (sub === 'alias') {
+      await this.handleRepoAlias(msg, rest[1], rest.slice(2).join(' ').trim());
+      return;
+    }
+    // 简写糖：/repo <别名> <线索|路径>（省掉 alias 关键词——真机上用户的第一反应写法）。两个及
+    // 以上参数才当简写；单个未知词仍回用法（避免手滑单词被误当起名）。将来加新子命令时注意
+    // 保留字判断在此糖之前。
+    if (rest.length >= 2) {
+      await this.handleRepoAlias(msg, sub, rest.slice(1).join(' ').trim());
+      return;
+    }
+    await this.sender.reply(
+      msg.messageId,
+      '用法: /repo [list] | /repo <别名> <线索|路径> | /repo <别名> -（alias 关键词可省）',
+    );
+  }
+
+  // 起/删别名（/repo alias … 与 /repo <别名> … 简写共用）。别名比任务名多放开一个点号
+  // （pos2.0 这类版本味短名），任务名规则不动（SLUG_RE）。
+  private async handleRepoAlias(
+    msg: IncomingMessage,
+    alias: string | undefined,
+    target: string,
+  ): Promise<void> {
+    if (!alias || !target) {
+      await this.sender.reply(
+        msg.messageId,
+        '用法: /repo <别名> <线索|路径>；删除: /repo <别名> -',
+      );
+      return;
+    }
+    if (!ALIAS_RE.test(alias)) {
+      await this.sender.reply(msg.messageId, '别名只能用字母/数字/点/下划线/连字符，长度 ≤ 41');
+      return;
+    }
+    const normalized = alias.toLowerCase();
+    if (target === '-') {
+      const ok = this.store.clearRepoAlias(normalized);
+      await this.sender.reply(
+        msg.messageId,
+        ok ? `已删除别名 ${normalized}` : `别名不存在: ${normalized}`,
+      );
+      return;
+    }
+    const resolved = this.resolveRepoTarget(target);
+    if (typeof resolved !== 'string') {
+      await this.sender.reply(msg.messageId, resolved.error);
+      return;
+    }
+    const existing = this.store.getRepoByAlias(normalized);
+    if (existing && existing.path !== resolved) {
+      await this.sender.reply(
+        msg.messageId,
+        `别名 ${normalized} 已指向 ${shortenHome(existing.path)}，先 /repo ${normalized} - 解绑`,
+      );
+      return;
+    }
+    this.store.setRepoAlias(resolved, normalized, Date.now());
+    await this.sender.reply(
+      msg.messageId,
+      `别名已设置: ${normalized} → ${shortenHome(resolved)}\n开任务: /new <name> ${normalized}`,
+    );
+  }
+
+  // 仓库寻址三合一：路径样式（/ 或 ~ 开头）直接走 resolveCwd；否则别名精确命中 → 登记表包含匹配
+  // （唯一开、多命中列清单让人换别名或更准线索）→ 都不中再退回 resolveCwd 的一级目录扫描（未登记
+  // 的顶层目录仍可用）。登记行可能指向已删目录——命中后仍过 resolveCwd 的前缀+存在性校验，别名
+  // 只是寻址、不绕安全门。
+  private resolveRepoTarget(raw: string): string | { error: string } {
+    if (raw.startsWith('/') || raw.startsWith('~')) return this.resolveCwd(raw);
+    const byAlias = this.store.getRepoByAlias(raw);
+    if (byAlias) return this.resolveCwd(byAlias.path);
+    const hits = this.store.matchRepoRegistry(raw);
+    if (hits.length === 1) return this.resolveCwd(hits[0]!.path);
+    if (hits.length > 1) {
+      const list = hits
+        .slice(0, 8)
+        .map((r) => `  ${r.alias ? `[${r.alias}]` : '·'} ${r.name}  ${shortenHome(r.path)}`)
+        .join('\n');
+      return {
+        error: `登记表里匹配到多个，用别名或更准的线索:\n${list}\n（起别名: /repo alias <别名> <线索>）`,
+      };
+    }
+    return this.resolveCwd(raw);
+  }
+
+  // 项目模式开任务 = 一次真实使用：已登记 → 只刷 last_used_at（不动 name/source/alias）；未登记
+  // 且是 git 仓 → 顺手登记（source='task'）。非 git 目录不进登记表——登记表是代码仓知识（INTAKE
+  // 免勘探快路径），别拿文档目录污染它。
+  private registerRepoUse(cwd: string): void {
+    const now = Date.now();
+    if (this.store.touchRepoRegistry(cwd, now)) return;
+    if (fs.existsSync(path.join(cwd, '.git'))) {
+      this.store.upsertRepoRegistry(cwd, path.basename(cwd), now, 'task');
+    }
+  }
+
   private resolveCwd(raw: string): string | { error: string } {
     const home = process.env.HOME ?? '';
     const expanded = raw.startsWith('~') ? path.join(home, raw.slice(1)) : raw;
@@ -670,7 +824,10 @@ export class CommandHandler {
     }
     const task = this.resolveTaskForChat(msg.chatId);
     if (!task) {
-      await this.sender.reply(msg.messageId, '本会话没有任务，用 /new <name> 新建一个。');
+      await this.sender.reply(
+        msg.messageId,
+        '本会话还没绑定任务。/use <name> 绑定已有任务，或 /new <name> 新建。',
+      );
       return;
     }
     const home = process.env.HOME ?? '';

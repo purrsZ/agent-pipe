@@ -67,6 +67,7 @@ import {
   delegationGuardFor,
   integrationCheckOutcome,
   registerRequirement,
+  shouldPurgeCancelledUnit,
 } from './worktypes/requirement/index.js';
 import { advisorRunInFlight, INCIDENT_REASONS } from './worktypes/requirement/advisor.js';
 import { createIntegrationCheckHandler } from './worktypes/requirement/integration.js';
@@ -245,6 +246,13 @@ export function scoutRootsFrom(registryPaths: string[], envValue: string | undef
 export function renderRegistrySnapshot(rows: Array<{ name: string; path: string }>): string {
   if (rows.length === 0) return '';
   return rows.map((r) => `- ${r.name} → ${r.path}`).join('\n');
+}
+
+// 别名织入 AI 可见的登记快照：有别名的仓显示「name（别名:xxx）」，用户在需求里说别名也能命中。
+// 注意与 snapshotMatchCount 的对齐窗口保持同一视野（那边同样算别名），否则回到「AI 没见到 →
+// 塞 repoHints → matchRepo 又单命中 → 静默卡缺失」的老坑。
+export function registryDisplayName(r: { name: string; alias?: string | null }): string {
+  return r.alias ? `${r.name}（别名:${r.alias}）` : r.name;
 }
 
 // INTAKE L1 防抖（D-7）：数事件流里 stage=scout 的 run 结论数（run_completed/run_failed 平铺 stage）。桥层
@@ -1681,7 +1689,11 @@ async function main() {
     const snapshot = store.listRepoRegistry(20);
     const snapshotMatchCount = (hint: string): number => {
       const needle = hint.trim().toLowerCase();
-      return needle.length === 0 ? 0 : snapshot.filter((r) => r.name.includes(needle)).length;
+      // 别名同权参与（AI 看到的快照带别名，这里视野必须一致）。
+      return needle.length === 0
+        ? 0
+        : snapshot.filter((r) => r.name.includes(needle) || (r.alias ?? '').includes(needle))
+            .length;
     };
     if (!repoHints.every((h) => snapshotMatchCount(h) !== 1)) return false; // 快照内单命中 → 交回抽取
     if (scoutConclusionCount(events) >= 2) return false; // 防抖：每单自动派 ≤ 2 次
@@ -1707,7 +1719,9 @@ async function main() {
     );
     const missing = requiredMissing(state).map((d) => d.label);
     // INTAKE L0.3：织入已知仓库登记表快照（最近使用前 20）——命中仓名 AI 直接输出绝对路径（免勘探快路径）。
-    const registry = store.listRepoRegistry(20).map((r) => ({ name: r.name, path: r.path }));
+    const registry = store
+      .listRepoRegistry(20)
+      .map((r) => ({ name: registryDisplayName(r), path: r.path }));
     const prompt = composeIntakeExtractPrompt(text, filled, missing, registry);
     const taskId = `managed:intake-extract:${itemId}`;
     const task = store.upsertTask({
@@ -2285,7 +2299,13 @@ async function main() {
       }
     }
     if (!task) {
-      await sender.reply(msg.messageId, '本会话没有任务，用 /new <name> 新建一个。');
+      // 新群里已有任务却只教 /new 是误导（真机踩过）：有任务先教 /use 绑定，没任务才教 /new。
+      const existing = store.listTasks();
+      const hint =
+        existing.length > 0
+          ? `本会话还没绑定任务。/use <name> 绑一个已有任务（如 /use ${existing[0]!.id}），/list 看全部，或 /new <name> 新建。`
+          : '本会话没有任务，用 /new <name> 新建一个。';
+      await sender.reply(msg.messageId, hint);
       return;
     }
 
@@ -2650,6 +2670,35 @@ export function createWorkitemsRuntime(deps: {
           );
           return;
         }
+        // /cancel 终局（2026-07-08 用户拍板）：取消的需求直接删库。在途 run 已在终态事务里被击杀
+        // （finalizeTerminalState：effect 翻 aborted + signal SIGINT 子进程 + 流式卡收「中断」），这里做
+        // 对外收尾：锚点刷成 cancelled + 群内明话 + 释放话题认领（后续群消息回落 bridge，不再进死单）
+        // + 级联删单。放在 intake 早退之前——立项期 /cancel 同样走这条终局。删除后迟到的收尾事件由
+        // reducer 的 workitem-missing warn-drop 兜住。
+        if (shouldPurgeCancelledUnit(item)) {
+          const cancelAnchor = deps.kernelStore.getThreadAnchorByOwner(workitemId);
+          const cancelRoot = deps.kernelStore.getThreadRootByOwner(workitemId);
+          if (cancelAnchor) {
+            await deps.sender.updateCard(
+              cancelAnchor,
+              buildAnchorCard({
+                id: item.id,
+                title: item.title,
+                stage: item.phase,
+                status: item.status,
+                noun: anchorNoun(item.type),
+              }),
+            );
+            await deps.sender.reply(
+              cancelAnchor,
+              '⏹ 需求已终止：在途运行已全部中止、产出作废；该需求记录已从系统删除，本群卡片不再更新。需要重做请用 /req 重新发起。',
+            );
+          }
+          if (cancelRoot) deps.kernelStore.releaseThreadClaim(cancelRoot);
+          workitems.store.deleteWorkItem(workitemId);
+          deps.logger.info({ workitemId, title: item.title }, 'cancelled requirement purged');
+          return;
+        }
         // 立项阶段：清单卡由 bridge 收料路径就地刷新（含立项 gate 按钮），观察者不插手，否则会用锚点卡
         // 覆盖清单卡。立项 gate 通过 → 进理解（非立项）→ 下面常规锚点刷新接管（卡 morph 成锚点卡）。
         if (isIntakePhase(item.phase)) return;
@@ -2786,7 +2835,9 @@ export function createWorkitemsRuntime(deps: {
       ),
     scoutRegistrySnapshot: () =>
       renderRegistrySnapshot(
-        deps.kernelStore.listRepoRegistry(20).map((r) => ({ name: r.name, path: r.path })),
+        deps.kernelStore
+          .listRepoRegistry(20)
+          .map((r) => ({ name: registryDisplayName(r), path: r.path })),
       ),
   });
   workitems.effects.registerHandler(

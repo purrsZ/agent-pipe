@@ -19,11 +19,19 @@ export function formatClock(ms: number): string {
   return h > 0 ? `${h}:${p(m)}:${p(s)}` : `${m}:${p(s)}`;
 }
 
-export function buildTaskRootCard(task: Task): object {
+/** 手机上全路径又长又没信息量——home 前缀一律缩成 ~（非 home 下路径原样）。 */
+export function shortenHome(p: string): string {
+  const home = process.env.HOME;
+  if (!home) return p;
+  if (p === home) return '~';
+  return p.startsWith(`${home}/`) ? `~${p.slice(home.length)}` : p;
+}
+
+export function buildTaskRootCard(task: Task, repoAlias?: string): object {
   const lines = [
     `**agent**: ${task.agent_kind}`,
     `**模式**: ${task.mode}`,
-    `**cwd**: \`${task.cwd}\``,
+    `**cwd**: \`${shortenHome(task.cwd)}\`${repoAlias ? `（别名 ${repoAlias}）` : ''}`,
     `**model**: ${task.model ?? '(default)'}`,
     '',
     '_在此消息下回复即向该任务发送消息。_',
