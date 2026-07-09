@@ -96,7 +96,13 @@ export class ProgressCards {
       const cardId = await this.postInitial(loc, initial);
       if (cardId) {
         entry.cardId = cardId;
-        entry.streaming = new StreamingCard(this.deps.sender, cardId, entry.title, AGENT_KIND);
+        entry.streaming = new StreamingCard(
+          this.deps.sender,
+          cardId,
+          entry.title,
+          AGENT_KIND,
+          this.deps.logger,
+        );
       } else {
         this.deps.logger?.warn?.(
           { workitemId },

@@ -1196,7 +1196,7 @@ async function main() {
       }
 
       const streaming = ackCardId
-        ? new StreamingCard(sender, ackCardId, task.display_name, task.agent_kind)
+        ? new StreamingCard(sender, ackCardId, task.display_name, task.agent_kind, logger)
         : null;
       let pendingQuestion: AskUserQuestion | null = null;
       const callbacks: ProgressCallbacks = {

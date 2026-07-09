@@ -15,6 +15,42 @@ function makeSender(result: boolean | Error = true) {
   return { sender: { updateCard } as unknown as Sender, updateCard, calls };
 }
 
+interface Deferred {
+  promise: Promise<boolean>;
+  resolve: (v: boolean) => void;
+  reject: (e: unknown) => void;
+}
+
+// 冻卡修复系列用：每次 updateCard 返回一个可手控 deferred（不 resolve = 挂起，用于逼超时；
+// resolve(true) = 成功，用于验证熔断解除/僵尸帧交接）。
+function makeDeferredSender() {
+  const deferreds: Deferred[] = [];
+  const updateCard = vi.fn((_id: string, _card: object) => {
+    let resolve!: (v: boolean) => void;
+    let reject!: (e: unknown) => void;
+    const promise = new Promise<boolean>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    deferreds.push({ promise, resolve, reject });
+    return promise;
+  });
+  return { sender: { updateCard } as unknown as Sender, updateCard, deferreds };
+}
+
+// PATCH_TIMEOUT_MS / FAIL_PAUSE_AFTER / FAIL_PAUSE_MS in stream-card.ts（不导出，测试里写死镜像）。
+const PATCH_TIMEOUT = 3_000;
+const FAIL_PAUSE = 30_000;
+
+// 连续挂起帧逼到熔断（≥3 次超时 → pausedUntil 置位）。每轮 onText 触发一帧，推进 PATCH_TIMEOUT
+// 逼其超时；跑 4 轮稳妥越过 FAIL_PAUSE_AFTER=3。用于「熔断/探针/恢复」诸用例的前置。
+async function driveToPaused(card: StreamingCard): Promise<void> {
+  for (let i = 0; i < 4; i++) {
+    card.onText(`fail-${i}`);
+    await vi.advanceTimersByTimeAsync(PATCH_TIMEOUT);
+  }
+}
+
 function previewOf(card: object): string {
   return JSON.stringify(card);
 }
@@ -169,5 +205,95 @@ describe('StreamingCard 停更标注（VERIFY V3 #1）', () => {
     await vi.advanceTimersByTimeAsync(200_000);
     expect(lastCard(calls)).toContain('无新输出');
     await card.stop();
+  });
+});
+
+// 冻卡修复（单帧超时 + 熔断 + 僵尸帧交接 + onToolUse 立即帧）：对齐 ai-sentinel 被裁掉的防护。
+describe('StreamingCard 防冻结（单帧超时 + 熔断）', () => {
+  it('挂起的 PATCH 不再冻卡：超时放弃后队列继续吃新帧', async () => {
+    const { sender, updateCard } = makeDeferredSender();
+    const card = new StreamingCard(sender, 'om_1', 'task', 'claude');
+    card.onText('v1'); // 首帧发出（deferred 永不 resolve = 模拟挂起）
+    await vi.advanceTimersByTimeAsync(0);
+    expect(updateCard).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(PATCH_TIMEOUT); // 3s 单帧超时 → 放弃该帧，释放队列
+    card.onText('v2'); // 新内容
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(updateCard).toHaveBeenCalledTimes(2); // 队列没被挂起帧堵死
+    // 不 stop（挂起帧永不 settle，stop 会等僵尸帧——本用例只验队列不堵）。
+  });
+
+  it('连续超时计失败 → 熔断期心跳静默（推进一拍 tick 不再发帧）', async () => {
+    const { sender, updateCard } = makeDeferredSender();
+    const card = new StreamingCard(sender, 'om_1', 'task', 'claude');
+    await driveToPaused(card); // 连续超时逼入熔断
+    const before = updateCard.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(5_000); // 一个心跳 tick——熔断期应静默
+    expect(updateCard.mock.calls.length).toBe(before);
+  });
+
+  it('onToolUse 无视熔断（探针帧照发）', async () => {
+    const { sender, updateCard } = makeDeferredSender();
+    const card = new StreamingCard(sender, 'om_1', 'task', 'claude');
+    await driveToPaused(card);
+    const before = updateCard.mock.calls.length;
+    card.onToolUse('Bash'); // 熔断期内工具帧——探针，无视暂停
+    await vi.advanceTimersByTimeAsync(0);
+    expect(updateCard.mock.calls.length).toBe(before + 1);
+  });
+
+  it('探针帧成功 → 解除熔断，之后普通帧恢复正常发送', async () => {
+    const { sender, updateCard, deferreds } = makeDeferredSender();
+    const card = new StreamingCard(sender, 'om_1', 'task', 'claude');
+    await driveToPaused(card);
+    card.onToolUse('Probe'); // 探针帧
+    await vi.advanceTimersByTimeAsync(0);
+    deferreds[deferreds.length - 1]!.resolve(true); // 探针成功 → consecutiveFailures=0, pausedUntil=0
+    await vi.advanceTimersByTimeAsync(0);
+    const before = updateCard.mock.calls.length;
+    card.onText('恢复输出'); // 熔断已解除，普通帧应正常发
+    await vi.advanceTimersByTimeAsync(INTERVAL);
+    expect(updateCard.mock.calls.length).toBeGreaterThan(before);
+  });
+
+  it('熔断到期自动恢复（推进 30s+一拍 → 心跳帧再次发出）', async () => {
+    const { sender, updateCard } = makeDeferredSender();
+    const card = new StreamingCard(sender, 'om_1', 'task', 'claude');
+    await driveToPaused(card);
+    const before = updateCard.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(FAIL_PAUSE + 5_000); // 暂停到期后的第一拍重新驱动
+    expect(updateCard.mock.calls.length).toBeGreaterThan(before);
+  });
+
+  it('stop() 等僵尸帧全部 settle 才返回（终态卡永远最后落地）', async () => {
+    const { sender, deferreds } = makeDeferredSender();
+    const card = new StreamingCard(sender, 'om_1', 'task', 'claude');
+    card.onText('v1');
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(PATCH_TIMEOUT); // 首帧超时被放弃，真实请求仍 pending（僵尸帧）
+    let stopped = false;
+    const stopP = card.stop().then(() => {
+      stopped = true;
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(stopped).toBe(false); // stop 卡在等僵尸帧 settle
+    deferreds[0]!.resolve(true); // 僵尸帧终于落地
+    await vi.advanceTimersByTimeAsync(0);
+    await stopP;
+    expect(stopped).toBe(true);
+  });
+
+  it('onToolUse 是立即帧：不等 900ms 节流地板', async () => {
+    const { sender, updateCard, deferreds } = makeDeferredSender();
+    const card = new StreamingCard(sender, 'om_1', 'task', 'claude');
+    card.onText('start');
+    await vi.advanceTimersByTimeAsync(0);
+    deferreds[0]!.resolve(true); // 首帧成功
+    await vi.advanceTimersByTimeAsync(0);
+    expect(updateCard).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(100); // 距上帧仅 100ms（< 900ms 地板）
+    card.onToolUse('Bash');
+    await vi.advanceTimersByTimeAsync(0);
+    expect(updateCard).toHaveBeenCalledTimes(2); // 立即发，未等地板
   });
 });

@@ -14,6 +14,15 @@ const CLOCK_TICK_MS = 5_000;
 const STALE_AFTER_MS = 90_000; // 超过 90s 无新输出 → 进入 stale 标注
 const STALE_REPATCH_MS = 300_000; // 同一 stale 期至多每 5 分钟刷一次（防飞书 API 刷屏）
 
+// 冻卡修复：单帧 PATCH 超时（对齐 ai-sentinel update_timeout_seconds=3s）。超时 = 放弃该帧
+// ——释放单飞行队列让后续帧继续；被放弃的真实请求（僵尸帧）由 client.ts 的 SDK 全局 30s
+// 超时兜底 settle，stop() 靠这一点做交接。两处改动是配套的，不可拆开。
+const PATCH_TIMEOUT_MS = 3_000;
+// 连续失败熔断：≥3 次（含超时）→ 暂停 30s。暂停期 tick/onText 帧跳过（网络断着白费）；
+// onToolUse 帧无视暂停（低频、信息量大、兼当恢复探针——一旦成功立即清零解除暂停）。
+const FAIL_PAUSE_AFTER = 3;
+const FAIL_PAUSE_MS = 30_000;
+
 function hhmmss(ts: number): string {
   const d = new Date(ts);
   const p = (n: number): string => String(n).padStart(2, '0');
@@ -55,12 +64,20 @@ export class StreamingCard {
   private lastEventAt = Date.now();
   private staleNote: string | null = null;
   private staleNotedAt = 0;
+  // 冻卡修复：连续失败计数 + 熔断到期时刻。
+  private consecutiveFailures = 0;
+  private pausedUntil = 0;
+  // 超时放弃后仍在网络上飞着的真实请求（僵尸帧）。stop() 必须等它们全部 settle 再返回，
+  // 让调用方随后发的终态卡是最后一帧——否则迟到的进行中帧会覆盖完成卡且再无人纠正。
+  private readonly outstanding = new Set<Promise<unknown>>();
 
   constructor(
     private sender: Pick<Sender, 'updateCard'>,
     private messageId: string,
     private taskName: string,
     private agentKind: string,
+    // 可选：不传则静默（兼容既有测试/构造点渐进接线）。
+    private logger?: { warn?: (obj: object, msg: string) => void },
   ) {
     // 时钟心跳兼任 stale 巡检：每拍先按真实事件时刻判 stale，再走原有 elapsed 刷新（组件生命周期内，stop 清理）。
     this.ticker = setInterval(() => this.tick(), CLOCK_TICK_MS);
@@ -71,7 +88,7 @@ export class StreamingCard {
     this.toolCount++;
     this.currentTool = name;
     this.markEvent();
-    this.schedule();
+    this.scheduleImmediate();
   }
 
   onText(fullText: string): void {
@@ -97,6 +114,7 @@ export class StreamingCard {
       this.staleNote = renderStaleNote(silent, this.lastEventAt);
       this.staleNotedAt = Date.now();
     }
+    if (Date.now() < this.pausedUntil) return; // 熔断期：心跳帧静默跳过（不置 dirty，防空转）
     this.schedule();
   }
 
@@ -115,10 +133,17 @@ export class StreamingCard {
         /* ignore */
       }
     }
+    // 僵尸帧交接：等全部 settle（SDK 全局超时保证有限时间，最坏 ~30s），保证终态卡最后落地。
+    if (this.outstanding.size > 0) await Promise.allSettled([...this.outstanding]);
   }
 
   private schedule(): void {
     if (this.stopped) return;
+    if (Date.now() < this.pausedUntil) {
+      // 熔断期普通帧不发：置 dirty 即可，暂停到期后的第一个 tick/事件会重新驱动。
+      this.dirty = true;
+      return;
+    }
     if (this.active) {
       this.dirty = true;
       return;
@@ -138,9 +163,28 @@ export class StreamingCard {
     }
   }
 
-  private async flush(): Promise<void> {
+  // onToolUse 专用：绕过节流地板 + 无视熔断。工具帧低频且信息量大（N tools 实时性
+  // 就是靠它），失败也只计一次失败。
+  private scheduleImmediate(): void {
+    if (this.stopped) return;
+    if (this.trailing) {
+      clearTimeout(this.trailing);
+      this.trailing = null;
+    }
+    if (this.active) {
+      this.dirty = true;
+      return;
+    }
+    this.active = this.flush(true);
+  }
+
+  private async flush(force = false): Promise<void> {
     try {
       if (this.stopped) return;
+      if (!force && Date.now() < this.pausedUntil) {
+        this.dirty = true;
+        return;
+      }
       this.dirty = false;
       const card = buildStreamingCard(this.taskName, this.agentKind, {
         elapsedMs: Date.now() - this.startedAt,
@@ -152,11 +196,35 @@ export class StreamingCard {
       const sig = JSON.stringify(card);
       if (sig === this.lastSig) return;
       this.lastSentAt = Date.now();
-      try {
-        const ok = await this.sender.updateCard(this.messageId, card);
-        if (ok) this.lastSig = sig;
-      } catch {
-        /* ignore — the final result card overwrites this anyway */
+
+      // 超时 ≠ 取消：race 输了只是放弃等待，真实请求继续飞（僵尸帧），入 outstanding 供 stop() 交接。
+      const real = this.sender.updateCard(this.messageId, card);
+      this.outstanding.add(real);
+      real.finally(() => this.outstanding.delete(real)).catch(() => {});
+
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const outcome = await Promise.race([
+        real.then((ok) => (ok ? 'ok' : 'error')).catch(() => 'error' as const),
+        new Promise<'timeout'>((resolve) => {
+          timer = setTimeout(() => resolve('timeout'), PATCH_TIMEOUT_MS);
+          timer.unref?.();
+        }),
+      ]);
+      clearTimeout(timer);
+
+      if (outcome === 'ok') {
+        this.lastSig = sig;
+        this.consecutiveFailures = 0;
+        this.pausedUntil = 0;
+      } else {
+        this.consecutiveFailures += 1;
+        if (this.consecutiveFailures >= FAIL_PAUSE_AFTER) {
+          this.pausedUntil = Date.now() + FAIL_PAUSE_MS;
+        }
+        this.logger?.warn?.(
+          { messageId: this.messageId, outcome, consecutiveFailures: this.consecutiveFailures },
+          'stream card patch failed',
+        );
       }
     } finally {
       this.active = null;
